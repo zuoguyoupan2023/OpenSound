@@ -9,6 +9,9 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::menu::{Menu, MenuItem};
 use tauri::{Emitter, Manager, State};
 
+mod recorder;
+use recorder::Recorder;
+
 // ---------- 常量 ----------
 const ASR_URL: &str = "http://127.0.0.1:9528";
 const QWEN3_URL: &str = "http://127.0.0.1:8001";
@@ -19,6 +22,7 @@ const SERVER_DIR: &str = "asr-server"; // 相对项目根
 struct AppState {
     child: Mutex<Option<Child>>,
     node_path: Mutex<Option<String>>,
+    recorder: Recorder,
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -177,6 +181,22 @@ fn quit_app(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) -> Result<()
     Ok(())
 }
 
+// ---------- 录音（原生麦克风，cpal） ----------
+#[tauri::command]
+fn recorder_start(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    state.recorder.start()
+}
+
+#[tauri::command]
+fn recorder_stop(state: State<'_, Arc<AppState>>) -> Result<recorder::RecordingResult, String> {
+    state.recorder.stop()
+}
+
+#[tauri::command]
+fn recorder_is_recording(state: State<'_, Arc<AppState>>) -> bool {
+    state.recorder.is_recording()
+}
+
 // ---------- 启动时健康轮询，前端通过事件订阅 ----------
 async fn poll_health(app: tauri::AppHandle, state: Arc<AppState>) {
     loop {
@@ -281,7 +301,10 @@ pub fn run() {
             get_service_status,
             start_service_cmd,
             stop_service_cmd,
-            quit_app
+            quit_app,
+            recorder_start,
+            recorder_stop,
+            recorder_is_recording
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -289,7 +312,7 @@ pub fn run() {
             // 兜底：应用真正退出时停掉服务子进程，避免孤儿进程
             if let tauri::RunEvent::Exit = event {
                 let st = app_handle.state::<Arc<AppState>>();
-                stop_service(&st);
+                stop_service(&*st);
             }
         });
 }

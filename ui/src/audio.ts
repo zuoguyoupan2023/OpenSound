@@ -1,4 +1,5 @@
-// ---------- 录音：MediaRecorder → AudioBuffer → 16kHz 单声道 WAV ----------
+// ---------- 录音 ----------
+// 优先用 Tauri Rust 原生录音（macOS WKWebView 的 getUserMedia 不可用）；否则回退 Web API。
 // asr-server 期望 16kHz 单声道 PCM/WAV（decodeToPcm16）
 
 export interface Recorder {
@@ -8,7 +9,40 @@ export interface Recorder {
   isRecording(): boolean;
 }
 
-export async function createRecorder(): Promise<Recorder> {
+// 判断是否运行在 Tauri 环境
+function inTauri(): boolean {
+  return typeof window !== "undefined" && !!(window as unknown as Record<string, unknown>).__TAURI__;
+}
+
+// Rust 原生录音实现（通过 tauri command）
+async function createNativeRecorder(): Promise<Recorder> {
+  const { invoke } = await import("@tauri-apps/api/core");
+  return {
+    start() {
+      invoke("recorder_start").catch((e) => console.error("录音启动失败:", e));
+    },
+    async stop() {
+      const r = (await invoke("recorder_stop")) as {
+        wav_base64: string;
+        duration_sec: number;
+        sample_rate: number;
+      };
+      const bin = atob(r.wav_base64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return new Blob([bytes], { type: "audio/wav" });
+    },
+    cancel() {
+      invoke("recorder_stop").catch(() => {});
+    },
+    isRecording() {
+      return false;
+    },
+  };
+}
+
+// Web API 回退实现
+async function createWebRecorder(): Promise<Recorder> {
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: { echoCancellation: true, noiseSuppression: true },
   });
@@ -249,4 +283,17 @@ export function createFramePlayer(onFrameStart?: (index: number) => void): Frame
       }
     },
   };
+}
+
+// ---------- 统一录音入口 ----------
+// Tauri 环境优先用 Rust 原生录音（macOS WebView 无 getUserMedia），否则回退 Web API。
+export async function createRecorder(): Promise<Recorder> {
+  if (inTauri()) {
+    try {
+      return await createNativeRecorder();
+    } catch (e) {
+      console.warn("原生录音不可用，回退 Web API:", e);
+    }
+  }
+  return createWebRecorder();
 }
