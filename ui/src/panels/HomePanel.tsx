@@ -135,9 +135,18 @@ export default function HomePanel(props: PanelProps) {
       </div>
 
       <div className="engine-status">
-        <EngineBadge label="ASR" ready={(props.health?.engines?.length ?? 0) > 0} />
-        <EngineBadge label="LLM" ready={props.health?.llm?.model !== "missing"} />
-        <EngineBadge label={`朗读·${ttsEngine}`} ready={ttsReady} />
+        <EngineBadge
+          label="ASR"
+          ready={!!props.health && (props.health.engines?.length ?? 0) > 0}
+        />
+        <EngineBadge
+          label="LLM"
+          ready={!!props.health && props.health.llm?.model !== "missing"}
+        />
+        <EngineBadge
+          label={`朗读·${ttsEngine}`}
+          ready={!!props.health && ttsReady}
+        />
       </div>
 
       {error && <div className="error-box">⚠️ {error}</div>}

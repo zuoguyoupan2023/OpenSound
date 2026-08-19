@@ -668,6 +668,22 @@ textarea:focus,
   line-height: 1.6;
 }
 
+.path-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.path-row .input {
+  flex: 1;
+}
+
+.settings-msg {
+  font-size: 13px;
+  margin: 6px 0 0;
+  color: var(--ok);
+}
+
 .ports-table {
   font-size: 13px;
   color: var(--text);

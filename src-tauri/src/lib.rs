@@ -23,6 +23,7 @@ struct AppState {
     child: Mutex<Option<Child>>,
     node_path: Mutex<Option<String>>,
     recorder: Recorder,
+    server_path: Mutex<Option<String>>, // 用户配置的 asr-server 目录
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -73,9 +74,69 @@ fn find_node() -> Option<String> {
     None
 }
 
-fn server_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
-    let _ = app; // 当前通过 exe 路径定位
-    // 从可执行文件所在目录开始向上逐级查找包含 asr-server 的项目根
+// ---------- 配置读写（asr-server 路径持久化） ----------
+fn config_path(app: &tauri::AppHandle) -> Option<PathBuf> {
+    let dir = app.path().app_config_dir().ok()?;
+    Some(dir.join("config.json"))
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct PersistedConfig {
+    server_path: Option<String>,
+}
+
+fn load_config(app: &tauri::AppHandle) -> PersistedConfig {
+    if let Some(p) = config_path(app) {
+        if let Ok(s) = fs::read_to_string(p) {
+            if let Ok(c) = serde_json::from_str::<PersistedConfig>(&s) {
+                return c;
+            }
+        }
+    }
+    PersistedConfig::default()
+}
+
+fn save_config(app: &tauri::AppHandle, cfg: &PersistedConfig) -> Result<(), String> {
+    let p = config_path(app).ok_or("无法定位配置目录")?;
+    if let Some(dir) = p.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    let json = serde_json::to_string(cfg).map_err(|e| e.to_string())?;
+    fs::write(&p, json).map_err(|e| format!("写入配置失败: {e}"))
+}
+
+#[tauri::command]
+fn get_server_path(app: tauri::AppHandle) -> String {
+    load_config(&app).server_path.unwrap_or_default()
+}
+
+#[tauri::command]
+fn set_server_path(app: tauri::AppHandle, state: State<'_, Arc<AppState>>, path: String) -> Result<(), String> {
+    let mut cfg = load_config(&app);
+    let trimmed = path.trim().to_string();
+    cfg.server_path = if trimmed.is_empty() { None } else { Some(trimmed.clone()) };
+    save_config(&app, &cfg)?;
+    *state.server_path.lock().unwrap() = if trimmed.is_empty() { None } else { Some(trimmed.clone()) };
+    Ok(())
+}
+
+// ---------- 定位 asr-server 目录 ----------
+fn server_dir(app: &tauri::AppHandle, state: &Arc<AppState>) -> Option<PathBuf> {
+    // 1) 用户配置的路径优先
+    if let Some(p) = state.server_path.lock().unwrap().clone() {
+        let cand = PathBuf::from(&p);
+        if cand.join("start-all.js").is_file() {
+            return Some(cand);
+        }
+    }
+    // 2) 配置文件中读取（如果 state 还没加载）
+    if let Some(p) = load_config(app).server_path {
+        let cand = PathBuf::from(&p);
+        if cand.join("start-all.js").is_file() {
+            return Some(cand);
+        }
+    }
+    // 3) 回退：从可执行文件所在目录向上逐级查找包含 asr-server 的项目根（开发模式）
     let mut dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
     for _ in 0..8 {
         let cand = dir.join(SERVER_DIR);
@@ -94,7 +155,7 @@ fn start_service(app: &tauri::AppHandle, state: &Arc<AppState>) -> Result<(), St
     // 先停旧的
     stop_service(state);
 
-    let dir = server_dir(app).ok_or("无法定位项目根目录")?;
+    let dir = server_dir(app, state).ok_or("无法定位 asr-server 目录（请在设置中配置 asr-server 路径）")?;
     let node = {
         let mut guard = state.node_path.lock().unwrap();
         if guard.is_none() {
@@ -276,6 +337,8 @@ pub fn run() {
         .setup(move |app| {
             let handle = app.handle().clone();
             let state2 = state.clone();
+            // 加载 asr-server 路径配置到 state
+            *state.server_path.lock().unwrap() = load_config(&handle).server_path;
             // 启动服务（直接使用已捕获的 Arc，避免 setup 阶段 state 查询）
             match start_service(&handle, &state) {
                 Ok(()) => {}
@@ -304,7 +367,9 @@ pub fn run() {
             quit_app,
             recorder_start,
             recorder_stop,
-            recorder_is_recording
+            recorder_is_recording,
+            get_server_path,
+            set_server_path
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

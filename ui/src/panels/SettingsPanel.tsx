@@ -1,21 +1,36 @@
 import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import type { PanelProps } from "../App";
 import {
   getPersistedSettings,
   saveSettings,
   getBaseUrl,
 } from "../api";
-import { Panel, Button } from "../components/ui";
+import { Panel, Button, Spinner } from "../components/ui";
 
 export default function SettingsPanel(props: PanelProps) {
   const [baseUrl, setBaseUrl] = useState(getBaseUrl());
   const [token, setToken] = useState("");
   const [saved, setSaved] = useState(false);
+  const [serverPath, setServerPath] = useState("");
+  const [pathLoading, setPathLoading] = useState(true);
+  const [restarting, setRestarting] = useState(false);
+  const [pathMsg, setPathMsg] = useState("");
 
   useEffect(() => {
     const s = getPersistedSettings();
     setBaseUrl(s.baseUrl || "http://127.0.0.1:9528");
     setToken(s.token || "");
+    (async () => {
+      try {
+        const p = await invoke<string>("get_server_path");
+        setServerPath(p);
+      } catch (e) {
+        console.error("get_server_path 失败:", e);
+      } finally {
+        setPathLoading(false);
+      }
+    })();
   }, []);
 
   const save = () => {
@@ -23,6 +38,22 @@ export default function SettingsPanel(props: PanelProps) {
     setSaved(true);
     setTimeout(() => setSaved(false), 1500);
     props.refresh();
+  };
+
+  const savePath = async () => {
+    setPathMsg("");
+    setRestarting(true);
+    try {
+      await invoke("set_server_path", { path: serverPath });
+      // 重启服务使新路径生效
+      await invoke("start_service_cmd");
+      setPathMsg("✅ 已保存并重启服务");
+      setTimeout(() => props.refresh(), 500);
+    } catch (e) {
+      setPathMsg("❌ " + e);
+    } finally {
+      setRestarting(false);
+    }
   };
 
   return (
@@ -45,6 +76,26 @@ export default function SettingsPanel(props: PanelProps) {
           <p className="settings-hint">
             默认 9528（asr-server 主入口）。若开启局域网接入，改为实际地址。
           </p>
+        </div>
+
+        <div className="settings-item">
+          <label className="settings-label">asr-server 目录</label>
+          <div className="path-row">
+            <input
+              className="input"
+              value={serverPath}
+              onChange={(e) => setServerPath(e.target.value)}
+              placeholder="/路径/到/Tabu-Voice/asr-server"
+              disabled={pathLoading}
+            />
+            <Button onClick={savePath} disabled={restarting || pathLoading}>
+              {restarting ? <Spinner /> : "保存并重启服务"}
+            </Button>
+          </div>
+          <p className="settings-hint">
+            指向本机 asr-server 目录（含 start-all.js）。模型本地已有则直接复用，缺的首次按需下载。
+          </p>
+          {pathMsg && <p className="settings-msg">{pathMsg}</p>}
         </div>
 
         <div className="settings-item">
