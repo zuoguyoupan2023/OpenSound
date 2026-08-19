@@ -150,11 +150,45 @@ Tabu-Voice App（Tauri 壳 → 常驻 asr-server 子进程）
 |---|---|---|
 | M0 | 现有 asr-server 服务化（`npm run all` 可用、qwen3 镜像修复、ASR_ENGINE 选择、SPEC 雏形） | ✅ 已完成 |
 | M1 | **Tauri 壳**：拉起 asr-server、托盘、点开即用；macOS 本机验证 | ⏳ 本次启动 |
-| M2 | **GUI**：语音工作台 + 识别/朗读/对话/模型管理面板 + 设置（端口/Token/自启） | 下一步 |
-| M3 | **SPEC.md 定稿**：对外开放规范（鉴权/帧流/能力上报/接入示例） | 随 M1/M2 |
+| M2 | **GUI**：语音工作台 + 识别/朗读/对话/模型管理面板 + 设置（端口/Token/自启） | ✅ 已完成 |
+| M2.5 | **录音链路修复**：macOS WebView 无 getUserMedia → Rust 原生录音（cpal）+ CORS | ✅ 已完成（见 §六） |
+| M3 | **SPEC.md 定稿**：对外开放规范（鉴权/帧流/能力上报/接入示例） | ✅ 已完成 |
 | M4 | **GitHub Actions CI**：macOS/Windows/Linux 三平台 `tauri build` 产物 | 并行 |
 | M5 | **Realtime 实时语音 + 语音克隆 TTS**：WS/RT 通道 + 克隆音色 GUI | 远期 |
 | M6 | **本地 LLM 增强 + 独立完整闭环打磨** | 远期 |
+
+---
+
+## 六、M2.5 任务记录：录音链路（macOS WebView 无 getUserMedia → Rust 原生录音）
+
+> 状态：✅ **已完成（2026-08）**。记录问题、根因、方案与落地代码位置，供后续参考。
+
+### 问题
+语音工作台 / 识别面板点「录音」报错：`TypeError: navigator.mediaDevices.getUserMedia is undefined`。识别/朗读再报 `TypeError: Load failed`。
+
+### 根因（两个独立问题）
+1. **macOS WKWebView 默认无 `navigator.mediaDevices.getUserMedia`**：Tauri 的 WebView 不暴露该 API → 前端 Web API 录音不可用。
+2. **CORS 拦截**：Tauri WebView 前端 `fetch http://127.0.0.1:9528` 属跨域，asr-server 无 `Access-Control-Allow-Origin` 头 → 被同源策略拦截 → `Load failed`。
+
+> 注：母项目 `crazycodecat2` 里的 Insta360 麦克风「静音」问题（浏览器 getUserMedia 音频处理压静音）是**另一回事**，与本问题不同。
+
+### 方案：Rust 原生录音（cpal）+ asr-server 加 CORS
+
+### 落地代码位置
+| 模块 | 文件 | 内容 |
+|---|---|---|
+| Rust 录音核心 | `src-tauri/src/recorder.rs` | cpal 采集 → 重采样 16kHz 单声道 WAV → base64 |
+| Rust 命令 | `src-tauri/src/lib.rs` | `recorder_start` / `recorder_stop` / `recorder_is_recording` |
+| 麦克风权限 | `src-tauri/Info.plist` | 声明 `NSMicrophoneUsageDescription` |
+| 前端接入 | `ui/src/audio.ts` | `createRecorder()`：Tauri 环境走原生、Web API 回退；`inTauri()` 用 userAgent 检测 |
+| 面板调用 | `ui/src/panels/HomePanel.tsx` `AsrPanel.tsx` `ChatPanel.tsx` | 语音工作台 / 识别 / 对话 |
+| CORS | `asr-server/asr-server.js` | 统一加 `Access-Control-Allow-Origin: *` + 处理 OPTIONS 预检 |
+
+### 技术要点
+- `cpal::Stream` 在 macOS 上不是 `Send`（含 `*mut ()`）→ `RecorderInner` 手动 `unsafe impl Send`（所有访问在同一 Mutex 锁内，跨线程 drop 在 macOS CoreAudio 下可行）。
+- 录音输出：16kHz 单声道 16-bit WAV（与 asr-server `decodeToPcm16` 期望一致）。
+- 实测：cpal 录 2s（48000Hz 立体声 F32）→ 重采样 16kHz WAV，WAV 头校验通过。
+- asr-server 绑定 `127.0.0.1` 仅本机，开放 CORS 无外部网络风险，且符合「开放端口后端」规划。
 
 ---
 

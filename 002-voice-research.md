@@ -109,24 +109,48 @@ Tabu-Local App（Tauri 壳 → asr-server 子进程）
 
 ## 四、对话（LLM）
 
-> Tabu-Local 不只做语音，还内置本地 LLM 对话（`/chat` / `/voice-chat`）。用户问到的 **"M 芯片的 omlx 格式"实际是 MLX**；Windows **没有"专属格式"，GGUF 是跨平台通用事实标准**。本节讲清楚：MLX 是什么、各平台用什么格式、有哪些消费级可用的开源 LLM、Mac/Win 怎么部署。
+> Tabu-Local 不只做语音，还内置本地 LLM 对话（`/chat` / `/voice-chat`）。本节讲清楚三件事：
+> 1. **omlx** 是什么（用户问到的 Mac 方案，一个 LLM **推理服务器**，不是格式）；
+> 2. **MLX vs GGUF**（Apple 框架/格式 vs 跨平台通用格式）；**Windows 没有"专属格式"，GGUF 是跨平台事实标准**；
+> 3. 有哪些消费级可用的开源 LLM、Mac/Win 怎么部署。
 
-### 4.1 格式：MLX vs GGUF（关键）
+### 4.1 oMLX（Apple Silicon LLM 推理服务器）
+
+> 用户问的 `omlx.ai` / `github.com/jundot/omlx` —— 注意它**不是模型格式**，而是**一个基于 MLX 的本地 LLM 推理服务器**（桌面 App / 后台服务）。
+
+| 项 | 说明 |
+|---|---|
+| 是什么 | **LLM 推理服务器**（App + 后台服务），基于 Apple **MLX** 框架，专为 Apple Silicon 优化 |
+| 核心创新 | **Paged SSD KV Cache**（热层 RAM + 冷层 SSD 双层 KV 缓存）+ continuous batching |
+| 解决什么 | **长上下文 / coding agent 场景**：prefill 每次重算全部上下文 → oMLX 把 KV cache 分块，前缀命中时从 SSD 恢复跳过 prefill，**TTFT 从 ~90s 压到 1–3s** |
+| 支持模型 | LLM / VLM / OCR / embedding / reranker；GLM、Qwen、MiniMax 等（自定义 kernel 更快）|
+| API | **OpenAI 兼容** `http://localhost:8000/v1` → **任何 OpenAI 兼容客户端可连** |
+| 形态 | macOS App（菜单栏常驻）、Homebrew、源码；`omlx serve` 后台服务 |
+| 平台 | **仅 macOS 15+，Apple Silicon（M1–M4）** |
+| 授权 | Apache 2.0 |
+| 与 MLX 关系 | oMLX **构建在 MLX 之上**（MLX 是底层框架，oMLX 是面向用户的推理服务器产品）|
+
+**接入 Tabu-Local 的可行性**：
+- oMLX 暴露 **OpenAI 兼容 `/v1`** → Tabu-Local 的 `/chat` 可像转发 Ollama(11434) 一样**转发 oMLX(8000)**，作为 **Mac 上的高质量 LLM 后端**。
+- 优势：长上下文/工具调用场景（语音助手的连续对话、上下文累积）比 llama.cpp 默认更优。
+- 注意：**仅 Mac**；Windows 无对应物（Windows 用 GGUF + CUDA/DirectML，见 4.2）。
+
+### 4.2 格式：MLX vs GGUF（关键）
 
 | 格式 | 全称 | 平台 | 说明 |
 |---|---|---|---|
 | **GGUF** | llama.cpp 通用格式 | **跨平台**（Mac/Win/Linux）| 事实标准；`.gguf` 单文件；支持 Q4/Q5/Q8 等量化；**Windows 就是用它** |
-| **MLX** | Apple 机器学习框架格式 | **仅 Apple Silicon（M 芯片）** | Apple 官方框架；`.safetensors` 权重；针对统一内存 + Metal 优化，**Apple 硬件上通常比 GGUF 更快** |
+| **MLX** | Apple 机器学习框架格式 | **仅 Apple Silicon（M 芯片）** | Apple 官方框架；`.safetensors` 权重；针对统一内存 + Metal 优化，**Apple 硬件上通常比 GGUF 快**；**oMLX 用它做 KV 缓存持久化** |
 | **safetensors / fp16** | 原始权重 | 通用（需转换）| 未经量化，体积大 |
 | **ONNX** | 通用推理格式 | 通用 | 主要给语音模型（sherpa-onnx）用 |
 
 **关键结论**：
-- **MLX 不是"另一种模型"，而是 Apple 上的运行时+格式**——它直接跑在 M 芯片的 GPU/Metal 上，利用统一内存，推理速度常比 llama.cpp(GGUF) 快。
-- **Windows 没有"专属格式"**——它用 **GGUF**（llama.cpp），配合 CUDA（NVIDIA）/ DirectML（AMD/Intel）。
-- **同一模型的 GGUF 可在 Mac 和 Win 都跑**（跨平台）；MLX 只能在 Mac 跑（但有速度优势）。
-- **接入 Tabu-Local**：Mac 可加 MLX 引擎（`/chat?engine=mlx`）作速度优先；Win / 跨平台用现有 GGUF(llama.cpp) 引擎。用户选引擎即可，无需关心底层。
+- **oMLX 是"服务器"，MLX 是"框架+格式"，GGUF 是"跨平台格式"**——三者不同层。用户在 Mac 上可用 **oMLX（基于 MLX）** 或 **llama.cpp（GGUF）**。
+- **Windows 没有"专属格式/服务器"**——它用 **GGUF**（llama.cpp），配合 CUDA（NVIDIA）/ DirectML（AMD/Intel）。Windows 上没有 oMLX 对应物。
+- **同一模型的 GGUF 可在 Mac 和 Win 都跑**（跨平台）；MLX/oMLX 只能在 Mac 跑（但有速度优势）。
+- **接入 Tabu-Local**：Mac 可转发 **oMLX(OpenAI 兼容 /v1)** 或加 **MLX 引擎**作速度优先；Win / 跨平台用现有 GGUF(llama.cpp) 引擎。用户选引擎即可，无需关心底层。
 
-### 4.2 消费级可用的开源本地 LLM（按内存档位）
+### 4.3 消费级可用的开源本地 LLM（按内存档位）
 
 > 参考 2026 主流选型（按 8/16/32GB 内存档）：
 
@@ -143,21 +167,22 @@ Tabu-Local App（Tauri 壳 → asr-server 子进程）
 
 > **默认档位建议**（Tabu-Local 当前默认 qwen2.5-0.5b，偏小用于验证）：16GB 可跑 Qwen3-4B 或 Llama-3.2-3B；32GB 可跑 Qwen3-8B 或 Gemma-3-12B。
 
-### 4.3 Mac / Win 部署方式
+### 4.4 Mac / Win 部署方式
 
-| 平台 | 引擎/运行时 | 格式 | 说明 |
+| 平台 | 引擎/运行时 | 格式/端口 | 说明 |
 |---|---|---|---|
 | **macOS（M 芯片）** | llama.cpp | GGUF | 现状（Tabu-Local 内嵌 node-llama-cpp）；Metal 加速 |
+| **macOS（M 芯片，长上下文/agent）** | **oMLX** | safetensors；`:8000/v1` | 🔶 可接入：SSD KV 缓存，长上下文 TTFT 快；OpenAI 兼容转发 |
 | **macOS（M 芯片，速度优先）** | **MLX** | safetensors/mlx | 🔶 可接入：Apple 硬件上更快，作可选用引擎 |
 | **Windows（NVIDIA）** | llama.cpp + CUDA | GGUF | 推荐：GPU 加速 |
 | **Windows（AMD/Intel/集显）** | llama.cpp + DirectML / CPU | GGUF | CPU int8 兜底 |
-| **任意（跨平台）** | Ollama | 任意 | 后备：HTTP 转发 11434，用户自装 Ollama 管理模型 |
+| **任意（跨平台）** | Ollama | 任意；11434 | 后备：HTTP 转发 11434，用户自装 Ollama 管理模型 |
 | **跨平台统一** | llama.cpp + GGUF | GGUF | **当前方案**，一套模型 Mac/Win 通用 |
 
 **接入状态**：
 - ✅ **已接入**：llama.cpp（GGUF，跨平台默认）+ Ollama（后备）
-- 🔶 **可接入**：MLX（Mac 速度优先）、按内存档位提供多个 GGUF 下载（Qwen3-4B / Llama-3.2-3B 等）
-- **用户启用**：GUI「模型管理」按平台列出可下载 GGUF/MLX → 下载 → `/chat` 选引擎。
+- 🔶 **可接入**：**oMLX**（Mac 长上下文）、MLX（Mac 速度优先）、按内存档位提供多个 GGUF 下载（Qwen3-4B / Llama-3.2-3B 等）
+- **用户启用**：GUI「模型管理」按平台列出可下载模型 → 下载 → `/chat` 选引擎（Mac 可选手动/自动拉起 oMLX）。
 
 ---
 
@@ -176,7 +201,7 @@ Tabu-Local App（Tauri 壳 → asr-server 子进程）
 
 | 平台 | 加速 | 最优 ASR | 最优 TTS | 最优 LLM | 备注 |
 |---|---|---|---|---|---|
-| **macOS（M 系列）** | Metal/CoreML/MPS/ANE | whisper.cpp+Metal；sherpa-onnx Paraformer | Qwen3(MPS)；MOSS-Nano(CPU) | **MLX**（safetensors）或 llama.cpp GGUF(Metal) | 统一内存，medium Whisper/0.6B TTS/4B LLM 直接跑 |
+| **macOS（M 系列）** | Metal/CoreML/MPS/ANE | whisper.cpp+Metal；sherpa-onnx Paraformer | Qwen3(MPS)；MOSS-Nano(CPU) | **oMLX**(SSD KV) / **MLX** 或 llama.cpp GGUF(Metal) | 统一内存，medium Whisper/0.6B TTS/4B LLM 直接跑 |
 | **Windows（NVIDIA）** | CUDA | Faster-Whisper int8；sherpa-onnx CUDA | Qwen3(CUDA)；IndexTTS2 | llama.cpp GGUF + CUDA | VRAM 硬上限；int8 压显存 |
 | **Windows（AMD/Intel/集显）** | DirectML/CPU int8 | sherpa-onnx DirectML | Kokoro/MOSS(CPU int8) | llama.cpp GGUF + DirectML/CPU | DirectML 通吃 DX12 |
 | **Linux** | CUDA/CPU | 同 Win NVIDIA | 同 | llama.cpp GGUF + CUDA | CI 用 |
@@ -215,4 +240,5 @@ Tabu-Local App（Tauri 壳 → asr-server 子进程）
 - Faster-Whisper：[SYSTRAN/faster-whisper](https://github.com/SYSTRAN/faster-whisper)
 - MLX vs GGUF：[MLX vs GGUF on Apple Silicon](https://dev.to/jacksonxly/mlx-vs-gguf-on-apple-silicon-which-local-llm-format-should-you-actually-use-53gj) · [GGUF vs MLX 2026](https://contracollective.com/blog/gguf-vs-mlx-quantization-formats-apple-silicon-2026) · [llama.cpp vs MLX](https://www.local-llm.net/compare/llama-cpp-vs-mlx/) · [Ollama MLX](https://dev.classmethod.jp/en/articles/apple-mlx-ollama-deep-dive/)
 - 消费级本地 LLM 选型：[by RAM 2026](https://www.frankx.ai/blog/best-local-llm-2026) · [VRAM 计算](https://willitrunai.com/blog/what-llm-can-i-run-locally) · [小模型桌面 App](https://unstore.io/discover/best-apps-for-tiny-local-llms-desktop/)
+- oMLX：[官网 omlx.ai](https://omlx.ai/) · [GitHub jundot/omlx](https://github.com/jundot/omlx) · [SSD KV 缓存原理（HN）](https://hn.svelte.dev/item/47247294) · [MLX 讨论](https://github.com/ml-explore/mlx/discussions/3203) · [CSDN 实战](https://openeuler.csdn.net/6a216fe910ee7a33f277a23b.html) · [知乎对比](https://zhuanlan.zhihu.com/p/2028536283694122713)
 - 母项目调研：`014`（TTS）、`016`（ASR）、`013`（性能）、`017`（浏览器 SenseVoice）、`007`（接入）、`015`（LLM 能力来源）
