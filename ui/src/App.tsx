@@ -1,7 +1,14 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { ServiceStatus } from "./types";
+import type { ServiceStatus, PanelId, HealthInfo, ModelInfo } from "./types";
+import { getHealth, getModels } from "./api";
+import HomePanel from "./panels/HomePanel";
+import ReadPanel from "./panels/ReadPanel";
+import AsrPanel from "./panels/AsrPanel";
+import ChatPanel from "./panels/ChatPanel";
+import ModelsPanel from "./panels/ModelsPanel";
+import SettingsPanel from "./panels/SettingsPanel";
 import "./App.css";
 
 const DEFAULT_STATUS: ServiceStatus = {
@@ -13,28 +20,59 @@ const DEFAULT_STATUS: ServiceStatus = {
   node_path: "",
 };
 
-function StatusDot({ ok }: { ok: boolean }) {
-  return <span className={`dot ${ok ? "ok" : "fail"}`} />;
+interface NavItem {
+  id: PanelId;
+  label: string;
+  icon: string;
+}
+
+const NAV: NavItem[] = [
+  { id: "home", label: "语音工作台", icon: "🎙️" },
+  { id: "read", label: "朗读", icon: "🔊" },
+  { id: "asr", label: "识别", icon: "🎧" },
+  { id: "chat", label: "对话", icon: "💬" },
+  { id: "models", label: "模型管理", icon: "🧠" },
+  { id: "settings", label: "设置", icon: "⚙️" },
+];
+
+export interface PanelProps {
+  health: HealthInfo | null;
+  models: ModelInfo[];
+  refresh: () => Promise<void>;
+  status: ServiceStatus;
 }
 
 function App() {
   const [status, setStatus] = useState<ServiceStatus>(DEFAULT_STATUS);
-  const [busy, setBusy] = useState(false);
+  const [health, setHealth] = useState<HealthInfo | null>(null);
+  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [panel, setPanel] = useState<PanelId>("home");
+
+  const refreshHealth = async () => {
+    try {
+      const [h, m] = await Promise.all([getHealth(), getModels()]);
+      setHealth(h);
+      setModels(m);
+    } catch (e) {
+      console.error("refresh health 失败:", e);
+      setHealth(null);
+    }
+  };
 
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
     (async () => {
-      // 订阅 Rust 后台健康轮询推送
       unlisten = await listen<ServiceStatus>("service-status", (e) => {
         setStatus(e.payload);
+        refreshHealth();
       });
-      // 立即拉取一次
       try {
         const s = await invoke<ServiceStatus>("get_service_status");
         setStatus(s);
       } catch (err) {
         console.error("get_service_status 失败:", err);
       }
+      refreshHealth();
     })();
     return () => {
       unlisten?.();
@@ -42,80 +80,85 @@ function App() {
   }, []);
 
   const doStart = async () => {
-    setBusy(true);
     try {
       await invoke("start_service_cmd");
     } catch (err) {
-      console.error(err);
       alert("启动失败: " + err);
-    } finally {
-      setBusy(false);
     }
   };
 
   const doStop = async () => {
-    setBusy(true);
     try {
       await invoke("stop_service_cmd");
-      // 手动刷新
       const s = await invoke<ServiceStatus>("get_service_status");
       setStatus(s);
     } catch (err) {
-      console.error(err);
       alert("停止失败: " + err);
-    } finally {
-      setBusy(false);
+    }
+  };
+
+  const common: PanelProps = { health, models, refresh: refreshHealth, status };
+
+  const renderPanel = () => {
+    switch (panel) {
+      case "read":
+        return <ReadPanel {...common} />;
+      case "asr":
+        return <AsrPanel {...common} />;
+      case "chat":
+        return <ChatPanel {...common} />;
+      case "models":
+        return <ModelsPanel {...common} />;
+      case "settings":
+        return <SettingsPanel {...common} />;
+      case "home":
+      default:
+        return <HomePanel {...common} />;
     }
   };
 
   return (
-    <div className="app">
-      <header className="header">
-        <img src="/icons/icon.png" alt="Tabu-Local" className="logo" />
-        <h1>Tabu-Local 语音工作台</h1>
-        <span className="version">M1 · Tauri 壳</span>
-      </header>
-
-      <section className="card status-card">
-        <h2>服务状态</h2>
-        <div className="rows">
-          <div className="row">
-            <StatusDot ok={status.asr_up} />
-            <span className="name">asr-server（识别/朗读/LLM/对话）</span>
-            <span className="url">{status.asr_url}</span>
-            <span className={`badge ${status.asr_up ? "ok" : "fail"}`}>
-              {status.asr_up ? "运行中" : "未就绪"}
-            </span>
-          </div>
-          <div className="row">
-            <StatusDot ok={status.qwen3_up} />
-            <span className="name">qwen3-tts（可选低延迟朗读）</span>
-            <span className="url">{status.qwen3_url}</span>
-            <span className={`badge ${status.qwen3_up ? "ok" : "fail"}`}>
-              {status.qwen3_up ? "运行中" : "未就绪"}
-            </span>
+    <div className="layout">
+      <aside className="sidebar">
+        <div className="brand">
+          <img src="/icons/icon.png" alt="Tabu-Local" className="logo" />
+          <div>
+            <div className="brand-name">Tabu-Local</div>
+            <div className="brand-sub">本地语音工作台</div>
           </div>
         </div>
-        <div className="meta">
-          <span>子进程：{status.child_alive ? "存活" : "已退出"}</span>
-          <span className="muted">node：{status.node_path || "未找到"}</span>
+        <nav className="nav">
+          {NAV.map((item) => (
+            <button
+              key={item.id}
+              className={`nav-item ${panel === item.id ? "active" : ""}`}
+              onClick={() => setPanel(item.id)}
+            >
+              <span className="nav-icon">{item.icon}</span>
+              {item.label}
+            </button>
+          ))}
+        </nav>
+        <div className="sidebar-footer">
+          <div className="status-bar">
+            <span className={`status-light ${status.asr_up ? "ok" : "fail"}`} />
+            <span>{status.asr_up ? "服务运行中" : "服务未就绪"}</span>
+          </div>
+          <div className="bar-actions">
+            {!status.child_alive && (
+              <button className="mini-btn" onClick={doStart}>
+                启动
+              </button>
+            )}
+            {status.child_alive && (
+              <button className="mini-btn" onClick={doStop}>
+                停止
+              </button>
+            )}
+          </div>
         </div>
-      </section>
-
-      <section className="card actions-card">
-        <h2>操作</h2>
-        <div className="actions">
-          <button onClick={doStart} disabled={busy || status.child_alive}>
-            {busy ? "处理中…" : "启动 / 重启服务"}
-          </button>
-          <button onClick={doStop} disabled={busy || !status.child_alive}>
-            停止服务
-          </button>
-        </div>
-        <p className="hint">
-          关闭本窗口不会退出服务（托盘常驻）。请从托盘菜单「退出」彻底停止并退出。
-        </p>
-      </section>
+      </aside>
+      <main className="main">{renderPanel()}</main>
     </div>
   );
 }

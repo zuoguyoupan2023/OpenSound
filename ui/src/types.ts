@@ -6,3 +6,44 @@ export interface ServiceStatus {
   child_alive: boolean;
   node_path: string;
 }
+
+// /health 返回的详细结构
+export interface HealthInfo {
+  ok: boolean;
+  engines: string[];
+  tts: {
+    kokoro: string; // ready | missing | not-installed
+    kokoroSpeakers: number | null;
+    qwen3: string; // reachable | unreachable
+  };
+  llm: {
+    engine: string;
+    model: string;
+    ollama: string; // reachable | unreachable
+  };
+  models: ModelInfo[];
+  port: number;
+}
+
+// /models 返回的模型项
+export interface ModelInfo {
+  category: string; // tts | asr | llm
+  engine: string; // kokoro | qwen3 | sensevoice | whisper | llm
+  label: string;
+  size: string;
+  installed: boolean;
+}
+
+// 安装进度（NDJSON）
+export interface InstallProgress {
+  type: "log" | "done" | "error";
+  message: string;
+}
+
+export type PanelId =
+  | "home"
+  | "read"
+  | "asr"
+  | "chat"
+  | "models"
+  | "settings";
