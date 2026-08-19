@@ -37,10 +37,6 @@ impl Default for Recorder {
 }
 
 impl Recorder {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// 开始录音。返回 0 表示成功，否则返回错误信息。
     pub fn start(&self) -> Result<(), String> {
         let mut guard = self.inner.lock().unwrap();

@@ -9,9 +9,12 @@ export interface Recorder {
   isRecording(): boolean;
 }
 
-// 判断是否运行在 Tauri 环境
+// 判断是否运行在 Tauri 环境（Tauri 官方推荐：userAgent 含 "Tauri"）
 function inTauri(): boolean {
-  return typeof window !== "undefined" && !!(window as unknown as Record<string, unknown>).__TAURI__;
+  return (
+    typeof navigator !== "undefined" &&
+    navigator.userAgent.includes("Tauri")
+  );
 }
 
 // Rust 原生录音实现（通过 tauri command）

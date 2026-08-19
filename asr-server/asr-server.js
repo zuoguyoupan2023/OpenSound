@@ -670,6 +670,19 @@ const installLock = { active: false };
 // ---------- HTTP ----------
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
+
+  // ===== CORS：允许任何来源访问本地服务 =====
+  // 供 Tauri 桌面 App WebView / 浏览器插件 / 网站 / 其它 app 接入（开放端口后端）。
+  // 本服务默认绑定 127.0.0.1 仅本机，开放 CORS 不会带来外部网络风险。
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  // 预检请求直接放行
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    return res.end();
+  }
+
   const send = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); };
 
   if (req.method === 'GET' && url.pathname === '/health') {
