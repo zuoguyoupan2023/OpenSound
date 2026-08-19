@@ -1,0 +1,17 @@
+{
+  "name": "tabu-local",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tabu-Local 桌面 App（Tauri）：点开即用的本地语音服务 + 开放后端",
+  "type": "module",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "ui:dev": "npm --prefix ui run dev",
+    "ui:build": "npm --prefix ui run build",
+    "server:all": "npm --prefix asr-server run all"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.9.0"
+  }
+}

@@ -1,0 +1,28 @@
+[package]
+name = "tabu-local"
+version = "0.1.0"
+description = "Tabu-Local 桌面 App：本地语音服务（ASR/TTS/LLM）+ 开放后端"
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "tabu_local_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["process", "time", "macros"] }
+reqwest = { version = "0.12", features = ["json"] }
+
+[profile.dev]
+# 省磁盘：关闭 debuginfo、合并符号（Tauri dev 调试已足够）
+debug = 0
+split-debuginfo = "packed"
+[profile.dev.package."*"]
+opt-level = 1

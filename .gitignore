@@ -1,0 +1,26 @@
+# ===== 本地模型 / 虚拟环境 / 依赖（不提交） =====
+node_modules/
+models/
+.venv-qwen3/
+npm-debug.log*
+
+# ===== Rust / Tauri 构建产物 =====
+src-tauri/target/
+src-tauri/gen/
+.cargo-home/
+.tauri-icons/
+ui/dist/
+
+# ===== 桌面 App 不需要的移动端图标（tauri icon 生成） =====
+src-tauri/icons/android/
+src-tauri/icons/ios/
+
+# ===== Python 缓存 =====
+__pycache__/
+*.pyc
+
+# ===== npm 本地缓存 =====
+.npm-cache/
+
+# macOS
+.DS_Store

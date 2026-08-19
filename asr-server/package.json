@@ -1,0 +1,29 @@
+{
+  "name": "tabu-asr-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TabU 本地语音服务（ASR: whisper / sensevoice；TTS: kokoro / qwen3）",
+  "type": "module",
+  "dependencies": {
+    "@huggingface/transformers": "^4.2.0",
+    "node-llama-cpp": "^3.19.1",
+    "sherpa-onnx-darwin-arm64": "^1.13.4",
+    "sherpa-onnx-node": "^1.13.4"
+  },
+  "optionalDependencies": {
+    "sherpa-onnx": "^1.13.4"
+  },
+  "scripts": {
+    "start": "node asr-server.js",
+    "start-sensevoice": "ASR_ENGINE=sensevoice node asr-server.js",
+    "start-whisper": "ASR_ENGINE=whisper node asr-server.js",
+    "all": "node start-all.js",
+    "all-sensevoice": "ASR_ENGINE=sensevoice node start-all.js",
+    "all-whisper": "ASR_ENGINE=whisper node start-all.js",
+    "all-asr": "TABU_SKIP_QWEN3=1 node start-all.js",
+    "download-sensevoice": "node asr-server-download.js",
+    "download-kokoro": "node download-kokoro.js",
+    "download-llm": "mkdir -p models/llm && curl -L -C - -o models/llm/qwen2.5-0.5b-instruct-q4_k_m.gguf https://hf-mirror.com/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+    "start-qwen3": ".venv-qwen3/bin/python3 qwen3-tts-server.py --port 8001"
+  }
+}
