@@ -50,11 +50,16 @@ Authorization: Bearer <token>
 |---|---|---|
 | `GET /health` | 服务状态 + 引擎 + 模型清单 | JSON |
 | `POST /transcribe` | 语音 → 文本（ASR） | `{ text, engine }` |
-| `POST /speak` | 文本 → 语音（TTS） | **帧流**（octet-stream）|
+| `POST /speak` | 文本 → 语音（TTS，含克隆引擎） | **帧流**（octet-stream）|
 | `POST /chat` | 文本 → LLM 回答 | `{ text, engine }` |
 | `POST /voice-chat` | 语音 → LLM → 语音（一次完成）| WAV 或 `{recognized,answer,audioBase64}` |
 | `GET /models` | 模型清单与安装状态 | `{ models }` |
 | `POST /install-model` | 安装模型 | NDJSON 进度流 |
+| **`POST /clone`** | 创建克隆音色（参考音频+文本） | `{ voiceId, name, … }` |
+| **`GET /voices`** | 列出克隆音色 | `{ voices: [...] }` |
+| **`POST /voice/rename`** | 克隆音色改名 | `{ ok }` |
+| **`POST /voice/delete`** | 删除克隆音色 | `{ ok }` |
+| **`GET /voice-preview`** | 取某音色预生成试听音频 | WAV |
 | `WS /realtime`（未来） | 实时语音 | — |
 
 ---
@@ -76,7 +81,8 @@ curl -s http://127.0.0.1:9528/health | python3 -m json.tool
   "tts": {
     "kokoro": "ready",          // ready | missing | not-installed
     "kokoroSpeakers": 53,
-    "qwen3": "reachable"        // reachable | unreachable
+    "qwen3": "reachable",       // reachable | unreachable
+    "cosyvoice": "reachable"    // 克隆服务：reachable | missing
   },
   "llm": {
     "engine": "llama-cpp",
@@ -145,13 +151,22 @@ curl -sN -X POST 'http://127.0.0.1:9528/speak?engine=cloud' \
   -d '{"text":"你好，这是云端朗读。","cloud":{"baseUrl":"https://api.openai.com/v1","apiKey":"sk-…","model":"tts-1","voice":"alloy"}}'
 ```
 
+#### 克隆音色（CosyVoice3 本地，engine=clone）
+先用 `/clone` 创建音色得到 `voiceId`，再朗读：
+```bash
+curl -sN -X POST 'http://127.0.0.1:9528/speak?engine=clone' \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"你好，这是克隆音色的朗读。","voice":"cv_xxxxxxxxxx"}'
+```
+- `voice` = `/clone` 或 `/voices` 返回的 `voiceId`（必填）。
+
 #### 请求体字段
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `text` | string | **必填**；qwen3 ≤2000 字，kokoro ≤30000 字 |
 | `sid` | int | kokoro 音色 0-52 |
 | `speed` | float | kokoro 语速 0.5-2 |
-| `voice` / `language` | string | qwen3 音色 / 语言（Auto/zh/en）|
+| `voice` / `language` | string | qwen3 音色 / 语言（Auto/zh/en）；`engine=clone` 时 `voice`=克隆音色 id |
 | `roles` / `roleMap` | string/object | 多角色（qwen3）|
 | `cloud` / `azure` / `cosyvoice` | object | 云端引擎凭据 |
 
@@ -195,7 +210,7 @@ curl -s -X POST 'http://127.0.0.1:9528/voice-chat?ttsEngine=kokoro&llmEngine=lla
 |---|---|---|
 | `asrEngine` | auto | auto/sensevoice/whisper |
 | `llmEngine` | llama-cpp | llama-cpp/ollama |
-| `ttsEngine` | kokoro | kokoro/qwen3 |
+| `ttsEngine` | kokoro | kokoro / qwen3 / clone（克隆音色，`voice`=音色id） |
 | `prompt` | — | 追加指令 |
 | `system` | 默认助手提示词 | 系统提示 |
 | `fmt` | — | `json` 时返回 文本+音频 base64 |
@@ -233,12 +248,56 @@ curl -sN -X POST 'http://127.0.0.1:9528/install-model?engine=kokoro'
 
 ---
 
+### 3.8 克隆音色管理（CosyVoice3 本地）
+
+本地语音克隆：`POST /clone` 用参考音频 + 参考文本生成一个克隆音色，随后 `engine=clone` 朗读/对话即可用它发声。
+
+#### 创建克隆音色 `POST /clone`
+请求体 = JSON，`wavBase64` 为参考音频（**16kHz 单声道 WAV 的 base64**；建议 3–10s、清晰单人声）：
+```bash
+curl -s -X POST 'http://127.0.0.1:9528/clone' \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"我的声音","referenceText":"这句话是参考录音的内容。","wavBase64":"<base64>"}'
+```
+响应：
+```json
+{ "voiceId": "cv_xxx", "name": "我的声音", "referenceText": "You are a helpful assistant.<|endofprompt|>这句话是…", "created_at": 1787, "engine": "cosyvoice" }
+```
+- 后端会自动为 `referenceText` 补 `<|endofprompt|>` 前缀（CosyVoice3 必需）。
+- 生成时会顺带预生成一段试听音频（`preview.wav`），试听秒开。
+
+#### 列出克隆音色 `GET /voices`
+```bash
+curl -s http://127.0.0.1:9528/voices
+# → { "voices": [ { "voiceId":"cv_xxx", "name":"…", "referenceText":"…", "created_at":…, "engine":"cosyvoice" } ] }
+```
+
+#### 改名 / 删除 `POST /voice/rename` · `POST /voice/delete`
+```bash
+curl -s -X POST 'http://127.0.0.1:9528/voice/rename' -H 'Content-Type: application/json' \
+  -d '{"voiceId":"cv_xxx","name":"新名字"}'
+curl -s -X POST 'http://127.0.0.1:9528/voice/delete' -H 'Content-Type: application/json' \
+  -d '{"voiceId":"cv_xxx"}'
+```
+
+#### 试听 `GET /voice-preview?voiceId=…`
+返回该音色**预生成的 WAV**（非帧流，可直接播放）：
+```bash
+curl -s 'http://127.0.0.1:9528/voice-preview?voiceId=cv_xxx' -o preview.wav
+```
+- 若该音色无 preview（老数据）返回 404 `{error}`。
+
+> 端口 8003 为 cosyvoice 独立服务，一般经 9528 转发，无需直连。
+
+---
+
 ## 四、音频约定
 
 | 项 | 约定 |
 |---|---|
 | 输入（ASR / voice-chat） | WAV 或 RAW PCM，**16kHz 单声道 16-bit** |
-| 输出（TTS） | 帧流：每帧 = 4B 大端长度 + 独立 WAV；qwen3 采样率 24000，kokoro 24000 |
+| 输出（TTS） | 帧流：每帧 = 4B 大端长度 + 独立 WAV；采样率 kokoro/qwen3/cosyvoice 均 24000 |
+| 克隆参考音频 | `/clone` 的 `wavBase64` = 16kHz 单声道 WAV；试听 `/voice-preview` 返回 24000 WAV |
 | 内容类型 | 输入 `audio/wav`；TTS 输出 `application/octet-stream` |
 
 ---

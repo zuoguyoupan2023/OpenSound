@@ -7,10 +7,12 @@ import {
   deleteVoice,
   listSampleCandidates,
   previewVoiceUrl,
+  audioFileTo16kWav,
   type CloneVoice,
 } from "../voiceStore";
 import type { AudioRecord } from "../audioStore";
-import { speakStream } from "../api";
+import { saveRecording } from "../audioStore";
+import { speakStream, transcribe } from "../api";
 import { createFramePlayer, stopAudio, type FramePlayer } from "../audio";
 import { Panel, Button, Spinner } from "../components/ui";
 
@@ -39,6 +41,11 @@ export default function VoicePanel(_props: PanelProps) {
   } | null>(null);
   const [error, setError] = useState("");
   const [playingId, setPlayingId] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [importedInfo, setImportedInfo] = useState<{
+    file: string;
+    asr: string | null;
+  } | null>(null);
   const playerRef = useRef<FramePlayer | null>(null);
   const elRef = useRef<HTMLAudioElement | null>(null);
 
@@ -80,6 +87,36 @@ export default function VoicePanel(_props: PanelProps) {
       setSampleId(s.id);
       setRefText(s.text || "");
       setName(s.text ? "我的-" + s.text.trim().slice(0, 6) : "我的克隆音色");
+    }
+  };
+
+  // 导入音频文件：转 16k wav → 存入音频库 → ASR 识别文本填入参考提示
+  const importAudio = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // 允许重复选择同一文件
+    if (!file) return;
+    setError("");
+    setImporting(true);
+    setImportedInfo(null);
+    try {
+      const { blob } = await audioFileTo16kWav(file);
+      const rec = await saveRecording(blob, "import", "");
+      setSampleId(rec.id);
+      setName("我的-" + (file.name.replace(/\.[^.]+$/, "") || "导入").slice(0, 6));
+      setSamples(await listSampleCandidates());
+      // 走 ASR 识别该音频文本 → 自动填入参考提示（供核对）
+      try {
+        const r = await transcribe(blob, "auto", true, true);
+        setRefText(r.text);
+        setImportedInfo({ file: file.name, asr: r.text });
+      } catch {
+        setImportedInfo({ file: file.name, asr: null });
+        setRefText("");
+      }
+    } catch (err) {
+      setError("导入音频失败：" + String(err));
+    } finally {
+      setImporting(false);
     }
   };
 
@@ -230,7 +267,7 @@ export default function VoicePanel(_props: PanelProps) {
                   参考录音样本（建议 3–10s、清晰单人声）
                   {samples.length === 0 ? (
                     <span className="muted">
-                      还没有可用的录音。先去「音频库」把一段录音标记为「🎨 作样本」，或先录一段音。
+                      还没有可用的录音。可先录一段音，或点下方「导入音频文件」。
                     </span>
                   ) : (
                     <select
@@ -252,6 +289,23 @@ export default function VoicePanel(_props: PanelProps) {
                     </select>
                   )}
                 </label>
+                <div className="import-audio-row">
+                  <label className="file-btn">
+                    {importing ? <Spinner /> : "📂 导入音频文件"}
+                    <input
+                      type="file"
+                      accept="audio/*,.wav,.mp3,.m4a,.flac,.aac"
+                      hidden
+                      disabled={importing}
+                      onChange={importAudio}
+                    />
+                  </label>
+                  {importedInfo && (
+                    <span className="muted">
+                      已导入「{importedInfo.file}」并存入音频库
+                    </span>
+                  )}
+                </div>
               </div>
 
               <div className="field-row">
@@ -264,8 +318,15 @@ export default function VoicePanel(_props: PanelProps) {
                     placeholder="用一句话描述这段录音，克隆时作为参考提示"
                   />
                 </label>
-                {selectedSample?.text && (
+                {importedInfo?.asr ? (
+                  <div className="import-hint">
+                    ✅ 已用 ASR 自动识别出参考文本（见上方输入框）。请核对是否准确——
+                    准确的参考文本能让克隆音色质量更高。可直接修改，或点「生成」（跳过核对，用识别结果）。
+                  </div>
+                ) : selectedSample?.text ? (
                   <span className="muted">（已自动带出该录音的识别文本，可修改）</span>
+                ) : (
+                  <span className="muted">（准确的参考文本能让克隆音色质量更高）</span>
                 )}
               </div>
 

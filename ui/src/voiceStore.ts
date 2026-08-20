@@ -65,6 +65,74 @@ export async function listSampleCandidates(): Promise<AudioRecord[]> {
     );
 }
 
+// 把导入的音频文件解码并重采样为 16kHz 单声道 WAV，返回 base64 + Blob（用于存音频库 + ASR 识别）
+export async function audioFileTo16kWav(
+  file: File
+): Promise<{ base64: string; blob: Blob; durationSec: number }> {
+  const arrayBuf = await file.arrayBuffer();
+  const Ctx: typeof AudioContext =
+    window.AudioContext || (window as any).webkitAudioContext;
+  const ctx = new Ctx();
+  try {
+    const decoded = await ctx.decodeAudioData(arrayBuf);
+    const target = 16000;
+    const offline = new OfflineAudioContext(
+      1,
+      Math.max(1, Math.ceil(decoded.duration * target)),
+      target
+    );
+    const src = offline.createBufferSource();
+    src.buffer = decoded;
+    src.connect(offline.destination);
+    src.start(0);
+    const rendered = await offline.startRendering();
+    const samples = rendered.getChannelData(0);
+    const wav = encodeWav16kMono(samples, target);
+    return {
+      base64: wav.base64,
+      blob: wav.blob,
+      durationSec: samples.length / target,
+    };
+  } finally {
+    ctx.close();
+  }
+}
+
+function encodeWav16kMono(
+  samples: Float32Array,
+  sr: number
+): { base64: string; blob: Blob } {
+  const n = samples.length;
+  const buffer = new ArrayBuffer(44 + n * 2);
+  const v = new DataView(buffer);
+  const ws = (o: number, s: string) => {
+    for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i));
+  };
+  ws(0, "RIFF");
+  v.setUint32(4, 36 + n * 2, true);
+  ws(8, "WAVE");
+  ws(12, "fmt ");
+  v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true);
+  v.setUint16(22, 1, true);
+  v.setUint32(24, sr, true);
+  v.setUint32(28, sr * 2, true);
+  v.setUint16(32, 2, true);
+  v.setUint16(34, 16, true);
+  ws(36, "data");
+  v.setUint32(40, n * 2, true);
+  let o = 44;
+  for (let i = 0; i < n; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    v.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    o += 2;
+  }
+  const bytes = new Uint8Array(buffer);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return { base64: btoa(bin), blob: new Blob([bytes], { type: "audio/wav" }) };
+}
+
 // 把音频库录音读成 base64（真实参考音频，供 /clone）。
 // 用 Tauri 原生命令读文件，避开 WKWebView 里 fetch(asset URL)/FileReader 不支持的问题。
 async function recordToBase64(rec: AudioRecord): Promise<string> {

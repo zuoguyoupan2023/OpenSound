@@ -453,6 +453,24 @@ textarea:focus,
   border-color: var(--accent);
 }
 
+.import-audio-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.import-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--accent);
+  background: rgba(59, 130, 246, 0.08);
+  border: 1px solid rgba(59, 130, 246, 0.25);
+  padding: 8px 10px;
+  border-radius: 8px;
+}
+
 /* ===== 对话 ===== */
 .chat-box {
   background: var(--card);
