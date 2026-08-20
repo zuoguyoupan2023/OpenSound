@@ -9,6 +9,7 @@ import AsrPanel from "./panels/AsrPanel";
 import ChatPanel from "./panels/ChatPanel";
 import ModelsPanel from "./panels/ModelsPanel";
 import AudioLibraryPanel from "./panels/AudioLibraryPanel";
+import VoicePanel from "./panels/VoicePanel";
 import SettingsPanel from "./panels/SettingsPanel";
 import "./App.css";
 
@@ -34,6 +35,7 @@ const NAV: NavItem[] = [
   { id: "chat", label: "对话", icon: "💬" },
   { id: "models", label: "模型管理", icon: "🧠" },
   { id: "audio", label: "音频库", icon: "🎵" },
+  { id: "voices", label: "音色管理", icon: "🎨" },
   { id: "settings", label: "设置", icon: "⚙️" },
 ];
 
@@ -113,6 +115,8 @@ function App() {
         return <ModelsPanel {...common} />;
       case "audio":
         return <AudioLibraryPanel {...common} />;
+      case "voices":
+        return <VoicePanel {...common} />;
       case "settings":
         return <SettingsPanel {...common} />;
       case "home":

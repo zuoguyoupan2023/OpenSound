@@ -705,6 +705,73 @@ textarea:focus,
   flex-shrink: 0;
 }
 
+/* ===== 音色管理 ===== */
+.voice-banner {
+  background: rgba(59, 130, 246, 0.1);
+  border: 1px solid rgba(59, 130, 246, 0.35);
+  color: var(--text);
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  margin-bottom: 14px;
+  line-height: 1.6;
+}
+
+.voice-toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.voice-create {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  margin-bottom: 14px;
+}
+
+.voice-create-title {
+  font-size: 14px;
+  font-weight: 500;
+  margin-bottom: 12px;
+}
+
+.voice-create-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.voice-create-actions select,
+.voice-create-actions textarea,
+.voice-create-actions input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.gen-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.gen-bar {
+  margin-top: 10px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--bg-2);
+  overflow: hidden;
+}
+
+.gen-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.3s;
+}
+
 /* ===== 设置 ===== */
 .settings-block {
   background: var(--card);

@@ -47,4 +47,5 @@ export type PanelId =
   | "chat"
   | "models"
   | "audio"
+  | "voices"
   | "settings";
