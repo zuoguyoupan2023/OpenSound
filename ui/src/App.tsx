@@ -11,6 +11,7 @@ import ModelsPanel from "./panels/ModelsPanel";
 import AudioLibraryPanel from "./panels/AudioLibraryPanel";
 import VoicePanel from "./panels/VoicePanel";
 import SettingsPanel from "./panels/SettingsPanel";
+import RealtimePanel from "./panels/RealtimePanel";
 import "./App.css";
 
 const DEFAULT_STATUS: ServiceStatus = {
@@ -32,6 +33,7 @@ const NAV: NavItem[] = [
   { id: "home", label: "语音工作台", icon: "🎙️" },
   { id: "read", label: "朗读", icon: "🔊" },
   { id: "asr", label: "识别", icon: "🎧" },
+  { id: "realtime", label: "实时语音", icon: "⚡" },
   { id: "chat", label: "对话", icon: "💬" },
   { id: "models", label: "模型管理", icon: "🧠" },
   { id: "audio", label: "音频库", icon: "🎵" },
@@ -109,6 +111,8 @@ function App() {
         return <ReadPanel {...common} />;
       case "asr":
         return <AsrPanel {...common} />;
+      case "realtime":
+        return <RealtimePanel {...common} />;
       case "chat":
         return <ChatPanel {...common} />;
       case "models":

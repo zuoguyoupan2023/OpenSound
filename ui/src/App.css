@@ -901,3 +901,54 @@ textarea:focus,
     transform: rotate(360deg);
   }
 }
+
+/* ---------- Realtime 实时语音 ---------- */
+.realtime-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(34, 197, 94, 0.08);
+  border: 1px solid rgba(34, 197, 94, 0.25);
+  font-size: 13px;
+  color: #22c55e;
+  margin-bottom: 12px;
+}
+.realtime-live-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #22c55e;
+  animation: rt-pulse 1.2s ease-in-out infinite;
+}
+@keyframes rt-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+.realtime-level {
+  flex: 1;
+  max-width: 160px;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(34, 197, 94, 0.15);
+  overflow: hidden;
+  margin-left: auto;
+}
+.realtime-level-bar {
+  display: block;
+  height: 100%;
+  background: #22c55e;
+  transition: width 120ms linear;
+}
+.realtime-text {
+  line-height: 1.9;
+}
+.realtime-segment {
+  margin-bottom: 4px;
+}
+.realtime-seg-no {
+  color: #888;
+  font-size: 12px;
+  margin-right: 6px;
+}

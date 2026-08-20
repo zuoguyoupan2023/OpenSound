@@ -10,7 +10,9 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::{Emitter, Manager, State};
 
 mod audio_store;
+mod realtime;
 mod recorder;
+use realtime::Realtime;
 use recorder::Recorder;
 
 // ---------- 常量 ----------
@@ -24,6 +26,7 @@ struct AppState {
     child: Mutex<Option<Child>>,
     node_path: Mutex<Option<String>>,
     recorder: Recorder,
+    realtime: Realtime,
     server_path: Mutex<Option<String>>, // 用户配置的 asr-server 目录
 }
 
@@ -259,6 +262,27 @@ fn recorder_is_recording(state: State<'_, Arc<AppState>>) -> bool {
     state.recorder.is_recording()
 }
 
+// ---------- 实时语音（Realtime，cpal 实时流 + 前端 VAD 切句） ----------
+#[tauri::command]
+fn realtime_start(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    state.realtime.start()
+}
+
+#[tauri::command]
+fn realtime_read(state: State<'_, Arc<AppState>>, cursor: usize) -> Result<realtime::RealtimeRead, String> {
+    state.realtime.read(cursor)
+}
+
+#[tauri::command]
+fn realtime_stop(state: State<'_, Arc<AppState>>) -> Result<realtime::RealtimeRead, String> {
+    state.realtime.stop()
+}
+
+#[tauri::command]
+fn realtime_is_recording(state: State<'_, Arc<AppState>>) -> bool {
+    state.realtime.is_recording()
+}
+
 // ---------- 启动时健康轮询，前端通过事件订阅 ----------
 async fn poll_health(app: tauri::AppHandle, state: Arc<AppState>) {
     loop {
@@ -370,6 +394,10 @@ pub fn run() {
             recorder_start,
             recorder_stop,
             recorder_is_recording,
+            realtime_start,
+            realtime_read,
+            realtime_stop,
+            realtime_is_recording,
             get_server_path,
             set_server_path,
             audio_store::audio_save,

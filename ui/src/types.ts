@@ -45,6 +45,7 @@ export type PanelId =
   | "home"
   | "read"
   | "asr"
+  | "realtime"
   | "chat"
   | "models"
   | "audio"

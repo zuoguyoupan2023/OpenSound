@@ -11,7 +11,7 @@ export default function AsrPanel(props: PanelProps) {
   const [state, setState] = useState<State>("idle");
   const [engine, setEngine] = useState<string>("auto");
   const [punc, setPunc] = useState<boolean>(false);
-  const [vad, setVad] = useState<boolean>(true);
+  const [vad, setVad] = useState<boolean>(false);
   const [text, setText] = useState("");
   const [error, setError] = useState("");
   const [elapsed, setElapsed] = useState<number>(0);
