@@ -10,6 +10,8 @@ import {
   type CloneVoice,
 } from "../voiceStore";
 import type { AudioRecord } from "../audioStore";
+import { speakStream } from "../api";
+import { createFramePlayer, stopAudio, type FramePlayer } from "../audio";
 import { Panel, Button, Spinner } from "../components/ui";
 
 function fmtTime(ms: number): string {
@@ -37,6 +39,7 @@ export default function VoicePanel(_props: PanelProps) {
   } | null>(null);
   const [error, setError] = useState("");
   const [playingId, setPlayingId] = useState<string | null>(null);
+  const playerRef = useRef<FramePlayer | null>(null);
   const elRef = useRef<HTMLAudioElement | null>(null);
 
   const refresh = useCallback(async () => {
@@ -59,8 +62,11 @@ export default function VoicePanel(_props: PanelProps) {
   }, []);
 
   const stopPlay = () => {
+    playerRef.current?.stop();
+    playerRef.current = null;
     elRef.current?.pause();
     elRef.current = null;
+    stopAudio();
     setPlayingId(null);
   };
 
@@ -106,20 +112,42 @@ export default function VoicePanel(_props: PanelProps) {
       return;
     }
     stopPlay();
+    setError("");
+    setPlayingId(v.id);
+    // 优先：播放生成音色时预生成的试听音频（标准 WAV，秒开）
     try {
-      const src = await previewVoiceUrl(v);
-      if (!src) {
-        setError("找不到参考样本音频（可能已删除）");
+      const url = await previewVoiceUrl(v);
+      if (url) {
+        const el = new Audio(url);
+        elRef.current = el;
+        el.onended = () => {
+          elRef.current = null;
+          URL.revokeObjectURL(url);
+          setPlayingId(null);
+        };
+        el.onerror = () => {
+          elRef.current = null;
+          URL.revokeObjectURL(url);
+          setError("预览音频播放失败");
+          setPlayingId(null);
+        };
+        await el.play();
         return;
       }
-      const el = new Audio(src);
-      elRef.current = el;
-      setPlayingId(v.id);
-      el.onended = () => {
-        elRef.current = null;
-        setPlayingId(null);
-      };
-      await el.play();
+    } catch {
+      /* 回退现场合成 */
+    }
+    // 回退：现场用该音色合成试听句（帧流播放）
+    const player = createFramePlayer();
+    playerRef.current = player;
+    try {
+      const stream = await speakStream({
+        text: "你好，这是克隆音色的试听效果。",
+        engine: "clone",
+        voice: v.id,
+      });
+      await player.start(stream);
+      setPlayingId(null);
     } catch (e) {
       setError(String(e));
       setPlayingId(null);

@@ -1,5 +1,6 @@
 // 音色管理前端封装 —— 调用 asr-server(9528) 的克隆 REST 接口（后端 CosyVoice3 真实生成）
-import { listAudio, audioAssetUrl, type AudioRecord } from "./audioStore";
+import { invoke } from "@tauri-apps/api/core";
+import { listAudio, type AudioRecord } from "./audioStore";
 import { getBaseUrl, getToken } from "./api";
 
 export interface CloneVoice {
@@ -64,18 +65,10 @@ export async function listSampleCandidates(): Promise<AudioRecord[]> {
     );
 }
 
-// 把音频库录音读成 base64（真实参考音频，供 /clone）
+// 把音频库录音读成 base64（真实参考音频，供 /clone）。
+// 用 Tauri 原生命令读文件，避开 WKWebView 里 fetch(asset URL)/FileReader 不支持的问题。
 async function recordToBase64(rec: AudioRecord): Promise<string> {
-  const url = await audioAssetUrl(rec); // asset protocol URL（file://）
-  const res = await fetch(url);
-  if (!res.ok) throw new Error("无法读取参考录音文件");
-  const blob = await res.blob();
-  return new Promise((resolve, reject) => {
-    const fr = new FileReader();
-    fr.onload = () => resolve(String(fr.result).split(",")[1] ?? "");
-    fr.onerror = () => reject(new Error("读取参考录音失败"));
-    fr.readAsDataURL(blob);
-  });
+  return invoke<string>("audio_read_base64", { id: rec.id });
 }
 
 // 生成克隆音色（真实后端：POST /clone；参考音频 + 提示文本 → CosyVoice 生成）
@@ -128,25 +121,18 @@ export async function deleteVoice(id: string): Promise<void> {
   });
 }
 
-// 试听：用该克隆音色真实合成一句测试语，返回可播放的 blob URL
+// 试听：优先取生成音色时预生成的 preview.wav（直接播放，秒开）。
+// 返回标准 WAV 的 blob URL；若该音色无预览音频返回 null（调用方回退到现场合成）。
 export async function previewVoiceUrl(voice: CloneVoice): Promise<string | null> {
   try {
     const res = await fetch(
-      `${getBaseUrl()}/speak?engine=clone`,
-      authHeaders({
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: "你好，这是克隆音色的试听效果。", voice: voice.id }),
-      })
+      `${getBaseUrl()}/voice-preview?voiceId=${encodeURIComponent(voice.id)}`,
+      authHeaders()
     );
-    if (!res.ok) {
-      const j = await res.json().catch(() => ({}));
-      throw new Error(j?.error || `HTTP ${res.status}`);
-    }
+    if (!res.ok) return null; // 无预览 → 回退现场合成
     const blob = await res.blob();
     return URL.createObjectURL(blob);
-  } catch (e) {
-    console.error("试听失败:", e);
+  } catch {
     return null;
   }
 }

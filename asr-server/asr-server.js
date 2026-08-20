@@ -934,6 +934,22 @@ const server = http.createServer(async (req, res) => {
       return send(500, { error: '克隆服务不可用：' + e.message });
     }
   }
+  // 克隆音色试听：GET /voice-preview?voiceId=xxx → 预生成的 WAV（避免每次现场合成等待）
+  if (req.method === 'GET' && url.pathname === '/voice-preview') {
+    const vid = url.searchParams.get('voiceId') || '';
+    try {
+      const up = await fetch(COSYVOICE_URL + '/voice-preview?voiceId=' + encodeURIComponent(vid), { signal: AbortSignal.timeout(5000) });
+      if (!up.ok) {
+        const data = await up.json().catch(() => ({}));
+        return send(404, { error: data.error || '该音色暂无预览音频' });
+      }
+      const buf = Buffer.from(await up.arrayBuffer());
+      res.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': buf.length });
+      return res.end(buf);
+    } catch (e) {
+      return send(500, { error: '克隆服务不可用：' + e.message });
+    }
+  }
   if ((req.method === 'POST') && (url.pathname === '/voice/rename' || url.pathname === '/voice/delete')) {
     let body = {};
     try {

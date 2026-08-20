@@ -137,7 +137,25 @@ def create_voice(name, reference_text, wav_base64):
     with open(_cfg_path(vid), 'w', encoding='utf-8') as f:
         json.dump(cfg, f, ensure_ascii=False)
     register_voice(vid)
+    # 预生成一段预设试听音频，供前端"试听"直接播放（避免每次现场合成等待）
+    _gen_preview(vid)
     return {'voiceId': vid, **cfg}
+
+
+# 预设试听文本
+PREVIEW_TEXT = '你好，这是克隆音色的试听效果。'
+
+
+def _gen_preview(vid):
+    """用该音色合成预设试听句，存为 preview.wav；失败不影响音色本身。"""
+    try:
+        wavs = [w for s in split_sentences(PREVIEW_TEXT) if (w := synth_segment(s, vid))]
+        preview = b''.join(wavs)
+        if preview:
+            with open(os.path.join(VOICE_DIR, vid, 'preview.wav'), 'wb') as f:
+                f.write(preview)
+    except Exception as e:
+        print(f'[cosyvoice] 生成预览音频失败（音色 {vid}）: {e}')
 
 
 def rename_voice(vid, name):
@@ -231,11 +249,23 @@ class Handler(BaseHTTPRequestHandler):
         print(f'[cosyvoice] 克隆合成 {len(split_sentences(text))} 段 → {n_frames} 帧 · {(time.time() - t0) * 1000:.0f}ms')
 
     def do_GET(self):
-        path = self.path.split('?')[0]
+        parsed = urlparse(self.path)
+        path = parsed.path
         if path == '/health':
             self._send_json(200, {'ok': True, 'model': MODEL_NAME, 'sr': MODEL.sample_rate, 'voices': len(read_voices())})
         elif path == '/voices':
             self._send_json(200, {'voices': read_voices()})
+        elif path == '/voice-preview':
+            vid = parse_qs(parsed.query).get('voiceId', [''])[0]
+            p = os.path.join(VOICE_DIR, vid, 'preview.wav')
+            if not vid or not os.path.isfile(p):
+                return self._send_json(404, {'error': '该音色暂无预览音频（请重新生成）'})
+            data = open(p, 'rb').read()
+            self.send_response(200)
+            self.send_header('Content-Type', 'audio/wav')
+            self.send_header('Content-Length', str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
         else:
             self._send_json(404, {'error': 'not found'})
 
@@ -315,6 +345,7 @@ if __name__ == '__main__':
     for v in read_voices():
         try:
             register_voice(v['voiceId'])
+            _gen_preview(v['voiceId'])  # 为旧音色补齐预生成试听音频
             print(f'[cosyvoice] 已加载克隆音色 {v["voiceId"]}「{v["name"]}」')
         except Exception as e:
             print(f'[cosyvoice] 加载音色 {v["voiceId"]} 失败: {e}')

@@ -377,7 +377,8 @@ pub fn run() {
             audio_store::audio_delete,
             audio_store::audio_get_dir,
             audio_store::audio_export,
-            audio_store::audio_set_clone_sample
+            audio_store::audio_set_clone_sample,
+            audio_store::audio_read_base64
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

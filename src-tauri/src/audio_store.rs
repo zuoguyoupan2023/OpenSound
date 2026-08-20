@@ -174,6 +174,21 @@ pub fn audio_get_dir(app: tauri::AppHandle) -> Result<String, String> {
     Ok(dir.to_string_lossy().into_owned())
 }
 
+/// 按 id 读取一条音频文件并返回 base64（供克隆后端 /clone 使用；避开 Web 端 fetch asset URL 的限制）
+#[tauri::command]
+pub fn audio_read_base64(app: tauri::AppHandle, id: String) -> Result<String, String> {
+    let dir = audio_dir(&app)?;
+    let idx = read_index(&dir);
+    let rec = idx
+        .items
+        .iter()
+        .find(|r| r.id == id)
+        .ok_or("音频记录不存在")?;
+    let abs = dir.join(&rec.file);
+    let bytes = fs::read(&abs).map_err(|e| format!("读取音频失败: {e}"))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
 /// 把一条音频与其配套文本一起导出为 zip（dest_path 为前端保存对话框给出的完整 .zip 路径）
 #[tauri::command]
 pub fn audio_export(
