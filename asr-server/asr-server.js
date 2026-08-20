@@ -892,14 +892,14 @@ const server = http.createServer(async (req, res) => {
       catch (e) { kokoroStatus = 'missing'; }
     }
     const qwen3 = await checkQwen3();
-    const llmReady = llmReady(); // 默认 LLM 是否就绪
+    const llmDefaultReady = llmReady(); // 默认 LLM 是否就绪
     const ollamaStatus = await checkOllama();
     return send(200, {
       ok: true,
       version: SERVER_VERSION,
       engines: ['whisper', existsSync(SENSEVOICE_MODEL) ? 'sensevoice' : 'sensevoice(未下载)', 'sensevoice-original'],
       tts: { kokoro: kokoroStatus, kokoroSpeakers, qwen3, cosyvoice: await checkCosyvoice() },
-      llm: { engine: 'llama-cpp', model: llmReady ? path.basename(LLM_MODEL) : 'missing', ollama: ollamaStatus },
+      llm: { engine: 'llama-cpp', model: llmDefaultReady ? path.basename(LLM_MODEL) : 'missing', ollama: ollamaStatus },
       models: await collectModels(), // 014 §5.2：已装模型清单（/models 同款）
       port: PORT
     });
