@@ -1,8 +1,9 @@
-import { useRef, useState } from "react";
+import { useRef, useState, useEffect } from "react";
 import type { PanelProps } from "../App";
 import { speakStream } from "../api";
 import { createFramePlayer, type FramePlayer, stopAudio } from "../audio";
 import { teeCollect, mergeWavFrames, saveTts } from "../audioStore";
+import { listVoices, type CloneVoice } from "../voiceStore";
 import { Panel, Button, Select, Spinner, EngineBadge } from "../components/ui";
 
 const KOKORO_VOICES = [
@@ -22,11 +23,13 @@ type Speaking = "idle" | "speaking" | "done";
 
 export default function ReadPanel(props: PanelProps) {
   const [text, setText] = useState("");
-  const [engine, setEngine] = useState<"kokoro" | "qwen3">("kokoro");
+  const [engine, setEngine] = useState<"kokoro" | "qwen3" | "clone">("kokoro");
   const [sid, setSid] = useState<number>(18);
   const [speed, setSpeed] = useState<number>(1);
   const [voice, setVoice] = useState<string>("Vivian");
   const [language, setLanguage] = useState<string>("Auto");
+  const [cloneVoices, setCloneVoices] = useState<CloneVoice[]>([]);
+  const [cloneVoiceId, setCloneVoiceId] = useState<string>("");
   const [state, setState] = useState<Speaking>("idle");
   const [error, setError] = useState("");
   const [fileName, setFileName] = useState("");
@@ -34,6 +37,17 @@ export default function ReadPanel(props: PanelProps) {
 
   const kokoroReady = props.health?.tts.kokoro === "ready";
   const qwen3Ready = props.health?.tts.qwen3 === "reachable";
+  const cloneReady = props.health?.tts.cosyvoice === "reachable";
+
+  // 加载克隆音色列表（供朗读引擎选用）
+  useEffect(() => {
+    listVoices()
+      .then((vs) => {
+        setCloneVoices(vs);
+        if (vs.length) setCloneVoiceId(vs[0].id);
+      })
+      .catch(() => {});
+  }, []);
 
   const loadFile = async (file: File) => {
     const t = await file.text();
@@ -57,7 +71,7 @@ export default function ReadPanel(props: PanelProps) {
         engine,
         sid,
         speed,
-        voice,
+        voice: engine === "clone" ? cloneVoiceId : voice,
         language,
       });
       const { playStream, collected } = teeCollect(stream);
@@ -102,8 +116,23 @@ export default function ReadPanel(props: PanelProps) {
           options={[
             { value: "kokoro", label: "Kokoro（本地，53 音色）" },
             { value: "qwen3", label: "Qwen3（低延迟）" },
+            { value: "clone", label: "🎨 克隆音色（CosyVoice）" },
           ]}
         />
+        {engine === "clone" && (
+          <>
+            <Select
+              value={cloneVoiceId}
+              onChange={setCloneVoiceId}
+              options={
+                cloneVoices.length
+                  ? cloneVoices.map((v) => ({ value: v.id, label: `🎨 ${v.name}` }))
+                  : [{ value: "", label: "（无克隆音色，请先到「音色管理」新建）" }]
+              }
+            />
+            {!cloneReady && <span className="muted">（克隆服务未就绪）</span>}
+          </>
+        )}
         {engine === "kokoro" && (
           <>
             <Select
@@ -178,6 +207,7 @@ export default function ReadPanel(props: PanelProps) {
       <div className="engine-status">
         <EngineBadge label="Kokoro" ready={kokoroReady} />
         <EngineBadge label="Qwen3" ready={qwen3Ready} />
+        <EngineBadge label="克隆音色" ready={cloneReady} />
       </div>
 
       {error && <div className="error-box">⚠️ {error}</div>}

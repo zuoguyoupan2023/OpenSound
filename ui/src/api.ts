@@ -99,7 +99,7 @@ export async function transcribe(
 // ---------- 朗读 TTS ----------
 export interface SpeakParams {
   text: string;
-  engine: "kokoro" | "qwen3";
+  engine: "kokoro" | "qwen3" | "clone";
   sid?: number;
   speed?: number;
   voice?: string;
@@ -158,7 +158,7 @@ export async function chat(
 export interface VoiceChatOptions {
   asrEngine?: string;
   llmEngine?: string;
-  ttsEngine?: "kokoro" | "qwen3";
+  ttsEngine?: "kokoro" | "qwen3" | "clone";
   prompt?: string;
   system?: string;
   sid?: number;

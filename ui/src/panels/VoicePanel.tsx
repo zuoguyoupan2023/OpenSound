@@ -40,7 +40,11 @@ export default function VoicePanel(_props: PanelProps) {
   const elRef = useRef<HTMLAudioElement | null>(null);
 
   const refresh = useCallback(async () => {
-    setVoices(listVoices());
+    try {
+      setVoices(await listVoices());
+    } catch (e) {
+      setError(String(e));
+    }
     try {
       setSamples(await listSampleCandidates());
     } catch (e) {
@@ -87,7 +91,7 @@ export default function VoicePanel(_props: PanelProps) {
         referenceText: refText.trim(),
         onProgress: setGenProgress,
       });
-      setVoices(listVoices());
+      setVoices(await listVoices());
       setShowCreate(false);
       setGenProgress(null);
     } catch (e) {
@@ -122,19 +126,27 @@ export default function VoicePanel(_props: PanelProps) {
     }
   };
 
-  const onRename = (v: CloneVoice) => {
+  const onRename = async (v: CloneVoice) => {
     const next = window.prompt("给音色改名：", v.name);
     if (next && next.trim()) {
-      renameVoice(v.id, next.trim());
-      setVoices(listVoices());
+      try {
+        await renameVoice(v.id, next.trim());
+        setVoices(await listVoices());
+      } catch (e) {
+        setError(String(e));
+      }
     }
   };
 
-  const onDelete = (v: CloneVoice) => {
+  const onDelete = async (v: CloneVoice) => {
     if (!window.confirm(`删除克隆音色「${v.name}」？`)) return;
     if (playingId === v.id) stopPlay();
-    deleteVoice(v.id);
-    setVoices(listVoices());
+    try {
+      await deleteVoice(v.id);
+      setVoices(await listVoices());
+    } catch (e) {
+      setError(String(e));
+    }
   };
 
   const selectedSample = samples.find((s) => s.id === sampleId);
@@ -150,8 +162,8 @@ export default function VoicePanel(_props: PanelProps) {
       }
     >
       <div className="voice-banner">
-        ⚙️ 当前为界面预览阶段：音色在本机临时保存，生成为模拟过程。接入 CosyVoice
-        克隆后端后，「生成」与「试听」将变为真实克隆语音。
+        🎨 克隆音色由本地 CosyVoice3 引擎生成。新建时从音频库选一段已标记为「🎨
+        作样本」的录音，即可生成可复用的克隆音色。
       </div>
 
       {error && <div className="error-box">⚠️ {error}</div>}
@@ -260,7 +272,7 @@ export default function VoicePanel(_props: PanelProps) {
                 <div className="audio-title">🎨 {v.name}</div>
                 <div className="model-meta">
                   <span>{fmtTime(v.created_at)}</span>
-                  <span className="model-cat">{v.engine === "cosyvoice" ? "CosyVoice" : "预览(mock)"}</span>
+                  <span className="model-cat">CosyVoice3 克隆</span>
                   {v.referenceText && <span>{truncate(v.referenceText, 24)}</span>}
                 </div>
               </div>
@@ -268,7 +280,7 @@ export default function VoicePanel(_props: PanelProps) {
                 <Button
                   variant="ghost"
                   onClick={() => preview(v)}
-                  title="试听参考样本（真实克隆需后端接入）"
+                  title="试听该克隆音色（用此音色合成一句）"
                   disabled={playingId !== null && playingId !== v.id}
                 >
                   {playingId === v.id ? "⏹ 停止" : "▶️ 试听"}

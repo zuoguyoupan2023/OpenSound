@@ -1,8 +1,9 @@
-import { useRef, useState } from "react";
+import { useRef, useState, useEffect } from "react";
 import type { PanelProps } from "../App";
 import { chat, transcribe, speakStream } from "../api";
 import { createRecorder, type Recorder, createFramePlayer, stopAudio } from "../audio";
 import { saveRecording, teeCollect, mergeWavFrames, saveTts } from "../audioStore";
+import { listVoices, type CloneVoice } from "../voiceStore";
 import { Panel, Button, Select, Spinner, EngineBadge } from "../components/ui";
 
 interface Msg {
@@ -14,7 +15,9 @@ export default function ChatPanel(props: PanelProps) {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [engine, setEngine] = useState<string>("llama-cpp");
-  const [ttsEngine, setTtsEngine] = useState<"kokoro" | "qwen3">("kokoro");
+  const [ttsEngine, setTtsEngine] = useState<"kokoro" | "qwen3" | "clone">("kokoro");
+  const [cloneVoices, setCloneVoices] = useState<CloneVoice[]>([]);
+  const [cloneVoiceId, setCloneVoiceId] = useState<string>("");
   const [busy, setBusy] = useState(false);
   const [recording, setRecording] = useState(false);
   const [speaking, setSpeaking] = useState(false);
@@ -23,6 +26,16 @@ export default function ChatPanel(props: PanelProps) {
   const playerRef = useRef<ReturnType<typeof createFramePlayer> | null>(null);
 
   const llmReady = props.health?.llm?.model !== "missing";
+
+  // 加载克隆音色（供对话朗读选用）
+  useEffect(() => {
+    listVoices()
+      .then((vs) => {
+        setCloneVoices(vs);
+        if (vs.length) setCloneVoiceId(vs[0].id);
+      })
+      .catch(() => {});
+  }, []);
 
   const sendText = async (content: string) => {
     if (!content.trim() || busy) return;
@@ -82,7 +95,11 @@ export default function ChatPanel(props: PanelProps) {
     const player = createFramePlayer();
     playerRef.current = player;
     try {
-      const stream = await speakStream({ text, engine: ttsEngine });
+      const stream = await speakStream({
+        text,
+        engine: ttsEngine,
+        voice: ttsEngine === "clone" ? cloneVoiceId : undefined,
+      });
       const { playStream, collected } = teeCollect(stream);
       await player.start(playStream);
       setSpeaking(false);
@@ -189,8 +206,20 @@ export default function ChatPanel(props: PanelProps) {
           options={[
             { value: "kokoro", label: "朗读: Kokoro" },
             { value: "qwen3", label: "朗读: Qwen3" },
+            { value: "clone", label: "朗读: 克隆音色" },
           ]}
         />
+        {ttsEngine === "clone" && (
+          <Select
+            value={cloneVoiceId}
+            onChange={setCloneVoiceId}
+            options={
+              cloneVoices.length
+                ? cloneVoices.map((v) => ({ value: v.id, label: `🎨 ${v.name}` }))
+                : [{ value: "", label: "（无克隆音色）" }]
+            }
+          />
+        )}
         <EngineBadge label="LLM" ready={llmReady} />
       </div>
 

@@ -1,41 +1,55 @@
-// 音色管理前端封装
-// GUI 先行阶段：本地 localStorage 模拟，便于先做出「音色管理」面板；
-// 后端 CosyVoice 接入后，把 createVoice/previewVoiceUrl 换成调用 asr-server /clone 即可。
+// 音色管理前端封装 —— 调用 asr-server(9528) 的克隆 REST 接口（后端 CosyVoice3 真实生成）
 import { listAudio, audioAssetUrl, type AudioRecord } from "./audioStore";
+import { getBaseUrl, getToken } from "./api";
 
 export interface CloneVoice {
-  id: string;
+  id: string; // = 后端 voiceId
   name: string;
   sourceRecordId: string; // 参考录音样本 id（音频库录音）
   referenceText: string; // 参考提示文本
   created_at: number;
-  engine: "cosyvoice" | "mock"; // 当前 mock；接入后端后为 cosyvoice
+  engine: "cosyvoice";
 }
 
-const LS_KEY = "tabu_clone_voices_v1";
+function authHeaders(init?: RequestInit): RequestInit {
+  const token = getToken();
+  const headers: Record<string, string> = {
+    ...((init?.headers as Record<string, string>) || {}),
+  };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  return { ...init, headers };
+}
 
-let cache: CloneVoice[] | null = null;
-
-function load(): CloneVoice[] {
-  if (cache) return cache;
-  try {
-    cache = JSON.parse(localStorage.getItem(LS_KEY) || "[]") as CloneVoice[];
-  } catch {
-    cache = [];
+async function jfetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(getBaseUrl() + path, authHeaders(init));
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`;
+    try {
+      const j = await res.json();
+      if (j?.error) msg = j.error;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(msg);
   }
-  return cache!;
+  return (await res.json()) as T;
 }
 
-function persist() {
-  try {
-    localStorage.setItem(LS_KEY, JSON.stringify(cache ?? []));
-  } catch (e) {
-    console.error("保存音色失败:", e);
-  }
+// 把后端 voiceId 映射为前端 CloneVoice
+function mapVoice(v: { voiceId: string } & Partial<CloneVoice>): CloneVoice {
+  return {
+    id: v.voiceId,
+    name: v.name || "未命名音色",
+    sourceRecordId: v.sourceRecordId || "",
+    referenceText: v.referenceText || "",
+    created_at: v.created_at || Date.now(),
+    engine: "cosyvoice",
+  };
 }
 
-export function listVoices(): CloneVoice[] {
-  return [...load()].sort((a, b) => b.created_at - a.created_at);
+export async function listVoices(): Promise<CloneVoice[]> {
+  const r = await jfetch<{ voices: any[] }>("/voices");
+  return (r.voices || []).map(mapVoice);
 }
 
 // 新建音色的候选样本：音频库里所有录音（已标记 🎨 作样本的排前面）
@@ -50,63 +64,89 @@ export async function listSampleCandidates(): Promise<AudioRecord[]> {
     );
 }
 
-// 生成克隆音色（GUI 先行：模拟进度；后端接入后改为 POST /clone）
+// 把音频库录音读成 base64（真实参考音频，供 /clone）
+async function recordToBase64(rec: AudioRecord): Promise<string> {
+  const url = await audioAssetUrl(rec); // asset protocol URL（file://）
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("无法读取参考录音文件");
+  const blob = await res.blob();
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(String(fr.result).split(",")[1] ?? "");
+    fr.onerror = () => reject(new Error("读取参考录音失败"));
+    fr.readAsDataURL(blob);
+  });
+}
+
+// 生成克隆音色（真实后端：POST /clone；参考音频 + 提示文本 → CosyVoice 生成）
 export async function createVoice(opts: {
   name: string;
   sourceRecordId: string;
   referenceText: string;
   onProgress?: (p: { stage: string; pct: number }) => void;
 }): Promise<CloneVoice> {
-  // TODO: 后端接入后替换为 POST /clone（参考音频 + 提示文本 → 生成/更新克隆音色）
-  const stages: [string, number][] = [
-    ["准备参考音频…", 20],
-    ["载入克隆引擎（CosyVoice）…", 45],
-    ["提取音色特征…", 70],
-    ["生成克隆音色…", 95],
-    ["完成", 100],
-  ];
-  for (const [stage, pct] of stages) {
-    opts.onProgress?.({ stage, pct });
-    await new Promise((r) => setTimeout(r, 350));
-  }
-  const voice: CloneVoice = {
-    id: "cv_" + Math.random().toString(36).slice(2, 10),
-    name: opts.name || "我的克隆音色",
-    sourceRecordId: opts.sourceRecordId,
-    referenceText: opts.referenceText,
-    created_at: Date.now(),
-    engine: "mock",
-  };
-  load().push(voice);
-  persist();
-  return voice;
+  const all = await listAudio();
+  const rec = all.find((r) => r.id === opts.sourceRecordId);
+  if (!rec) throw new Error("找不到参考录音样本（可能已删除）");
+
+  const step = (stage: string, pct: number) => opts.onProgress?.({ stage, pct });
+  step("准备参考音频…", 20);
+  const wavBase64 = await recordToBase64(rec);
+
+  step("载入克隆引擎（CosyVoice）并提取音色…", 60);
+  const v = await jfetch<{
+    voiceId: string;
+    name: string;
+    referenceText: string;
+    created_at: number;
+  }>("/clone", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name: opts.name || "我的克隆音色",
+      referenceText: opts.referenceText || "",
+      wavBase64,
+    }),
+  });
+  step("完成", 100);
+  return mapVoice(v);
 }
 
-export function renameVoice(id: string, name: string): void {
-  const v = load().find((x) => x.id === id);
-  if (v) {
-    v.name = name;
-    persist();
-  }
+export async function renameVoice(id: string, name: string): Promise<void> {
+  await jfetch("/voice/rename", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ voiceId: id, name }),
+  });
 }
 
-export function deleteVoice(id: string): void {
-  const arr = load();
-  const i = arr.findIndex((x) => x.id === id);
-  if (i >= 0) {
-    arr.splice(i, 1);
-    persist();
-  }
+export async function deleteVoice(id: string): Promise<void> {
+  await jfetch("/voice/delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ voiceId: id }),
+  });
 }
 
-// 试听：当前阶段播放参考样本录音（真实克隆音色需后端接入）
+// 试听：用该克隆音色真实合成一句测试语，返回可播放的 blob URL
 export async function previewVoiceUrl(voice: CloneVoice): Promise<string | null> {
   try {
-    const all = await listAudio();
-    const rec = all.find((r) => r.id === voice.sourceRecordId);
-    if (!rec) return null;
-    return await audioAssetUrl(rec);
-  } catch {
+    const res = await fetch(
+      `${getBaseUrl()}/speak?engine=clone`,
+      authHeaders({
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: "你好，这是克隆音色的试听效果。", voice: voice.id }),
+      })
+    );
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      throw new Error(j?.error || `HTTP ${res.status}`);
+    }
+    const blob = await res.blob();
+    return URL.createObjectURL(blob);
+  } catch (e) {
+    console.error("试听失败:", e);
     return null;
   }
 }

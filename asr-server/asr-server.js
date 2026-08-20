@@ -24,6 +24,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = parsePort(process.argv);
 const MODEL_SIZE = process.env.ASR_MODEL_SIZE || 'base'; // tiny | base | small | medium（whisper 兜底档位）
 const ASR_ENGINE = (process.env.ASR_ENGINE || 'auto').toLowerCase(); // auto | sensevoice | whisper —— 选择默认识别模型
+// asr-server 架构版本：2.x = 含 sensevoice-original + VAD + 标点。
+// 供 start-all.js 探测时判断 9528 上是否旧进程（旧代码无此字段/不同版本 → 视为残留，终止后重启）。
+const SERVER_VERSION = '2.1.0';
 const WHISPER_MODEL = `onnx-community/whisper-${MODEL_SIZE}`;
 
 // 模型缓存目录
@@ -42,6 +45,11 @@ const VAD = !['0', 'false', 'no'].includes(String(process.env.VAD || '1').toLowe
 // ---------- TTS ----------
 // Qwen3-TTS 转发地址（本地 Python 服务，npm run start-qwen3 启动）；可换 mlx-tts-server / vllm 等 OpenAI 兼容服务
 const QWEN3_TTS_URL = (process.env.QWEN3_TTS_URL || 'http://127.0.0.1:8001').replace(/\/+$/, '');
+// CosyVoice3 本地克隆服务（cosyvoice-tts-server.py，独立进程 8003）
+const COSYVOICE_URL = (process.env.COSYVOICE_URL || 'http://127.0.0.1:8003').replace(/\/+$/, '');
+// 克隆音色存储目录（与 cosyvoice-tts-server.py --voice-dir 一致）
+const COSYVOICE_VOICE_DIR = path.join(__dirname, 'data', 'clone-voices');
+mkdirSync(COSYVOICE_VOICE_DIR, { recursive: true });
 const KOKORO_DIR = path.join(CACHE_DIR, 'tts', 'kokoro-multi-lang-v1_0');
 const KOKORO = {
   model: path.join(KOKORO_DIR, 'model.onnx'),
@@ -433,6 +441,20 @@ async function checkQwen3() {
   return status;
 }
 
+// CosyVoice3 克隆服务可达性探测（缓存 30s）；status: reachable | missing
+let cosyvoiceCache = { t: 0, status: 'missing' };
+async function checkCosyvoice() {
+  const now = Date.now();
+  if (now - cosyvoiceCache.t < 30000) return cosyvoiceCache.status;
+  let status = 'missing';
+  try {
+    const r = await fetch(COSYVOICE_URL + '/health', { signal: AbortSignal.timeout(2000) });
+    if (r.ok) status = 'reachable';
+  } catch (e) { /* missing */ }
+  cosyvoiceCache = { t: now, status };
+  return status;
+}
+
 // 云端 TTS（OpenAI 兼容 /v1/audio/speech）：cfg = { baseUrl, apiKey, model, voice }；返回 mp3/WAV Buffer
 async function cloudTtsCall(cfg, text) {
   if (!cfg || !cfg.baseUrl || !cfg.apiKey) throw new Error('云端 TTS 未配置（Base URL / API Key）');
@@ -616,6 +638,43 @@ const TTS_ENGINES = {
     },
     wav: async (body) => cosyvoiceTtsCall(body.cosyvoice || {}, body.text),
   },
+  clone: {
+    name: 'clone',
+    label: '🎨 克隆音色（CosyVoice3 本地）',
+    // body.voice = 克隆音色 id；转发 cosyvoice-tts-server.py(8003)，透传帧流（两端协议一致）
+    stream: async (res, body) => {
+      if (!body.voice) throw new Error('克隆引擎需要指定音色（voice=克隆音色id）');
+      const up = await fetch(COSYVOICE_URL + '/speak?stream=1', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: body.text, voice: body.voice }),
+      });
+      if (!up.ok) {
+        const data = await up.json().catch(() => ({}));
+        throw new Error('克隆音色服务错误：' + (data.error || 'HTTP ' + up.status));
+      }
+      res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
+      res.flushHeaders();
+      for await (const chunk of up.body) res.write(chunk);
+      res.end();
+    },
+    wav: async (body) => {
+      if (!body.voice) throw new Error('克隆引擎需要指定音色（voice=克隆音色id）');
+      const up = await fetch(COSYVOICE_URL + '/speak', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: body.text, voice: body.voice }),
+        signal: AbortSignal.timeout(120000),
+      });
+      if (!up.ok) {
+        const data = await up.json().catch(() => ({}));
+        throw new Error('克隆音色服务错误：' + (data.error || 'HTTP ' + up.status));
+      }
+      const buf = Buffer.from(await up.arrayBuffer());
+      if (!buf.length) throw new Error('克隆音色服务未返回音频');
+      return buf;
+    },
+  },
 };
 
 
@@ -709,6 +768,7 @@ function whisperInstalled() {
 const MODEL_ITEMS = [
   { category: 'tts', engine: 'kokoro',     label: 'Kokoro（中英混合 · 53 音色）',   size: '~350MB', installed: () => kokoroReady() },
   { category: 'tts', engine: 'qwen3',      label: 'Qwen3-TTS 0.6B（MPS · 流式）',    size: '~1.2GB', installed: async () => (await checkQwen3()) === 'reachable' },
+  { category: 'tts', engine: 'cosyvoice-clone', label: 'CosyVoice3 语音克隆（0.5B · MPS）', size: '~9.1GB', installed: async () => (await checkCosyvoice()) === 'reachable' },
   { category: 'asr', engine: 'sensevoice', label: 'SenseVoice（中文/粤/日/韩最优）', size: '~228MB', installed: () => existsSync(SENSEVOICE_MODEL) },
   { category: 'asr', engine: 'sensevoice-original', label: 'SenseVoice 原始版（funasr · 高精度）', size: '~900MB', installed: async () => (await checkSenseVoiceOriginal()) === 'reachable' },
   { category: 'asr', engine: 'whisper',    label: 'Whisper base（多语兜底）',        size: '~500MB', installed: () => whisperInstalled() },
@@ -799,8 +859,9 @@ const server = http.createServer(async (req, res) => {
     const ollamaStatus = await checkOllama();
     return send(200, {
       ok: true,
+      version: SERVER_VERSION,
       engines: ['whisper', existsSync(SENSEVOICE_MODEL) ? 'sensevoice' : 'sensevoice(未下载)', 'sensevoice-original'],
-      tts: { kokoro: kokoroStatus, kokoroSpeakers, qwen3 },
+      tts: { kokoro: kokoroStatus, kokoroSpeakers, qwen3, cosyvoice: await checkCosyvoice() },
       llm: { engine: 'llama-cpp', model: llmReady ? path.basename(LLM_MODEL) : 'missing', ollama: ollamaStatus },
       models: await collectModels(), // 014 §5.2：已装模型清单（/models 同款）
       port: PORT
@@ -834,6 +895,66 @@ const server = http.createServer(async (req, res) => {
       try { res.end(); } catch (e2) {}
     }
     return;
+  }
+
+  // 克隆音色：POST /clone  body=JSON { name, referenceText, wavBase64 } → 生成/更新一个克隆音色（转发 cosyvoice 服务）
+  if (req.method === 'POST' && url.pathname === '/clone') {
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      body = JSON.parse(Buffer.concat(chunks).toString('utf-8') || '{}');
+    } catch (e) {
+      return send(400, { error: '请求体必须是 JSON' });
+    }
+    try {
+      const up = await fetch(COSYVOICE_URL + '/clone', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: body.name, referenceText: body.referenceText, wavBase64: body.wavBase64
+        }),
+        signal: AbortSignal.timeout(180000),
+      });
+      const data = await up.json().catch(() => ({}));
+      return send(up.ok ? 200 : 500, data);
+    } catch (e) {
+      log('克隆失败: ' + e.message);
+      return send(500, { error: '克隆服务不可用：' + e.message + '（请确认 cosyvoice 服务已启动）' });
+    }
+  }
+
+  // 克隆音色：GET /voices → { voices: [...] }；POST /voice/rename、/voice/delete → 转发 cosyvoice 服务
+  if (req.method === 'GET' && url.pathname === '/voices') {
+    try {
+      const up = await fetch(COSYVOICE_URL + '/voices', { signal: AbortSignal.timeout(3000) });
+      const data = await up.json().catch(() => ({}));
+      return send(up.ok ? 200 : 500, data);
+    } catch (e) {
+      return send(500, { error: '克隆服务不可用：' + e.message });
+    }
+  }
+  if ((req.method === 'POST') && (url.pathname === '/voice/rename' || url.pathname === '/voice/delete')) {
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      body = JSON.parse(Buffer.concat(chunks).toString('utf-8') || '{}');
+    } catch (e) {
+      return send(400, { error: '请求体必须是 JSON' });
+    }
+    try {
+      const up = await fetch(COSYVOICE_URL + url.pathname, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(5000),
+      });
+      const data = await up.json().catch(() => ({}));
+      return send(up.ok ? 200 : 500, data);
+    } catch (e) {
+      return send(500, { error: '克隆服务不可用：' + e.message });
+    }
   }
 
   // 本地 LLM：POST /chat  body=JSON { messages, engine?, temperature?, top_p?, maxTokens?, model? } → { text, engine }
@@ -895,7 +1016,9 @@ const server = http.createServer(async (req, res) => {
       // ③ 朗读（qwen3 不可达时自动回退 kokoro，保证全链路始终可用）；经 TTS_ENGINES.wav() 统一（014 §5.2）
       let wav;
       let actualTts = ttsEngine;
-      const ttsEng = ttsEngine === 'qwen3' ? TTS_ENGINES.qwen3 : TTS_ENGINES.kokoro;
+      const ttsEng = ttsEngine === 'qwen3' ? TTS_ENGINES.qwen3
+        : ttsEngine === 'clone' ? TTS_ENGINES.clone
+        : TTS_ENGINES.kokoro;
       try {
         wav = await ttsEng.wav({
           text: answer,

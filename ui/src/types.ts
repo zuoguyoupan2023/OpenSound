@@ -15,6 +15,7 @@ export interface HealthInfo {
     kokoro: string; // ready | missing | not-installed
     kokoroSpeakers: number | null;
     qwen3: string; // reachable | unreachable
+    cosyvoice: string; // reachable | missing
   };
   llm: {
     engine: string;
