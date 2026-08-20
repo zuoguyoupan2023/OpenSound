@@ -16,7 +16,7 @@
 
 import http from 'node:http';
 import { execSync, spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, renameSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -718,10 +718,23 @@ let llmSessionPath = null;
 let llmInitPromise = null;
 let llmInitError = null;
 
+// 安装新 LLM 模型后调用：清空加载缓存，让下次对话重新加载（无需重启 App/服务）
+function llmInvalidate() {
+  llmSession = null;
+  llmSessionPath = null;
+  llmInitPromise = null;
+  llmInitError = null;
+}
+
 async function getLlamaSession(modelPath) {
   // 若已加载且路径一致则复用；否则换模型重载（同一时间只保留一个活跃模型，省内存）
   if (llmSession && llmSessionPath === modelPath) return llmSession;
-  if (llmInitError) throw new Error(llmInitError);
+  // 模型文件被替换/新装后，之前缓存的失败原因不再成立 → 重置以便重试
+  if (llmInitError) {
+    const stillMissing = !existsSync(modelPath);
+    if (stillMissing) throw new Error(llmInitError);
+    llmInitError = null; // 文件已就位，允许重新尝试加载
+  }
   if (llmInitPromise) return llmInitPromise;
   llmInitPromise = (async () => {
     if (!existsSync(modelPath)) throw new Error('LLM 模型缺失：' + modelPath + '\n请在模型管理里下载，或把 GGUF 放到 models/llm/');
@@ -841,6 +854,44 @@ function runDownload(cmd, args) {
   });
 }
 
+// LLM 专用下载器：先下载到 .part 临时文件，完整下载成功后 rename 成正式文件名。
+// 这样 installed 只检查正式文件是否存在 → 下载中（仅 .part）不算已安装，避免误导。
+function runLlmDownload(file, url) {
+  return (ctx) => new Promise((resolve, reject) => {
+    const target = path.join(LLM_DIR, file);
+    const part = target + '.part';
+    ctx.nd({ type: 'log', message: '开始下载（下载中未完成前不显示"已安装"）…' });
+    const p = spawn('curl', ['-L', '-C', '-', '--connect-timeout', '15', '--max-time', '14400', '-o', part, url], {
+      cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let buf = '';
+    const onData = (chunk) => {
+      buf += chunk.toString();
+      let idx;
+      while ((idx = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, idx).replace(/\r$/, '').trim();
+        buf = buf.slice(idx + 1);
+        if (line) ctx.nd({ type: 'log', message: line });
+      }
+    };
+    p.stdout.on('data', onData);
+    p.stderr.on('data', onData);
+    p.on('error', (e) => reject(new Error('无法启动下载器：' + e.message)));
+    p.on('exit', (code) => {
+      if (buf.trim()) ctx.nd({ type: 'log', message: buf.trim() });
+      if (code === 0) {
+        // 下载完成：把 .part 原子地 rename 成正式文件 → installed 才变为 true
+        fs.renameSync(part, target);
+        ctx.nd({ type: 'done', message: '安装完成：' + file });
+        resolve();
+      } else {
+        // 失败保留 .part 供断点续传；不产生正式文件
+        reject(new Error('下载失败（退出码 ' + code + '），已保留部分文件，可重试续传'));
+      }
+    });
+  });
+}
+
 mkdirSync(LLM_DIR, { recursive: true }); // 供 LLM 模型落盘
 
 const INSTALLERS = {
@@ -850,7 +901,7 @@ const INSTALLERS = {
   ...Object.fromEntries(
     Object.entries(LLM_MODELS).map(([key, m]) => [
       key,
-      runDownload('curl', ['-L', '-C', '-', '--connect-timeout', '15', '--max-time', '14400', '-o', path.join(LLM_DIR, m.file), m.url]),
+      runLlmDownload(m.file, m.url),
     ])
   ),
   qwen3: (ctx) => ctx.nd({ type: 'done', message: 'Qwen3-TTS 无独立下载脚本：模型在首次启动 qwen3 服务（npm run start-qwen3）时自动下载。' }),
@@ -1116,6 +1167,8 @@ const server = http.createServer(async (req, res) => {
     const ctx = { nd: (obj) => { try { res.write(JSON.stringify(obj) + '\n'); } catch (e) {} } };
     try {
       await installer(ctx);
+      // LLM 模型下载完成后清空加载缓存，下次对话无需重启即可直接加载新模型
+      if (LLM_MODELS[engine]) llmInvalidate();
     } catch (e) {
       ctx.nd({ type: 'error', message: String((e && e.message) || e) });
     } finally {
