@@ -1,6 +1,7 @@
 # 000 · Tabu-Voice 桌面 App 规划（Tauri · 开放本地语音后端）
 
 > 状态：**规划**（可作为 010 相位1 的落地文档；目录当前为 `Tabu-Voice/`，正式名 **Tabu-Local**）
+> 📌 **看当前完成状态 → `000-summary.md`；看后续任务 → `006-voice-后续规划.md`（最新参考规划）。**
 > 目标：把本地语音服务做成一个**点开即用的 Tauri 桌面 App**——既能独立完整使用（识别/朗读/对话），又作为**开放端口后端**支撑 浏览器插件(Tabu-AI) / 网站 / 其它 App / 命令行终端 接入本地语音与 LLM 能力。
 > 关联文档：`007`（本地 ASR/TTS 实现与踩坑）、`008`（语音助手）、`009`（桌面 App 愿景）、`010`（本地语音一体化 voice-server）、`011`（项目拆分）、`013`（性能/硬件加速）、`014`（TTS 调研）、`015`（Tabu-AI 能力来源）、`016`（手机 ASR 调研）、`017`（浏览器 SenseVoice）。
 > 本文件是「Tabu-Voice 作为桌面 App + 后端」的**专项规划**；接口细节以 `Tabu-Voice/GUIDE.md`（调用指南）与 `000-backend.md`（启动手册）为准。
@@ -149,12 +150,13 @@ Tabu-Voice App（Tauri 壳 → 常驻 asr-server 子进程）
 | 阶段 | 内容 | 状态/依赖 |
 |---|---|---|
 | M0 | 现有 asr-server 服务化（`npm run all` 可用、qwen3 镜像修复、ASR_ENGINE 选择、SPEC 雏形） | ✅ 已完成 |
-| M1 | **Tauri 壳**：拉起 asr-server、托盘、点开即用；macOS 本机验证 | ⏳ 本次启动 |
-| M2 | **GUI**：语音工作台 + 识别/朗读/对话/模型管理面板 + 设置（端口/Token/自启） | ✅ 已完成 |
+| M1 | **Tauri 壳**：拉起 asr-server、托盘、点开即用；macOS 本机验证 | ✅ 已完成 |
+| M2 | **GUI**：语音工作台 + 识别/朗读/对话/模型管理面板 + 设置 | ✅ 已完成 |
 | M2.5 | **录音链路修复**：macOS WebView 无 getUserMedia → Rust 原生录音（cpal）+ CORS | ✅ 已完成（见 §六） |
-| M3 | **SPEC.md 定稿**：对外开放规范（鉴权/帧流/能力上报/接入示例） | ✅ 已完成 |
-| M4 | **GitHub Actions CI**：macOS/Windows/Linux 三平台 `tauri build` 产物 | 并行 |
-| M5 | **Realtime 实时语音 + 语音克隆 TTS**：WS/RT 通道 + 克隆音色 GUI | 远期 |
+| M2.6 | **SenseVoice 原始版(funasr) + 自动标点 + VAD 过滤静音**（三档 ASR + 后处理） | ✅ 已完成（见 `000-summary.md`） |
+| M3 | **SPEC.md 定稿**：对外开放规范 | ✅ 已完成 |
+| M4 | **GitHub Actions CI**：macOS/Windows/Linux 三平台 `tauri build` 产物 | ⏳ 进行中（并行） |
+| M5 | **Realtime 实时语音 + 语音克隆 TTS** | ⏳ 待做（Realtime 见 §七；克隆见 `004`/`006`） |
 | M6 | **本地 LLM 增强 + 独立完整闭环打磨** | 远期 |
 
 ---

@@ -18,6 +18,10 @@ export default function AsrPanel(props: PanelProps) {
   const recRef = useRef<Recorder | null>(null);
 
   const hasSense = props.health?.engines?.some((e) => e.includes("sensevoice"));
+  // 原始版状态：从 /models 里 sensevoice-original 的 installed 读真实可达性（= funasr 后端 8002 是否在跑）
+  const hasOrig = props.models?.some(
+    (m) => m.engine === "sensevoice-original" && m.installed
+  );
 
   const toggle = async () => {
     setError("");
@@ -135,7 +139,7 @@ export default function AsrPanel(props: PanelProps) {
 
       <div className="engine-status">
         <EngineBadge label="SenseVoice 量化版" ready={!!hasSense} />
-        <EngineBadge label="SenseVoice 原始版" ready={false} />
+        <EngineBadge label="SenseVoice 原始版" ready={!!hasOrig} />
         <EngineBadge label="Whisper" ready={true} />
       </div>
 
