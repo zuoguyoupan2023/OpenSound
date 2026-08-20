@@ -10,7 +10,7 @@ type State = "idle" | "recording" | "processing" | "done";
 export default function AsrPanel(props: PanelProps) {
   const [state, setState] = useState<State>("idle");
   const [engine, setEngine] = useState<string>("auto");
-  const [punc, setPunc] = useState<boolean>(true);
+  const [punc, setPunc] = useState<boolean>(false);
   const [vad, setVad] = useState<boolean>(true);
   const [text, setText] = useState("");
   const [error, setError] = useState("");
