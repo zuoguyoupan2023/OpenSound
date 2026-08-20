@@ -5,12 +5,15 @@
 //     tts/          TTS 朗读结果 WAV
 //     index.json    元数据索引
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
+use zip::write::FileOptions;
+use zip::{CompressionMethod, ZipWriter};
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -26,6 +29,9 @@ pub struct AudioRecord {
     pub duration_sec: f64,
     pub engine: String,
     pub text: String,
+    /// 是否被标记为克隆音色样本来源
+    #[serde(default)]
+    pub is_clone_sample: bool,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -120,6 +126,7 @@ pub fn audio_save(
         duration_sec,
         engine,
         text,
+        is_clone_sample: false,
     };
 
     let mut idx = read_index(&dir);
@@ -165,4 +172,77 @@ pub fn audio_get_dir(app: tauri::AppHandle) -> Result<String, String> {
     fs::create_dir_all(recordings_dir(&dir)).map_err(|e| e.to_string())?;
     fs::create_dir_all(tts_dir(&dir)).map_err(|e| e.to_string())?;
     Ok(dir.to_string_lossy().into_owned())
+}
+
+/// 把一条音频与其配套文本一起导出为 zip（dest_path 为前端保存对话框给出的完整 .zip 路径）
+#[tauri::command]
+pub fn audio_export(
+    app: tauri::AppHandle,
+    id: String,
+    dest_path: String,
+) -> Result<(), String> {
+    let dir = audio_dir(&app)?;
+    let idx = read_index(&dir);
+    let rec = idx
+        .items
+        .iter()
+        .find(|r| r.id == id)
+        .ok_or("音频记录不存在")?;
+
+    let wav_abs = dir.join(&rec.file);
+    let wav = fs::read(&wav_abs).map_err(|e| format!("读取音频失败: {e}"))?;
+
+    let base = if rec.text.trim().is_empty() {
+        format!("{}", rec.id)
+    } else {
+        // 用文本开头做文件名，去掉非法字符
+        let clean: String = rec
+            .text
+            .chars()
+            .take(20)
+            .map(|c| if c.is_ascii_alphanumeric() || c.is_ascii_whitespace() { c } else { '-' })
+            .collect::<String>()
+            .trim()
+            .chars()
+            .map(|c| if c.is_ascii_whitespace() { '-' } else { c })
+            .collect();
+        format!("{}-{}", clean, rec.id)
+    };
+    let kind_label = if rec.kind == "recording" { "录音" } else { "朗读" };
+
+    let out = fs::File::create(&dest_path).map_err(|e| format!("无法创建导出文件: {e}"))?;
+    let mut zw = ZipWriter::new(out);
+    let opts = FileOptions::default().compression_method(CompressionMethod::Stored);
+
+    zw.start_file(format!("{base}.wav"), opts)
+        .map_err(|e| e.to_string())?;
+    zw.write_all(&wav).map_err(|e| e.to_string())?;
+
+    let txt = format!(
+        "# Tabu-Local {kind_label}导出\n\n- 类型: {}\n- 引擎: {}\n- 时长: {:.1} 秒\n- 时间: {}\n\n## 文本\n\n{}\n",
+        kind_label,
+        if rec.engine.is_empty() { "auto" } else { &rec.engine },
+        rec.duration_sec,
+        rec.created_at,
+        if rec.text.trim().is_empty() { "(无文本)" } else { rec.text.trim() }
+    );
+    zw.start_file(format!("{base}.txt"), opts)
+        .map_err(|e| e.to_string())?;
+    zw.write_all(txt.as_bytes()).map_err(|e| e.to_string())?;
+
+    zw.finish().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 标记/取消某条录音作为克隆音色样本来源
+#[tauri::command]
+pub fn audio_set_clone_sample(app: tauri::AppHandle, id: String, flag: bool) -> Result<(), String> {
+    let dir = audio_dir(&app)?;
+    let mut idx = read_index(&dir);
+    let Some(rec) = idx.items.iter_mut().find(|r| r.id == id) else {
+        return Err("音频记录不存在".into());
+    };
+    rec.is_clone_sample = flag;
+    write_index(&dir, &idx)?;
+    Ok(())
 }

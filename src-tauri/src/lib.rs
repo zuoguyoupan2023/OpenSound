@@ -335,6 +335,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(state.clone())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
             let handle = app.handle().clone();
             let state2 = state.clone();
@@ -374,7 +375,9 @@ pub fn run() {
             audio_store::audio_save,
             audio_store::audio_list,
             audio_store::audio_delete,
-            audio_store::audio_get_dir
+            audio_store::audio_get_dir,
+            audio_store::audio_export,
+            audio_store::audio_set_clone_sample
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -5,6 +5,8 @@ import {
   deleteAudio,
   audioAssetUrl,
   getAudioDir,
+  exportAudio,
+  setCloneSample,
   type AudioRecord,
 } from "../audioStore";
 import { Panel, Button, Spinner } from "../components/ui";
@@ -104,6 +106,30 @@ export default function AudioLibraryPanel(_props: PanelProps) {
     }
   };
 
+  const exp = async (rec: AudioRecord) => {
+    const base =
+      (rec.text ? rec.text.trim() : "").replace(/[\\/:*?"<>|\s]/g, "-").slice(0, 20) ||
+      rec.id;
+    try {
+      const ok = await exportAudio(rec, `${rec.kind === "recording" ? "录音" : "朗读"}-${base}`);
+      if (ok) alert("✅ 已导出为 zip（含音频 + 文本）");
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const toggleClone = async (rec: AudioRecord) => {
+    const next = !rec.is_clone_sample;
+    try {
+      await setCloneSample(rec.id, next);
+      setItems((l) =>
+        l.map((x) => (x.id === rec.id ? { ...x, is_clone_sample: next } : x))
+      );
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   const shown = items.filter((x) => x.kind === tab);
 
   return (
@@ -172,6 +198,18 @@ export default function AudioLibraryPanel(_props: PanelProps) {
                   disabled={playingId !== null && playingId !== rec.id}
                 >
                   {playingId === rec.id ? "⏹ 停止" : "▶️ 播放"}
+                </Button>
+                {rec.kind === "recording" && (
+                  <Button
+                    variant="ghost"
+                    onClick={() => toggleClone(rec)}
+                    title="把这段录音作为克隆音色的参考样本"
+                  >
+                    {rec.is_clone_sample ? "🎨 样本✓" : "🎨 作样本"}
+                  </Button>
+                )}
+                <Button variant="ghost" onClick={() => exp(rec)} title="导出为 zip（含音频 + 文本）">
+                  📦 导出
                 </Button>
                 <Button variant="danger" onClick={() => remove(rec)}>
                   🗑

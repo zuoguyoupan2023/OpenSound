@@ -1,5 +1,6 @@
 // 音频库前端封装：保存（录音/TTS）、列表、删除、播放（asset protocol）
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { save as dialogSave } from "@tauri-apps/plugin-dialog";
 
 export interface AudioRecord {
   id: string;
@@ -9,6 +10,7 @@ export interface AudioRecord {
   duration_sec: number;
   engine: string;
   text: string;
+  is_clone_sample: boolean;
 }
 
 // ---------- 小工具 ----------
@@ -76,6 +78,29 @@ export async function listAudio(): Promise<AudioRecord[]> {
 
 export async function deleteAudio(id: string): Promise<void> {
   await invoke("audio_delete", { id });
+}
+
+// ---------- 导出（zip：音频 + 配套文本） ----------
+// 弹保存对话框，选好路径后由 Rust 打包 zip 写入
+export async function exportAudio(
+  rec: AudioRecord,
+  defaultName: string
+): Promise<boolean> {
+  const path = await dialogSave({
+    defaultPath: `${defaultName}.zip`,
+    filters: [{ name: "ZIP 压缩包", extensions: ["zip"] }],
+  });
+  if (!path) return false; // 用户取消
+  await invoke("audio_export", { id: rec.id, destPath: path });
+  return true;
+}
+
+// 标记/取消该条录音作为克隆音色样本来源
+export async function setCloneSample(
+  id: string,
+  flag: boolean
+): Promise<void> {
+  await invoke("audio_set_clone_sample", { id, flag });
 }
 
 // ---------- 播放（asset protocol） ----------

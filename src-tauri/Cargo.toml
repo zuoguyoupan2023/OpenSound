@@ -21,6 +21,8 @@ tokio = { version = "1", features = ["process", "time", "macros"] }
 reqwest = { version = "0.12", features = ["json"] }
 cpal = "0.15"
 base64 = "0.22"
+zip = "0.6"
+tauri-plugin-dialog = "2"
 
 [profile.dev]
 # 省磁盘：关闭 debuginfo、合并符号（Tauri dev 调试已足够）
