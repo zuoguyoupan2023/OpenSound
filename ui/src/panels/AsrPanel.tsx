@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import type { PanelProps } from "../App";
 import { transcribe } from "../api";
 import { createRecorder, type Recorder } from "../audio";
+import { saveRecording } from "../audioStore";
 import { Panel, Button, Select, Spinner, EngineBadge } from "../components/ui";
 
 type State = "idle" | "recording" | "processing" | "done";
@@ -26,6 +27,10 @@ export default function AsrPanel(props: PanelProps) {
       const t0 = Date.now();
       try {
         const r = await transcribe(wav, engine);
+        // 顺手保存录音到音频库（不阻塞）
+        saveRecording(wav, engine, r.text).catch((e) =>
+          console.error("保存录音失败:", e)
+        );
         setText(r.text);
         setElapsed(Math.round((Date.now() - t0) / 100) / 10);
         setState("done");

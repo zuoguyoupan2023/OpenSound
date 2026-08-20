@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import type { PanelProps } from "../App";
 import { chat, transcribe, speakStream } from "../api";
 import { createRecorder, type Recorder, createFramePlayer, stopAudio } from "../audio";
+import { saveRecording, teeCollect, mergeWavFrames, saveTts } from "../audioStore";
 import { Panel, Button, Select, Spinner, EngineBadge } from "../components/ui";
 
 interface Msg {
@@ -64,6 +65,9 @@ export default function ChatPanel(props: PanelProps) {
       const wav = await rec.stop();
       recRef.current = null;
       const r = await transcribe(wav, "auto");
+      saveRecording(wav, "auto", r.text).catch((e) =>
+        console.error("保存录音失败:", e)
+      );
       await sendText(r.text);
     } catch (e) {
       setError(String(e));
@@ -79,10 +83,18 @@ export default function ChatPanel(props: PanelProps) {
     playerRef.current = player;
     try {
       const stream = await speakStream({ text, engine: ttsEngine });
-      await player.start(stream);
+      const { playStream, collected } = teeCollect(stream);
+      await player.start(playStream);
+      setSpeaking(false);
+      // 播放完成后保存朗读结果（不阻塞）
+      collected
+        .then((frames) => {
+          if (frames.length)
+            return saveTts(mergeWavFrames(frames), ttsEngine, text);
+        })
+        .catch((e) => console.error("保存朗读失败:", e));
     } catch (e) {
       setError(String(e));
-    } finally {
       setSpeaking(false);
     }
   };

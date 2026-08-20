@@ -46,4 +46,5 @@ export type PanelId =
   | "asr"
   | "chat"
   | "models"
+  | "audio"
   | "settings";

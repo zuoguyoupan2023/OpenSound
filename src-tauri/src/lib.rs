@@ -9,6 +9,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::menu::{Menu, MenuItem};
 use tauri::{Emitter, Manager, State};
 
+mod audio_store;
 mod recorder;
 use recorder::Recorder;
 
@@ -369,7 +370,11 @@ pub fn run() {
             recorder_stop,
             recorder_is_recording,
             get_server_path,
-            set_server_path
+            set_server_path,
+            audio_store::audio_save,
+            audio_store::audio_list,
+            audio_store::audio_delete,
+            audio_store::audio_get_dir
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

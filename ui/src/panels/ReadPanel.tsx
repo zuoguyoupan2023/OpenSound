@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import type { PanelProps } from "../App";
 import { speakStream } from "../api";
 import { createFramePlayer, type FramePlayer, stopAudio } from "../audio";
+import { teeCollect, mergeWavFrames, saveTts } from "../audioStore";
 import { Panel, Button, Select, Spinner, EngineBadge } from "../components/ui";
 
 const KOKORO_VOICES = [
@@ -59,8 +60,16 @@ export default function ReadPanel(props: PanelProps) {
         voice,
         language,
       });
-      await player.start(stream);
+      const { playStream, collected } = teeCollect(stream);
+      await player.start(playStream);
       setState("done");
+      // 播放完成后，把帧流合并为单个 WAV 存进音频库（不阻塞）
+      collected
+        .then((frames) => {
+          if (frames.length)
+            return saveTts(mergeWavFrames(frames), engine, text);
+        })
+        .catch((e) => console.error("保存朗读失败:", e));
     } catch (e) {
       setError(String(e));
       setState("idle");

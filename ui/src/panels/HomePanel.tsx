@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import type { PanelProps } from "../App";
 import { voiceChat } from "../api";
 import { createRecorder, type Recorder, playWav, stopAudio } from "../audio";
+import { saveRecording, saveTts } from "../audioStore";
 import { Panel, Button, EngineBadge, Select, Spinner } from "../components/ui";
 
 type Stage = "idle" | "recording" | "processing" | "speaking" | "done";
@@ -37,6 +38,13 @@ export default function HomePanel(props: PanelProps) {
           llmEngine,
           ttsEngine,
         });
+        // 顺手保存录音 + 朗读结果到音频库（不阻塞）
+        saveRecording(wav, asrEngine, r.recognized).catch((e) =>
+          console.error("保存录音失败:", e)
+        );
+        saveTts(r.audioBase64, ttsEngine, r.answer).catch((e) =>
+          console.error("保存朗读失败:", e)
+        );
         setResult(r);
         setStage("speaking");
         await playWav(base64ToBlob(r.audioBase64));

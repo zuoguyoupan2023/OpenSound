@@ -638,6 +638,73 @@ textarea:focus,
   color: var(--fail);
 }
 
+/* ===== 音频库 ===== */
+.audio-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.audio-tab {
+  background: var(--card);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 8px 16px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.audio-tab:hover {
+  border-color: var(--accent);
+}
+
+.audio-tab.active {
+  background: var(--accent-2);
+  border-color: var(--accent-2);
+  color: #fff;
+}
+
+.audio-dir {
+  font-size: 12px;
+  word-break: break-all;
+  margin: 0 0 12px;
+}
+
+.audio-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.audio-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--card);
+  border-radius: 10px;
+  padding: 12px 14px;
+  gap: 12px;
+}
+
+.audio-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.audio-title {
+  font-size: 14px;
+  font-weight: 500;
+  margin-bottom: 4px;
+  word-break: break-word;
+}
+
+.audio-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 /* ===== 设置 ===== */
 .settings-block {
   background: var(--card);
