@@ -283,6 +283,21 @@ fn realtime_is_recording(state: State<'_, Arc<AppState>>) -> bool {
     state.realtime.is_recording()
 }
 
+#[tauri::command]
+fn realtime_pause(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    state.realtime.pause()
+}
+
+#[tauri::command]
+fn realtime_resume(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    state.realtime.resume()
+}
+
+#[tauri::command]
+fn realtime_is_paused(state: State<'_, Arc<AppState>>) -> bool {
+    state.realtime.is_paused()
+}
+
 // ---------- 启动时健康轮询，前端通过事件订阅 ----------
 async fn poll_health(app: tauri::AppHandle, state: Arc<AppState>) {
     loop {
@@ -398,6 +413,9 @@ pub fn run() {
             realtime_read,
             realtime_stop,
             realtime_is_recording,
+            realtime_pause,
+            realtime_resume,
+            realtime_is_paused,
             get_server_path,
             set_server_path,
             audio_store::audio_save,

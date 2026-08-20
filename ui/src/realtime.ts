@@ -28,9 +28,15 @@ export class RealtimeSession {
   private segmentCount = 0;
   private lastVadCheck = 0; // 距上次 VAD 检查的样本数
   private running = false;
+  private paused = false;
   private timer: ReturnType<typeof setInterval> | null = null;
   private engine = "auto";
   private cb: RealtimeCallbacks;
+  /** 静音自动结束：静音超过该毫秒即自动停止（0 表示关闭） */
+  private autoStopMs = 0;
+  private lastVoiceSample = 0; // 最近一次检测到语音的样本位置（buf 内）
+  /** 自动停止触发回调（让面板回到 done 态） */
+  private onAutoStop: (() => void) | null = null;
 
   constructor(engine: string, cb: RealtimeCallbacks) {
     this.engine = engine;
@@ -40,6 +46,16 @@ export class RealtimeSession {
   get isRunning() {
     return this.running;
   }
+  get isPaused() {
+    return this.paused;
+  }
+
+  setAutoStop(ms: number) {
+    this.autoStopMs = ms;
+  }
+  setAutoStopHandler(fn: () => void) {
+    this.onAutoStop = fn;
+  }
 
   async start(): Promise<void> {
     if (this.running) return;
@@ -48,9 +64,26 @@ export class RealtimeSession {
     this.committedEnd = 0;
     this.segmentCount = 0;
     this.lastVadCheck = 0;
+    this.lastVoiceSample = 0;
+    this.paused = false;
     await invoke("realtime_start");
     this.running = true;
     this.timer = setInterval(() => void this.tick(), READ_INTERVAL_MS);
+  }
+
+  /** 暂停/继续（Rust 侧回调丢弃新样本；已识别句子保留） */
+  async togglePause(): Promise<boolean> {
+    if (!this.running) return this.paused;
+    if (this.paused) {
+      await invoke("realtime_resume");
+      this.paused = false;
+    } else {
+      await invoke("realtime_pause");
+      this.paused = true;
+      // 暂停期间再收一次尾，把已说完的句子提交
+      await this.commitPending(true);
+    }
+    return this.paused;
   }
 
   async stop(): Promise<string> {
@@ -87,6 +120,11 @@ export class RealtimeSession {
     }
   }
 
+  /** 完整录音（整段 16k 音频）为 WAV Blob，供保存到音频库 */
+  getFullAudioWav(): Blob {
+    return pcmToWavBlob(this.toInt16(this.buf), SR);
+  }
+
   private async tick() {
     if (!this.running) return;
     try {
@@ -101,6 +139,14 @@ export class RealtimeSession {
       ) {
         this.lastVadCheck = this.buf.length;
         await this.commitPending(false);
+      }
+      // 静音自动结束：距最后语音段的静音超过阈值 → 自动停止
+      if (this.autoStopMs > 0) {
+        const silenceMs = ((this.buf.length - this.lastVoiceSample) / SR) * 1000;
+        if (silenceMs >= this.autoStopMs && this.lastVoiceSample > 0) {
+          this.onAutoStop?.();
+          return;
+        }
       }
     } catch (e) {
       // 采集可能已被中断
@@ -140,6 +186,11 @@ export class RealtimeSession {
       return; // VAD 服务暂不可用则不切句
     }
     if (!segs.length) return;
+    // 记录最近一次检测到语音的位置（最后一个语音段末尾）
+    const lastSeg = segs[segs.length - 1];
+    if (lastSeg && lastSeg.length >= 2) {
+      this.lastVoiceSample = Math.round((lastSeg[1] / 1000) * SR);
+    }
 
     let commitTo = this.committedEnd; // 样本数（buf 内坐标）
     for (const [sMs, eMs] of segs) {

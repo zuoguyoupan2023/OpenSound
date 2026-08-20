@@ -26,7 +26,7 @@ const MODEL_SIZE = process.env.ASR_MODEL_SIZE || 'base'; // tiny | base | small 
 const ASR_ENGINE = (process.env.ASR_ENGINE || 'auto').toLowerCase(); // auto | sensevoice | whisper —— 选择默认识别模型
 // asr-server 架构版本：2.x = 含 sensevoice-original + VAD + 标点。
 // 供 start-all.js 探测时判断 9528 上是否旧进程（旧代码无此字段/不同版本 → 视为残留，终止后重启）。
-const SERVER_VERSION = '2.1.0';
+const SERVER_VERSION = '2.2.0';
 const WHISPER_MODEL = `onnx-community/whisper-${MODEL_SIZE}`;
 
 // 模型缓存目录
@@ -681,35 +681,66 @@ const TTS_ENGINES = {
 // ---------- LLM：node-llama-cpp 内嵌（单进程自控，引擎可插拔） ----------
 // 抽象层 /chat 支持两种引擎：llama-cpp（内嵌默认）/ ollama（转发，后备，需 ollama serve）
 const LLM_DIR = path.join(CACHE_DIR, 'llm');
-const LLM_MODEL = process.env.LLM_MODEL || path.join(LLM_DIR, 'qwen2.5-0.5b-instruct-q4_k_m.gguf'); // 小模型验证，可换 Qwen3-4B 等
+// 默认 LLM 模型（env LLM_MODEL 可覆盖为具体 gguf 文件名/路径）
+const LLM_MODEL = process.env.LLM_MODEL || path.join(LLM_DIR, 'qwen2.5-0.5b-instruct-q4_k_m.gguf');
+// 可选 LLM 档位注册表（key → 下载信息）；前端模型管理 UI 据此展示/安装
+const LLM_MODELS = {
+  'llm-0.5b': {
+    label: 'Qwen2.5-0.5B-Instruct（默认 · 兜底）',
+    size: '~469MB',
+    file: 'qwen2.5-0.5b-instruct-q4_k_m.gguf',
+    url: 'https://hf-mirror.com/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf',
+  },
+  'llm-qwen3-8b': {
+    label: 'Qwen3-8B Q4_K_M（推荐 · 对话更强）',
+    size: '~4.9GB',
+    file: 'Qwen3-8B-Q4_K_M.gguf',
+    url: 'https://hf-mirror.com/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf',
+  },
+};
 const OLLAMA_URL = (process.env.OLLAMA_URL || 'http://127.0.0.1:11434').replace(/\/+$/, '');
 
+function llmPathOf(key) { const m = LLM_MODELS[key]; return m ? path.join(LLM_DIR, m.file) : null; }
+function llmReady(keyOrPath) {
+  const p = keyOrPath && LLM_MODELS[keyOrPath] ? llmPathOf(keyOrPath) : (keyOrPath || LLM_MODEL);
+  return existsSync(p);
+}
+// /chat 的 model 参数 → 具体 gguf 路径（支持注册表 key / 文件名 / 绝对路径）
+function resolveLlmPath(model) {
+  if (!model) return LLM_MODEL;
+  if (LLM_MODELS[model]) return llmPathOf(model);
+  if (model.includes('/') || model.includes('\\')) return model; // 绝对/相对路径
+  return path.join(LLM_DIR, model); // 按文件名
+}
+
 let llmSession = null;
+let llmSessionPath = null;
 let llmInitPromise = null;
 let llmInitError = null;
 
-function llmModelReady() { return existsSync(LLM_MODEL); }
-
-async function getLlamaSession() {
-  if (llmSession) return llmSession;
+async function getLlamaSession(modelPath) {
+  // 若已加载且路径一致则复用；否则换模型重载（同一时间只保留一个活跃模型，省内存）
+  if (llmSession && llmSessionPath === modelPath) return llmSession;
   if (llmInitError) throw new Error(llmInitError);
   if (llmInitPromise) return llmInitPromise;
   llmInitPromise = (async () => {
-    if (!llmModelReady()) throw new Error('LLM 模型缺失：' + LLM_MODEL + '\n请下载 GGUF 到 models/llm/（小模型如 Qwen2.5-0.5B-Instruct-GGUF，hf-mirror）');
+    if (!existsSync(modelPath)) throw new Error('LLM 模型缺失：' + modelPath + '\n请在模型管理里下载，或把 GGUF 放到 models/llm/');
     const { getLlama, LlamaChatSession } = await import('node-llama-cpp');
     const llama = await getLlama();
-    log('加载 LLM：' + path.basename(LLM_MODEL) + '（首次加载较慢）…');
-    const model = await llama.loadModel({ modelPath: LLM_MODEL });
+    log('加载 LLM：' + path.basename(modelPath) + '（首次加载较慢）…');
+    const model = await llama.loadModel({ modelPath });
     const context = await model.createContext({ contextSize: 2048 });
     llmSession = new LlamaChatSession({ contextSequence: context.getSequence() });
-    log('LLM 就绪（' + path.basename(LLM_MODEL) + '）');
+    llmSessionPath = modelPath;
+    log('LLM 就绪（' + path.basename(modelPath) + '）');
     return llmSession;
   })();
   return llmInitPromise.catch((e) => { llmInitError = e.message; throw e; });
 }
 
 async function chatLlamaCpp(messages, opts = {}) {
-  const session = await getLlamaSession();
+  const modelPath = resolveLlmPath(opts.model);
+  const session = await getLlamaSession(modelPath);
   const system = messages.find(m => m.role === 'system')?.content;
   const userText = messages.filter(m => m.role === 'user').map(m => String(m.content)).join('\n');
   const full = (system ? String(system) + '\n\n' : '') + userText;
@@ -772,7 +803,8 @@ const MODEL_ITEMS = [
   { category: 'asr', engine: 'sensevoice', label: 'SenseVoice（中文/粤/日/韩最优）', size: '~228MB', installed: () => existsSync(SENSEVOICE_MODEL) },
   { category: 'asr', engine: 'sensevoice-original', label: 'SenseVoice 原始版（funasr · 高精度）', size: '~900MB', installed: async () => (await checkSenseVoiceOriginal()) === 'reachable' },
   { category: 'asr', engine: 'whisper',    label: 'Whisper base（多语兜底）',        size: '~500MB', installed: () => whisperInstalled() },
-  { category: 'llm', engine: 'llm',         label: 'Qwen2.5-0.5B-Instruct GGUF',      size: '~469MB', installed: () => llmModelReady() },
+  { category: 'llm', engine: 'llm-0.5b',   label: 'Qwen2.5-0.5B-Instruct（默认 · 兜底）', size: '~469MB', installed: () => llmReady('llm-0.5b') },
+  { category: 'llm', engine: 'llm-qwen3-8b', label: 'Qwen3-8B Q4_K_M（推荐 · 对话更强）', size: '~4.9GB', installed: () => llmReady('llm-qwen3-8b') },
 ];
 
 async function collectModels() {
@@ -809,13 +841,18 @@ function runDownload(cmd, args) {
   });
 }
 
-const LLM_URL = 'https://hf-mirror.com/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf';
-mkdirSync(LLM_DIR, { recursive: true }); // 供 download-llm 落盘
+mkdirSync(LLM_DIR, { recursive: true }); // 供 LLM 模型落盘
 
 const INSTALLERS = {
   kokoro: runDownload(process.execPath, ['download-kokoro.js']),
   sensevoice: runDownload(process.execPath, ['asr-server-download.js']),
-  llm: runDownload('curl', ['-L', '-C', '-', '--connect-timeout', '15', '--max-time', '3600', '-o', path.join(LLM_DIR, 'qwen2.5-0.5b-instruct-q4_k_m.gguf'), LLM_URL]),
+  // 多档位 LLM 模型：按 LLM_MODELS 注册表动态生成下载器
+  ...Object.fromEntries(
+    Object.entries(LLM_MODELS).map(([key, m]) => [
+      key,
+      runDownload('curl', ['-L', '-C', '-', '--connect-timeout', '15', '--max-time', '14400', '-o', path.join(LLM_DIR, m.file), m.url]),
+    ])
+  ),
   qwen3: (ctx) => ctx.nd({ type: 'done', message: 'Qwen3-TTS 无独立下载脚本：模型在首次启动 qwen3 服务（npm run start-qwen3）时自动下载。' }),
   whisper: (ctx) => ctx.nd({ type: 'done', message: 'Whisper 无独立下载脚本：首次识别时由 transformers.js 自动下载。' }),
 };
@@ -855,7 +892,7 @@ const server = http.createServer(async (req, res) => {
       catch (e) { kokoroStatus = 'missing'; }
     }
     const qwen3 = await checkQwen3();
-    const llmReady = llmModelReady();
+    const llmReady = llmReady(); // 默认 LLM 是否就绪
     const ollamaStatus = await checkOllama();
     return send(200, {
       ok: true,
@@ -1027,7 +1064,7 @@ const server = http.createServer(async (req, res) => {
         { role: 'system', content: system },
         { role: 'user', content: (prompt ? prompt + '\n' : '') + recognized }
       ];
-      const answer = await llmChat(llmEngine, messages);
+      const answer = await llmChat(llmEngine, messages, { model: url.searchParams.get('llmModel') || undefined });
       log('voice-chat 识别:「' + recognized + '」→ LLM:「' + answer + '」');
       // ③ 朗读（qwen3 不可达时自动回退 kokoro，保证全链路始终可用）；经 TTS_ENGINES.wav() 统一（014 §5.2）
       let wav;

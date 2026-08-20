@@ -11,6 +11,7 @@ export default function HomePanel(props: PanelProps) {
   const [stage, setStage] = useState<Stage>("idle");
   const [asrEngine, setAsrEngine] = useState<string>("auto");
   const [llmEngine, setLlmEngine] = useState<string>("llama-cpp");
+  const [llmModel, setLlmModel] = useState<string>("llm-qwen3-8b");
   const [ttsEngine, setTtsEngine] = useState<"kokoro" | "qwen3">("kokoro");
   const [result, setResult] = useState<{
     recognized: string;
@@ -36,6 +37,7 @@ export default function HomePanel(props: PanelProps) {
         const r = await voiceChat(wav, {
           asrEngine,
           llmEngine,
+          llmModel,
           ttsEngine,
         });
         // 顺手保存录音 + 朗读结果到音频库（不阻塞）
@@ -129,6 +131,24 @@ export default function HomePanel(props: PanelProps) {
             ]}
           />
         </label>
+        {llmEngine === "llama-cpp" && (
+          <label>
+            LLM 模型
+            <Select
+              value={llmModel}
+              onChange={setLlmModel}
+              options={
+                (props.models || []).filter(
+                  (m) => m.category === "llm" && m.installed
+                ).length
+                  ? (props.models || [])
+                      .filter((m) => m.category === "llm" && m.installed)
+                      .map((m) => ({ value: m.engine, label: m.label }))
+                  : [{ value: "llm-qwen3-8b", label: "Qwen3-8B（未下载）" }]
+              }
+            />
+          </label>
+        )}
         <label>
           朗读引擎
           <Select

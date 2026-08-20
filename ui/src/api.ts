@@ -145,12 +145,13 @@ export interface ChatMessage {
 
 export async function chat(
   messages: ChatMessage[],
-  engine: string = "llama-cpp"
+  engine: string = "llama-cpp",
+  model?: string
 ): Promise<{ text: string; engine: string }> {
   return jfetch<{ text: string; engine: string }>("/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages, engine }),
+    body: JSON.stringify({ messages, engine, model }),
   });
 }
 
@@ -158,6 +159,7 @@ export async function chat(
 export interface VoiceChatOptions {
   asrEngine?: string;
   llmEngine?: string;
+  llmModel?: string;
   ttsEngine?: "kokoro" | "qwen3" | "clone";
   prompt?: string;
   system?: string;
@@ -178,6 +180,7 @@ export async function voiceChat(
   });
   if (opts.prompt) q.set("prompt", opts.prompt);
   if (opts.system) q.set("system", opts.system);
+  if (opts.llmModel) q.set("llmModel", opts.llmModel);
   if (opts.sid !== undefined) q.set("sid", String(opts.sid));
   if (opts.voice) q.set("voice", opts.voice);
   if (opts.language) q.set("language", opts.language);

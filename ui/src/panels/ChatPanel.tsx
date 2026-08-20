@@ -15,6 +15,7 @@ export default function ChatPanel(props: PanelProps) {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [engine, setEngine] = useState<string>("llama-cpp");
+  const [llmModel, setLlmModel] = useState<string>("llm-qwen3-8b");
   const [ttsEngine, setTtsEngine] = useState<"kokoro" | "qwen3" | "clone">("kokoro");
   const [cloneVoices, setCloneVoices] = useState<CloneVoice[]>([]);
   const [cloneVoiceId, setCloneVoiceId] = useState<string>("");
@@ -26,6 +27,10 @@ export default function ChatPanel(props: PanelProps) {
   const playerRef = useRef<ReturnType<typeof createFramePlayer> | null>(null);
 
   const llmReady = props.health?.llm?.model !== "missing";
+  // 已安装的 LLM 档位（来自 /models）
+  const installedLlmModels = (props.models || []).filter(
+    (m) => m.category === "llm" && m.installed
+  );
 
   // 加载克隆音色（供对话朗读选用）
   useEffect(() => {
@@ -49,7 +54,7 @@ export default function ChatPanel(props: PanelProps) {
         ...messages.map((m) => ({ role: m.role, content: m.content })),
         { role: "user", content },
       ];
-      const r = await chat(history, engine);
+      const r = await chat(history, engine, llmModel);
       setMessages((m) => [...m, { role: "assistant", content: r.text }]);
     } catch (e) {
       setError(String(e));
@@ -200,6 +205,20 @@ export default function ChatPanel(props: PanelProps) {
             { value: "ollama", label: "LLM: Ollama" },
           ]}
         />
+        {engine === "llama-cpp" && (
+          <Select
+            value={llmModel}
+            onChange={setLlmModel}
+            options={
+              installedLlmModels.length
+                ? installedLlmModels.map((m) => ({
+                    value: m.engine,
+                    label: `模型: ${m.label}`,
+                  }))
+                : [{ value: "llm-qwen3-8b", label: "模型: Qwen3-8B（未下载）" }]
+            }
+          />
+        )}
         <Select
           value={ttsEngine}
           onChange={setTtsEngine}

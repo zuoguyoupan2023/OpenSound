@@ -11,6 +11,8 @@ struct RealtimeInner {
     /// 已通过 rt_read 交付给前端的样本数（游标），避免重复传输
     delivered: Arc<Mutex<usize>>,
     running: Arc<AtomicBool>,
+    /// 暂停标记：为 true 时回调丢弃新样本（供前端"暂停/继续"）
+    paused: Arc<AtomicBool>,
     input_rate: u32,
     _stream: Option<cpal::Stream>, // 持有 stream 保持采集存活
 }
@@ -58,16 +60,18 @@ impl Realtime {
         let pcm = Arc::new(Mutex::new(Vec::<f32>::new()));
         let delivered = Arc::new(Mutex::new(0usize));
         let running = Arc::new(AtomicBool::new(true));
+        let paused = Arc::new(AtomicBool::new(false));
 
         let stream = match config.sample_format() {
             cpal::SampleFormat::F32 => {
                 let p = pcm.clone();
                 let r = running.clone();
+                let pa = paused.clone();
                 device
                     .build_input_stream(
                         &config.into(),
                         move |data: &[f32], _| {
-                            if r.load(Ordering::Relaxed) {
+                            if r.load(Ordering::Relaxed) && !pa.load(Ordering::Relaxed) {
                                 let mut mono = Vec::with_capacity(data.len() / channels);
                                 for ch in data.chunks(channels) {
                                     mono.push(ch.iter().sum::<f32>() / channels as f32);
@@ -83,11 +87,12 @@ impl Realtime {
             cpal::SampleFormat::I16 => {
                 let p = pcm.clone();
                 let r = running.clone();
+                let pa = paused.clone();
                 device
                     .build_input_stream(
                         &config.into(),
                         move |data: &[i16], _| {
-                            if r.load(Ordering::Relaxed) {
+                            if r.load(Ordering::Relaxed) && !pa.load(Ordering::Relaxed) {
                                 let mut mono = Vec::with_capacity(data.len() / channels);
                                 for ch in data.chunks(channels) {
                                     let sum: i32 = ch.iter().map(|&v| v as i32).sum();
@@ -110,6 +115,7 @@ impl Realtime {
             pcm,
             delivered,
             running,
+            paused,
             input_rate,
             _stream: Some(stream),
         });
@@ -163,6 +169,32 @@ impl Realtime {
 
     pub fn is_recording(&self) -> bool {
         self.inner.lock().unwrap().is_some()
+    }
+
+    /// 暂停采集（回调丢弃新样本；已有样本保留）。
+    pub fn pause(&self) -> Result<(), String> {
+        let guard = self.inner.lock().unwrap();
+        let inner = guard.as_ref().ok_or("实时采集未在运行")?;
+        inner.paused.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// 恢复采集。
+    pub fn resume(&self) -> Result<(), String> {
+        let guard = self.inner.lock().unwrap();
+        let inner = guard.as_ref().ok_or("实时采集未在运行")?;
+        inner.paused.store(false, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// 是否处于暂停态（用于 UI 回显）。
+    pub fn is_paused(&self) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|i| i.paused.load(Ordering::Relaxed))
+            .unwrap_or(false)
     }
 }
 
