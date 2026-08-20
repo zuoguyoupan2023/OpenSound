@@ -67,13 +67,16 @@ export async function getModels(): Promise<ModelInfo[]> {
 }
 
 // ---------- 识别 ASR ----------
-// body 为 WAV/RAW PCM 16kHz 单声道
+// body 为 WAV/RAW PCM 16kHz 单声道；punct=true 时服务端识别后自动加标点；vad=true 时识别前过滤静音
 export async function transcribe(
   wav: Blob,
-  engine: string = "auto"
+  engine: string = "auto",
+  punct: boolean = true,
+  vad: boolean = true
 ): Promise<{ text: string; engine: string }> {
+  const q = `/transcribe?engine=${encodeURIComponent(engine)}&punct=${punct ? "1" : "0"}&vad=${vad ? "1" : "0"}`;
   const res = await fetch(
-    `${getBaseUrl()}/transcribe?engine=${encodeURIComponent(engine)}`,
+    `${getBaseUrl()}${q}`,
     authHeaders({
       method: "POST",
       headers: { "Content-Type": "audio/wav" },

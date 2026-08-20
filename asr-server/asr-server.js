@@ -32,6 +32,12 @@ mkdirSync(CACHE_DIR, { recursive: true });
 
 const SENSEVOICE_MODEL = path.join(CACHE_DIR, 'sensevoice/model.int8.onnx');
 const SENSEVOICE_TOKENS = path.join(CACHE_DIR, 'sensevoice/tokens.txt');
+// SenseVoice 原始版（funasr 独立 Python 服务）：/opt/homebrew/bin/python3 sensevoice-server.py --port 8002
+const SENSEVOICE_ORIGINAL_URL = (process.env.SENSEVOICE_ORIGINAL_URL || 'http://127.0.0.1:8002').replace(/\/+$/, '');
+// 识别后自动加标点（默认开，用 funasr 后端 /punc）；可用 PUNCTUATION=0 关闭，或用请求参数 ?punct=1|0 覆盖
+const PUNCTUATION = !['0', 'false', 'no'].includes(String(process.env.PUNCTUATION || '1').toLowerCase());
+// 识别前用 VAD 过滤静音（默认开）；可用 VAD=0 关闭，或用请求参数 ?vad=1|0 覆盖
+const VAD = !['0', 'false', 'no'].includes(String(process.env.VAD || '1').toLowerCase());
 
 // ---------- TTS ----------
 // Qwen3-TTS 转发地址（本地 Python 服务，npm run start-qwen3 启动）；可换 mlx-tts-server / vllm 等 OpenAI 兼容服务
@@ -172,6 +178,95 @@ async function transcribeSenseVoice(pcm16) {
   const res = rec.getResult(stream);
   // 去 SenseVoice 富文本标记 <|zh|> <|NEUTRAL|> 等
   return String(res.text || '').replace(/<\|[^|]*\|>/g, '').replace(/\s+/g, ' ').trim();
+}
+
+// ---------- SenseVoice 原始版（funasr 独立 Python 服务，转发） ----------
+let svOriginalCache = { t: 0, status: 'unreachable' };
+async function checkSenseVoiceOriginal() {
+  const now = Date.now();
+  if (now - svOriginalCache.t < 30000) return svOriginalCache.status;
+  let status = 'unreachable';
+  try {
+    const r = await fetch(SENSEVOICE_ORIGINAL_URL + '/health', { signal: AbortSignal.timeout(2000) });
+    if (r.ok) status = 'reachable';
+  } catch (e) { /* unreachable */ }
+  svOriginalCache = { t: now, status };
+  return status;
+}
+
+// Float32Array([-1,1]) → 16kHz 单声道 Int16 raw PCM Buffer（funasr 服务按 int16 解析）
+function float32ToPcm16Bytes(samples) {
+  const buf = Buffer.alloc(samples.length * 2);
+  for (let i = 0; i < samples.length; i++) {
+    const v = Math.max(-1, Math.min(1, samples[i]));
+    buf.writeInt16LE(Math.round(v * 32767), i * 2);
+  }
+  return buf;
+}
+
+async function transcribeSenseVoiceOriginal(pcm16) {
+  if ((await checkSenseVoiceOriginal()) !== 'reachable') {
+    throw new Error('SenseVoice 原始版服务不可达：' + SENSEVOICE_ORIGINAL_URL + '\n请运行 cd asr-server && /opt/homebrew/bin/python3 sensevoice-server.py --port 8002');
+  }
+  const res = await fetch(SENSEVOICE_ORIGINAL_URL + '/transcribe', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: float32ToPcm16Bytes(pcm16),
+    signal: AbortSignal.timeout(60000),
+  });
+  if (!res.ok) {
+    const d = await res.json().catch(() => ({}));
+    throw new Error('SenseVoice 原始版服务错误：' + (d.error || 'HTTP ' + res.status));
+  }
+  const d = await res.json();
+  return String(d.text || '').trim();
+}
+
+// ---------- 标点（可选）：转发 funasr /punc 给无标点文本加标点 ----------
+async function punctuate(text) {
+  if (!text) return text;
+  try {
+    const res = await fetch(SENSEVOICE_ORIGINAL_URL + '/punc', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: String(text) }),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) return text;
+    const d = await res.json();
+    return String(d.text || text).trim();
+  } catch (e) { return text; } // 标点服务不可用时回退原文，不影响识别
+}
+
+// ---------- VAD（可选）：转发 funasr /vad 获取语音段，过滤静音 ----------
+async function getVadSegments(pcm16) {
+  try {
+    const res = await fetch(SENSEVOICE_ORIGINAL_URL + '/vad', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: float32ToPcm16Bytes(pcm16),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return [];
+    const d = await res.json();
+    return Array.isArray(d.speech) ? d.speech : [];
+  } catch (e) { return []; }
+}
+
+// 按 VAD 语音段裁剪 pcm16（16k）：只保留有效语音，各段前后各留 padMs 毫秒过渡
+function trimPcmByVad(pcm16, segs, padMs = 200) {
+  if (!segs || !segs.length) return pcm16;
+  const sr = 16000;
+  const pad = Math.round((padMs * sr) / 1000);
+  const parts = [];
+  for (const s of segs) {
+    if (!Array.isArray(s) || s.length < 2) continue;
+    const a = Math.max(0, Math.round((s[0] / 1000) * sr) - pad);
+    const b = Math.min(pcm16.length, Math.round((s[1] / 1000) * sr) + pad);
+    for (let i = a; i < b; i++) parts.push(pcm16[i]);
+  }
+  if (!parts.length) return pcm16;
+  return Float32Array.from(parts);
 }
 
 // ---------- TTS 工具 ----------
@@ -615,6 +710,7 @@ const MODEL_ITEMS = [
   { category: 'tts', engine: 'kokoro',     label: 'Kokoro（中英混合 · 53 音色）',   size: '~350MB', installed: () => kokoroReady() },
   { category: 'tts', engine: 'qwen3',      label: 'Qwen3-TTS 0.6B（MPS · 流式）',    size: '~1.2GB', installed: async () => (await checkQwen3()) === 'reachable' },
   { category: 'asr', engine: 'sensevoice', label: 'SenseVoice（中文/粤/日/韩最优）', size: '~228MB', installed: () => existsSync(SENSEVOICE_MODEL) },
+  { category: 'asr', engine: 'sensevoice-original', label: 'SenseVoice 原始版（funasr · 高精度）', size: '~900MB', installed: async () => (await checkSenseVoiceOriginal()) === 'reachable' },
   { category: 'asr', engine: 'whisper',    label: 'Whisper base（多语兜底）',        size: '~500MB', installed: () => whisperInstalled() },
   { category: 'llm', engine: 'llm',         label: 'Qwen2.5-0.5B-Instruct GGUF',      size: '~469MB', installed: () => llmModelReady() },
 ];
@@ -703,7 +799,7 @@ const server = http.createServer(async (req, res) => {
     const ollamaStatus = await checkOllama();
     return send(200, {
       ok: true,
-      engines: ['whisper', existsSync(SENSEVOICE_MODEL) ? 'sensevoice' : 'sensevoice(未下载)'],
+      engines: ['whisper', existsSync(SENSEVOICE_MODEL) ? 'sensevoice' : 'sensevoice(未下载)', 'sensevoice-original'],
       tts: { kokoro: kokoroStatus, kokoroSpeakers, qwen3 },
       llm: { engine: 'llama-cpp', model: llmReady ? path.basename(LLM_MODEL) : 'missing', ollama: ollamaStatus },
       models: await collectModels(), // 014 §5.2：已装模型清单（/models 同款）
@@ -784,8 +880,11 @@ const server = http.createServer(async (req, res) => {
       const hasSense = existsSync(SENSEVOICE_MODEL);
       let recognized;
       if (asrEngine === 'sensevoice') recognized = await transcribeSenseVoice(pcm16);
+      else if (asrEngine === 'sensevoice-original') recognized = await transcribeSenseVoiceOriginal(pcm16);
       else if (asrEngine === 'whisper') recognized = await whisperTranscribe(pcm16);
       else recognized = hasSense ? await transcribeSenseVoice(pcm16) : await whisperTranscribe(pcm16);
+      const wantPunc = PUNCTUATION && url.searchParams.get('punct') !== '0' || url.searchParams.get('punct') === '1';
+      if (wantPunc) recognized = await punctuate(recognized);
       // ② LLM
       const messages = [
         { role: 'system', content: system },
@@ -850,17 +949,34 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // VAD：POST /vad  body=RAW PCM16(16k) → { speech: [[start_ms,end_ms],...] }（供前端"录音静音自动停"检测）
+  if (req.method === 'POST' && url.pathname === '/vad') {
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    const audio = Buffer.concat(chunks);
+    try {
+      const pcm16 = decodeToPcm16(audio);
+      const segs = await getVadSegments(pcm16);
+      return send(200, { speech: segs });
+    } catch (e) {
+      return send(500, { error: e.message });
+    }
+  }
+
   if (req.method !== 'POST' || url.pathname !== '/transcribe') {
     return send(404, { error: 'not found' });
   }
 
-  // 引擎：sensevoice / whisper / auto（默认 auto = SenseVoice 优先，中文最优）
+  // 引擎：sensevoice / sensevoice-original / whisper / auto（默认 auto = SenseVoice 优先，中文最优）
   // 默认引擎可由环境变量 ASR_ENGINE 覆盖（如 ASR_ENGINE=whisper 强制 Whisper）
   let engine = (url.searchParams.get('engine') || ASR_ENGINE).toLowerCase();
   const hasSenseVoice = existsSync(SENSEVOICE_MODEL) && existsSync(SENSEVOICE_TOKENS);
   if (engine === 'auto') engine = hasSenseVoice ? 'sensevoice' : 'whisper';
   if (engine === 'sensevoice' && !hasSenseVoice) {
     return send(400, { error: 'SenseVoice 模型未下载，请运行 npm run download-sensevoice（或改用 ?engine=whisper）' });
+  }
+  if (!['sensevoice', 'sensevoice-original', 'whisper'].includes(engine)) {
+    return send(400, { error: '未知引擎: ' + engine + '（支持 sensevoice / sensevoice-original / whisper）' });
   }
 
   const chunks = [];
@@ -878,9 +994,20 @@ const server = http.createServer(async (req, res) => {
     const rms = Math.sqrt(sum / pcm16.length);
     if (rms < 0.01) log('⚠️ 音频几乎静音: 时长 ' + dur.toFixed(1) + 's, RMS=' + rms.toFixed(4));
     else log('音频正常: 时长 ' + dur.toFixed(1) + 's, RMS=' + rms.toFixed(4));
+    // VAD 过滤静音（可选）：识别前只保留有效语音段
+    let infer = pcm16;
+    const wantVad = VAD && url.searchParams.get('vad') !== '0' || url.searchParams.get('vad') === '1';
+    if (wantVad) {
+      const segs = await getVadSegments(pcm16);
+      const t = trimPcmByVad(pcm16, segs);
+      if (t.length >= 1600) infer = t;
+    }
     let text;
-    if (engine === 'sensevoice') text = await transcribeSenseVoice(pcm16);
-    else text = await whisperTranscribe(pcm16);
+    if (engine === 'sensevoice') text = await transcribeSenseVoice(infer);
+    else if (engine === 'sensevoice-original') text = await transcribeSenseVoiceOriginal(infer);
+    else text = await whisperTranscribe(infer);
+    const wantPunc = PUNCTUATION && url.searchParams.get('punct') !== '0' || url.searchParams.get('punct') === '1';
+    if (wantPunc) text = await punctuate(text);
     send(200, { text, engine, durationSec: Math.round(dur * 10) / 10, rms: Math.round(rms * 10000) / 10000 });
   } catch (e) {
     log('识别错误: ' + e.message);

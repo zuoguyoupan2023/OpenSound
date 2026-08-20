@@ -10,6 +10,8 @@ type State = "idle" | "recording" | "processing" | "done";
 export default function AsrPanel(props: PanelProps) {
   const [state, setState] = useState<State>("idle");
   const [engine, setEngine] = useState<string>("auto");
+  const [punc, setPunc] = useState<boolean>(true);
+  const [vad, setVad] = useState<boolean>(true);
   const [text, setText] = useState("");
   const [error, setError] = useState("");
   const [elapsed, setElapsed] = useState<number>(0);
@@ -26,7 +28,7 @@ export default function AsrPanel(props: PanelProps) {
       recRef.current = null;
       const t0 = Date.now();
       try {
-        const r = await transcribe(wav, engine);
+        const r = await transcribe(wav, engine, punc, vad);
         // 顺手保存录音到音频库（不阻塞）
         saveRecording(wav, engine, r.text).catch((e) =>
           console.error("保存录音失败:", e)
@@ -107,15 +109,33 @@ export default function AsrPanel(props: PanelProps) {
             onChange={setEngine}
             options={[
               { value: "auto", label: "自动（SenseVoice 优先）" },
-              { value: "sensevoice", label: "SenseVoice" },
+              { value: "sensevoice", label: "SenseVoice 量化版（sherpa · 快）" },
+              { value: "sensevoice-original", label: "SenseVoice 原始版（funasr · 高精度）" },
               { value: "whisper", label: "Whisper" },
             ]}
           />
         </label>
+        <label className="punc-toggle">
+          <input
+            type="checkbox"
+            checked={punc}
+            onChange={(e) => setPunc(e.target.checked)}
+          />
+          自动加标点
+        </label>
+        <label className="punc-toggle">
+          <input
+            type="checkbox"
+            checked={vad}
+            onChange={(e) => setVad(e.target.checked)}
+          />
+          自动过滤静音(VAD)
+        </label>
       </div>
 
       <div className="engine-status">
-        <EngineBadge label="SenseVoice" ready={!!hasSense} />
+        <EngineBadge label="SenseVoice 量化版" ready={!!hasSense} />
+        <EngineBadge label="SenseVoice 原始版" ready={false} />
         <EngineBadge label="Whisper" ready={true} />
       </div>
 

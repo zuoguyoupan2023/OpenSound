@@ -14,9 +14,14 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PY = path.join(__dirname, '.venv-qwen3', 'bin', 'python3');
+// SenseVoice 原始版（funasr）用系统 python（/opt/homebrew/bin/python3 已装 funasr/torch/modelscope）
+const PY_SYS = (process.env.PY_SYS || '/opt/homebrew/bin/python3');
 const ASR_URL = (process.env.ASR_SERVER_URL || 'http://127.0.0.1:9528').replace(/\/+$/, '');
 const QWEN3_URL = (process.env.QWEN3_TTS_URL || 'http://127.0.0.1:8001').replace(/\/+$/, '');
+const SENSE_ORIGINAL_URL = (process.env.SENSEVOICE_ORIGINAL_URL || 'http://127.0.0.1:8002').replace(/\/+$/, '');
 const SKIP_QWEN3 = ['1', 'true', 'yes'].includes(String(process.env.TABU_SKIP_QWEN3 || '').toLowerCase());
+// 默认启动 funasr 原始版（让 UI 两个版本都可用）；设 TABU_SKIP_SENSEVOICE_ORIGINAL=1 可跳过（省 900MB 内存/加载时间）
+const SKIP_SENSE_ORIGINAL = ['1', 'true', 'yes'].includes(String(process.env.TABU_SKIP_SENSEVOICE_ORIGINAL || '').toLowerCase());
 
 function run(cmd, args, name, env = {}) {
   const p = spawn(cmd, args, { stdio: 'inherit', cwd: __dirname, env: { ...process.env, ...env } });
@@ -31,7 +36,7 @@ async function up(url) {
   } catch { return false; }
 }
 
-const [asrUp, qwen3Up] = await Promise.all([up(ASR_URL), SKIP_QWEN3 ? false : up(QWEN3_URL)]);
+const [asrUp, qwen3Up, svOriginalUp] = await Promise.all([up(ASR_URL), SKIP_QWEN3 ? false : up(QWEN3_URL), SKIP_SENSE_ORIGINAL ? false : up(SENSE_ORIGINAL_URL)]);
 let started = 0;
 
 if (asrUp) {
@@ -56,6 +61,16 @@ if (SKIP_QWEN3) {
   run(PY, ['qwen3-tts-server.py', '--port', '8001'], 'qwen3-tts', {
     HF_ENDPOINT: process.env.HF_ENDPOINT || 'https://hf-mirror.com'
   });
+  started++;
+}
+
+if (SKIP_SENSE_ORIGINAL) {
+  console.log('[start-all] TABU_SKIP_SENSEVOICE_ORIGINAL=1，跳过 SenseVoice 原始版(funasr)');
+} else if (svOriginalUp) {
+  console.log(`[start-all] sensevoice-original 已在运行（${SENSE_ORIGINAL_URL}），跳过`);
+} else {
+  console.log('[start-all] 启动 sensevoice-original（funasr 原始版，加载 ~900MB 模型，较慢）…');
+  run(PY_SYS, ['sensevoice-server.py', '--port', '8002'], 'sensevoice-original');
   started++;
 }
 

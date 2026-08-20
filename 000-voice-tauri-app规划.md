@@ -192,6 +192,46 @@ Tabu-Voice App（Tauri 壳 → 常驻 asr-server 子进程）
 
 ---
 
+## 七、未来实现：Realtime 实时语音逻辑（VAD 的应用与代码改造 · 暂缓）
+
+> 状态：⏳ **暂缓**。当前录音链路仍是「整段录音 → 整段识别」（`POST /transcribe`），无需实时 VAD。以下为未来做 **Realtime 实时语音（边说话边出字 / 低延迟应答）** 时的设计、VAD 用法与代码改造点，届时照此实施，**本阶段不做**。
+
+### 7.1 为什么未来要用 VAD
+现有链路里 VAD 已用于「识别前过滤静音」（asr-server 内 `trimPcmByVad`，`POST /vad` → funasr FSMN VAD）。未来 Realtime 需**流式处理**，VAD 的核心作用：
+1. **说话结束自动停**：检测到连续静音阈值（如 1.2s）→ 认为本轮说完 → 触发转写/应答。
+2. **只识别有效语音段**：丢弃静音、只对语音段转写，降低误触发与延迟。
+
+### 7.2 当前架构限制（为什么"实时自动停"现在做不了）
+前端录音两条路都**不暴露实时 PCM 流**：
+- **Tauri 原生**：`src-tauri/src/recorder.rs` 用 `cpal`，`recorder_stop` 一次性返回整段 WAV base64，录音过程无逐帧回调。
+- **Web 回退**：`ui/src/audio.ts` 用 `MediaRecorder`，按块累积，无实时样本流。
+因此「录音中实时判静音 → 自动停」目前无法实现。
+
+### 7.3 未来改造方案（二选一）
+- **方案 A（推荐，纯前端）**：录音层改为 **Web Audio + AudioWorklet** 实时取流。
+  - AudioWorklet 处理器把每帧（如 128/512 samples）Int16 PCM 推给主线程。
+  - 主线程累积最近 ~1s 窗口，周期性（如每 300ms）POST `asr-server /vad`（已实现：接收 RAW PCM16 → 返回 `[[start_ms,end_ms],...]`）判断当前是否静音。
+  - 连续静音超过阈值 → 自动 `stop()` 并进入识别。
+  - ⚠️ 需先确认 Tauri WKWebView 是否支持 AudioWorklet；不支持则走方案 B。
+- **方案 B（Rust 侧）**：在 `recorder.rs` 用 `cpal::Stream` 回调把实时样本经 Tauri event（`emit`）推给前端；或 Rust 侧直接跑 VAD，决定何时停。改动在原生层，不依赖 WebView 能力。
+
+### 7.4 后端已就绪、无需再改的部分
+- `asr-server` 已提供 `POST /vad`（转发 funasr FSMN VAD）。
+- `sensevoice-server.py` 已加载 `models/fsmn-vad`。
+- 实时转写可复用 `sensevoice-original`（funasr）或 sherpa 量化版。
+
+### 7.5 未来代码改造点清单（实施时逐项核对）
+- `ui/src/audio.ts`：新增 AudioWorklet 录音器（替代 MediaRecorder），暴露实时 PCM 流与「自动停」回调。
+- `ui/src/panels/AsrPanel.tsx` / `HomePanel.tsx`：录音态接入实时 VAD 检测；「说完了自动停」开关。
+- `asr-server/asr-server.js`：可选新增 WS/RT 通道（`/realtime`）承载流式识别。
+- `sensevoice-server.py`：如需流式 ASR，再评估 Paraformer-online 的接入（见模型分析文档）。
+
+### 7.6 结论
+- 本阶段**不实现**；做 Realtime 时优先按 **方案 A（AudioWorklet）** 验证，WebView 不支持则用 **方案 B（cpal 原生回调）**。
+- VAD 后端能力（`/vad`、fsmn-vad 模型）已就绪，届时直接复用。
+
+---
+
 ## 附：与既有文档的边界
 - 本文 = **Tabu-Voice 桌面 App（Tauri）专项**：形态、CI、开放端口+SPEC、独立/服务双模式、realtime/克隆路线。
 - `010` = 本地语音一体化服务（voice-server）架构与相位。
