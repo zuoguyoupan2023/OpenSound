@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { Icon } from "@iconify/react";
 
 export function Panel({
   title,
@@ -34,7 +35,8 @@ export function EngineBadge({
 }) {
   return (
     <span className={`engine-badge ${ready ? "ok" : "off"}`}>
-      {label} {ready ? "✓" : "✗"}
+      {label}{" "}
+      <Icon icon={ready ? "lucide:check" : "lucide:x"} width={13} height={13} />
     </span>
   );
 }

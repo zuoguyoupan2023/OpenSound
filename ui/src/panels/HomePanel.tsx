@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import type { PanelProps } from "../App";
+import { Icon } from "@iconify/react";
 import { voiceChat } from "../api";
 import { createRecorder, type Recorder, playWav, stopAudio } from "../audio";
 import { saveRecording, saveTts } from "../audioStore";
@@ -102,7 +103,10 @@ export default function HomePanel(props: PanelProps) {
               <Spinner /> 识别 + 思考 + 朗读…
             </>
           ) : (
-            <>🎙️ 按住说话（点击开始/结束）</>
+            <>
+              <Icon icon="lucide:mic" width={16} height={16} />{" "}
+              按住说话（点击开始/结束）
+            </>
           )}
         </button>
       </div>
@@ -177,7 +181,11 @@ export default function HomePanel(props: PanelProps) {
         />
       </div>
 
-      {error && <div className="error-box">⚠️ {error}</div>}
+      {error && (
+        <div className="error-box">
+          <Icon icon="lucide:triangle-alert" width={16} height={16} /> {error}
+        </div>
+      )}
 
       {result && (
         <div className="result-box">
@@ -192,7 +200,7 @@ export default function HomePanel(props: PanelProps) {
           {stage === "done" && (
             <div className="result-replay">
               <Button onClick={() => playWav(base64ToBlob(result.audioBase64))}>
-                🔁 重新播放
+                <Icon icon="lucide:rotate-ccw" width={16} height={16} /> 重新播放
               </Button>
             </div>
           )}

@@ -1,5 +1,6 @@
 import { useRef, useState, useEffect } from "react";
 import type { PanelProps } from "../App";
+import { Icon } from "@iconify/react";
 import { speakStream } from "../api";
 import { createFramePlayer, type FramePlayer, stopAudio } from "../audio";
 import { teeCollect, mergeWavFrames, saveTts } from "../audioStore";
@@ -116,7 +117,7 @@ export default function ReadPanel(props: PanelProps) {
           options={[
             { value: "kokoro", label: "Kokoro（本地，53 音色）" },
             { value: "qwen3", label: "Qwen3（低延迟）" },
-            { value: "clone", label: "🎨 克隆音色（CosyVoice）" },
+            { value: "clone", label: "克隆音色（CosyVoice）" },
           ]}
         />
         {engine === "clone" && (
@@ -126,7 +127,7 @@ export default function ReadPanel(props: PanelProps) {
               onChange={setCloneVoiceId}
               options={
                 cloneVoices.length
-                  ? cloneVoices.map((v) => ({ value: v.id, label: `🎨 ${v.name}` }))
+                  ? cloneVoices.map((v) => ({ value: v.id, label: v.name }))
                   : [{ value: "", label: "（无克隆音色，请先到「音色管理」新建）" }]
               }
             />
@@ -186,7 +187,7 @@ export default function ReadPanel(props: PanelProps) {
         />
         <div className="read-tools">
           <label className="file-btn">
-            📂 打开文件
+            <Icon icon="lucide:folder-open" width={16} height={16} /> 打开文件
             <input
               type="file"
               accept=".txt,.md"
@@ -199,7 +200,13 @@ export default function ReadPanel(props: PanelProps) {
           </label>
           {fileName && <span className="muted">已载入: {fileName}</span>}
           <Button onClick={speak} disabled={state === "speaking"}>
-            {state === "speaking" ? <Spinner /> : "🔊 朗读"}
+            {state === "speaking" ? (
+              <Spinner />
+            ) : (
+              <>
+                <Icon icon="lucide:volume-2" width={16} height={16} /> 朗读
+              </>
+            )}
           </Button>
         </div>
       </div>
@@ -210,7 +217,11 @@ export default function ReadPanel(props: PanelProps) {
         <EngineBadge label="克隆音色" ready={cloneReady} />
       </div>
 
-      {error && <div className="error-box">⚠️ {error}</div>}
+      {error && (
+        <div className="error-box">
+          <Icon icon="lucide:triangle-alert" width={16} height={16} /> {error}
+        </div>
+      )}
     </Panel>
   );
 }

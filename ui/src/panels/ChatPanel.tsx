@@ -1,5 +1,6 @@
 import { useRef, useState, useEffect } from "react";
 import type { PanelProps } from "../App";
+import { Icon } from "@iconify/react";
 import { chat, transcribe, speakStream, getCloudApiKey } from "../api";
 import { createRecorder, type Recorder, createFramePlayer, stopAudio } from "../audio";
 import { saveRecording, teeCollect, mergeWavFrames, saveTts } from "../audioStore";
@@ -169,7 +170,10 @@ export default function ChatPanel(props: PanelProps) {
     >
       <div className="chat-box">
         {messages.length === 0 && (
-          <div className="chat-empty">输入问题，或点击🎙️用语音提问</div>
+          <div className="chat-empty">
+            输入问题，或点击 <Icon icon="lucide:mic" width={14} height={14} />{" "}
+            用语音提问
+          </div>
         )}
         {messages.map((m, i) => (
           <div key={i} className={`chat-msg ${m.role}`}>
@@ -181,7 +185,7 @@ export default function ChatPanel(props: PanelProps) {
                   onClick={() => speakAnswer(m.content)}
                   disabled={speaking}
                 >
-                  🔊 朗读
+                  <Icon icon="lucide:volume-2" width={16} height={16} /> 朗读
                 </button>
               </div>
             )}
@@ -215,7 +219,13 @@ export default function ChatPanel(props: PanelProps) {
             disabled={busy}
             title="语音提问"
           >
-            {recording ? "🔴 结束" : "🎙️"}
+            {recording ? (
+              <>
+                <Icon icon="lucide:square" width={14} height={14} /> 结束
+              </>
+            ) : (
+              <Icon icon="lucide:mic" width={16} height={16} />
+            )}
           </button>
           <Button onClick={() => sendText(input)} disabled={busy || !input.trim()}>
             发送
@@ -279,7 +289,7 @@ export default function ChatPanel(props: PanelProps) {
             onChange={setCloneVoiceId}
             options={
               cloneVoices.length
-                ? cloneVoices.map((v) => ({ value: v.id, label: `🎨 ${v.name}` }))
+                ? cloneVoices.map((v) => ({ value: v.id, label: v.name }))
                 : [{ value: "", label: "（无克隆音色）" }]
             }
           />
@@ -287,7 +297,11 @@ export default function ChatPanel(props: PanelProps) {
         <EngineBadge label="LLM" ready={llmReady} />
       </div>
 
-      {error && <div className="error-box">⚠️ {error}</div>}
+      {error && (
+        <div className="error-box">
+          <Icon icon="lucide:triangle-alert" width={16} height={16} /> {error}
+        </div>
+      )}
     </Panel>
   );
 }

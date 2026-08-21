@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { PanelProps } from "../App";
+import { Icon } from "@iconify/react";
 import {
   createRealtimeSession,
   type RealtimeSession,
@@ -166,7 +167,9 @@ export default function RealtimePanel(_props: PanelProps) {
               <Spinner /> 收尾中…
             </>
           ) : (
-            <>🎙️ 开始实时语音</>
+            <>
+              <Icon icon="lucide:mic" width={16} height={16} /> 开始实时语音
+            </>
           )}
         </button>
       </div>
@@ -174,7 +177,15 @@ export default function RealtimePanel(_props: PanelProps) {
       {listening && (
         <div className="realtime-controls">
           <Button variant="ghost" onClick={togglePause}>
-            {stage === "paused" ? "▶️ 继续" : "⏸️ 暂停"}
+            {stage === "paused" ? (
+              <>
+                <Icon icon="lucide:play" width={16} height={16} /> 继续
+              </>
+            ) : (
+              <>
+                <Icon icon="lucide:pause" width={16} height={16} /> 暂停
+              </>
+            )}
           </Button>
         </div>
       )}
@@ -224,7 +235,11 @@ export default function RealtimePanel(_props: PanelProps) {
         </label>
       </div>
 
-      {error && <div className="error-box">⚠️ {error}</div>}
+      {error && (
+        <div className="error-box">
+          <Icon icon="lucide:triangle-alert" width={16} height={16} /> {error}
+        </div>
+      )}
 
       {segments.length > 0 && (
         <div className="result-box">
@@ -241,14 +256,22 @@ export default function RealtimePanel(_props: PanelProps) {
           </div>
           <div className="result-actions">
             <Button variant="ghost" onClick={copyAll}>
-              📋 复制全部
+              <Icon icon="lucide:clipboard" width={16} height={16} /> 复制全部
             </Button>
             <Button variant="ghost" onClick={exportAll}>
-              💾 导出
+              <Icon icon="lucide:save" width={16} height={16} /> 导出
             </Button>
             {stage === "done" && sessRef.current && (
               <Button variant="ghost" onClick={saveToLibrary}>
-                {saved ? "✅ 已保存" : "💿 保存录音到音频库"}
+                {saved ? (
+                  <>
+                    <Icon icon="lucide:check" width={16} height={16} /> 已保存
+                  </>
+                ) : (
+                  <>
+                    <Icon icon="lucide:disc" width={16} height={16} /> 保存录音到音频库
+                  </>
+                )}
               </Button>
             )}
           </div>

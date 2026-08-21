@@ -75,6 +75,11 @@
 | Azure TTS | 独立 SSML 协议 | 需 Key + Region |
 | CosyVoice（云端） | DashScope multimodal-generation | 需 Key |
 
+> **规划中 · FishAudio S2（007 已定案）**：
+> - **云端（当前版本即可用）**：fish.audio 提供 OpenAI 兼容层 `https://api.fish.audio/compat/v1`（`POST /v1/audio/speech`），复用上表「云端 OpenAI 兼容」通道即可；模型档 `s2-pro` / `s2.1-pro`（$15/M UTF-8 bytes）、`s2.1-pro-free`（免费测试档）。⚠️ `voice` 必须填 Fish voice ID 或空串——现有 `cloudTtsCall` 默认 `alloy` 会静默合成无关音色，接入时须改默认值。
+> - **本地（需 GPU，当前本机不可行）**：官方权重 S2-Pro 4B 要求 NVIDIA ≥24GB 显存 + Linux/WSL（自有协议 `/v1/tts`）；fp8 社区量化仅限 N 卡。**本机 M4/16GB 唯一可行路线 = 社区 s2.cpp（ALPHA）+ GGUF q4~q8 档走 Metal**（q6_k 4.5GB 推荐），需在 asr-server 新增引擎转发其 HTTP `/generate`，未实测速度，列为候选。
+> - 详见 `007 §3.3 FishAudio S2 专项`。
+
 ### 对话 LLM
 | 引擎 | 实现 | 说明 |
 |---|---|---|

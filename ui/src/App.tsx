@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { Icon } from "@iconify/react";
+import "./icons";
 import type { ServiceStatus, PanelId, HealthInfo, ModelInfo } from "./types";
 import { getHealth, getModels } from "./api";
 import HomePanel from "./panels/HomePanel";
@@ -30,15 +32,15 @@ interface NavItem {
 }
 
 const NAV: NavItem[] = [
-  { id: "home", label: "语音工作台", icon: "🎙️" },
-  { id: "read", label: "朗读", icon: "🔊" },
-  { id: "asr", label: "识别", icon: "🎧" },
-  { id: "realtime", label: "实时语音", icon: "⚡" },
-  { id: "chat", label: "对话", icon: "💬" },
-  { id: "models", label: "模型管理", icon: "🧠" },
-  { id: "audio", label: "音频库", icon: "🎵" },
-  { id: "voices", label: "音色管理", icon: "🎨" },
-  { id: "settings", label: "设置", icon: "⚙️" },
+  { id: "home", label: "语音工作台", icon: "lucide:mic" },
+  { id: "read", label: "朗读", icon: "lucide:volume-2" },
+  { id: "asr", label: "识别", icon: "lucide:headphones" },
+  { id: "realtime", label: "实时语音", icon: "lucide:zap" },
+  { id: "chat", label: "对话", icon: "lucide:message-circle" },
+  { id: "models", label: "模型管理", icon: "lucide:brain" },
+  { id: "audio", label: "音频库", icon: "lucide:music" },
+  { id: "voices", label: "音色管理", icon: "lucide:palette" },
+  { id: "settings", label: "设置", icon: "lucide:settings" },
 ];
 
 export interface PanelProps {
@@ -146,7 +148,9 @@ function App() {
               className={`nav-item ${panel === item.id ? "active" : ""}`}
               onClick={() => setPanel(item.id)}
             >
-              <span className="nav-icon">{item.icon}</span>
+              <span className="nav-icon">
+                <Icon icon={item.icon} width={18} height={18} />
+              </span>
               {item.label}
             </button>
           ))}

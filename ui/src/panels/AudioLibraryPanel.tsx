@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PanelProps } from "../App";
+import { Icon } from "@iconify/react";
 import {
   listAudio,
   deleteAudio,
@@ -112,7 +113,7 @@ export default function AudioLibraryPanel(_props: PanelProps) {
       rec.id;
     try {
       const ok = await exportAudio(rec, `${rec.kind === "recording" ? "录音" : "朗读"}-${base}`);
-      if (ok) alert("✅ 已导出为 zip（含音频 + 文本）");
+      if (ok) alert("已导出为 zip（含音频 + 文本）");
     } catch (e) {
       setError(String(e));
     }
@@ -138,7 +139,7 @@ export default function AudioLibraryPanel(_props: PanelProps) {
       subtitle="本地保存的用户录音与 TTS 朗读结果，重启后仍可打开播放"
       actions={
         <Button variant="ghost" onClick={refresh}>
-          🔄 刷新
+          <Icon icon="lucide:refresh-cw" width={16} height={16} /> 刷新
         </Button>
       }
     >
@@ -147,13 +148,15 @@ export default function AudioLibraryPanel(_props: PanelProps) {
           className={`audio-tab ${tab === "recording" ? "active" : ""}`}
           onClick={() => setTab("recording")}
         >
-          🎙️ 我的录音（{items.filter((x) => x.kind === "recording").length}）
+          <Icon icon="lucide:mic" width={16} height={16} /> 我的录音（
+          {items.filter((x) => x.kind === "recording").length}）
         </button>
         <button
           className={`audio-tab ${tab === "tts" ? "active" : ""}`}
           onClick={() => setTab("tts")}
         >
-          🔊 朗读历史（{items.filter((x) => x.kind === "tts").length}）
+          <Icon icon="lucide:volume-2" width={16} height={16} /> 朗读历史（
+          {items.filter((x) => x.kind === "tts").length}）
         </button>
       </div>
 
@@ -163,7 +166,11 @@ export default function AudioLibraryPanel(_props: PanelProps) {
         </p>
       )}
 
-      {error && <div className="error-box">⚠️ {error}</div>}
+      {error && (
+        <div className="error-box">
+          <Icon icon="lucide:triangle-alert" width={16} height={16} /> {error}
+        </div>
+      )}
 
       {loading ? (
         <div className="empty">
@@ -186,7 +193,7 @@ export default function AudioLibraryPanel(_props: PanelProps) {
                 <div className="model-meta">
                   <span>{fmtTime(rec.created_at)}</span>
                   {fmtDur(rec.duration_sec) && (
-                    <span>⏱ {fmtDur(rec.duration_sec)}</span>
+                    <span>{fmtDur(rec.duration_sec)}</span>
                   )}
                   <span className="model-cat">{rec.engine || "auto"}</span>
                 </div>
@@ -197,7 +204,15 @@ export default function AudioLibraryPanel(_props: PanelProps) {
                   onClick={() => play(rec)}
                   disabled={playingId !== null && playingId !== rec.id}
                 >
-                  {playingId === rec.id ? "⏹ 停止" : "▶️ 播放"}
+                  {playingId === rec.id ? (
+                    <>
+                      <Icon icon="lucide:square" width={16} height={16} /> 停止
+                    </>
+                  ) : (
+                    <>
+                      <Icon icon="lucide:play" width={16} height={16} /> 播放
+                    </>
+                  )}
                 </Button>
                 {rec.kind === "recording" && (
                   <Button
@@ -205,14 +220,20 @@ export default function AudioLibraryPanel(_props: PanelProps) {
                     onClick={() => toggleClone(rec)}
                     title="把这段录音作为克隆音色的参考样本"
                   >
-                    {rec.is_clone_sample ? "🎨 样本✓" : "🎨 作样本"}
+                    {rec.is_clone_sample ? (
+                      <>
+                        <Icon icon="lucide:check" width={16} height={16} /> 样本
+                      </>
+                    ) : (
+                      "作样本"
+                    )}
                   </Button>
                 )}
                 <Button variant="ghost" onClick={() => exp(rec)} title="导出为 zip（含音频 + 文本）">
-                  📦 导出
+                  <Icon icon="lucide:package" width={16} height={16} /> 导出
                 </Button>
                 <Button variant="danger" onClick={() => remove(rec)}>
-                  🗑
+                  <Icon icon="lucide:trash-2" width={16} height={16} />
                 </Button>
               </div>
             </div>

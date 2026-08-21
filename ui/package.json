@@ -9,12 +9,14 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@iconify/react": "^6.0.2",
     "@tauri-apps/api": "^2.5.0",
     "@tauri-apps/plugin-dialog": "^2.7.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@iconify-json/lucide": "^1.2.124",
     "@tauri-apps/cli": "^2.9.0",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",

@@ -53,7 +53,7 @@ export async function listVoices(): Promise<CloneVoice[]> {
   return (r.voices || []).map(mapVoice);
 }
 
-// 新建音色的候选样本：音频库里所有录音（已标记 🎨 作样本的排前面）
+// 新建音色的候选样本：音频库里所有录音（已标记 作样本的排前面）
 export async function listSampleCandidates(): Promise<AudioRecord[]> {
   const all = await listAudio();
   return all

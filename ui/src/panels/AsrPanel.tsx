@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import type { PanelProps } from "../App";
+import { Icon } from "@iconify/react";
 import { transcribe } from "../api";
 import { createRecorder, type Recorder } from "../audio";
 import { saveRecording } from "../audioStore";
@@ -103,7 +104,9 @@ export default function AsrPanel(props: PanelProps) {
               <Spinner /> 识别中…
             </>
           ) : (
-            <>🎙️ 开始录音</>
+            <>
+              <Icon icon="lucide:mic" width={16} height={16} /> 开始录音
+            </>
           )}
         </button>
         <label>
@@ -143,7 +146,11 @@ export default function AsrPanel(props: PanelProps) {
         <EngineBadge label="Whisper" ready={true} />
       </div>
 
-      {error && <div className="error-box">⚠️ {error}</div>}
+      {error && (
+        <div className="error-box">
+          <Icon icon="lucide:triangle-alert" width={16} height={16} /> {error}
+        </div>
+      )}
 
       {state === "done" && text && (
         <div className="result-box">
@@ -153,10 +160,10 @@ export default function AsrPanel(props: PanelProps) {
           <div className="result-text">{text}</div>
           <div className="result-actions">
             <Button variant="ghost" onClick={copy}>
-              📋 复制
+              <Icon icon="lucide:clipboard" width={16} height={16} /> 复制
             </Button>
             <Button variant="ghost" onClick={exportFile}>
-              💾 导出
+              <Icon icon="lucide:save" width={16} height={16} /> 导出
             </Button>
           </div>
         </div>

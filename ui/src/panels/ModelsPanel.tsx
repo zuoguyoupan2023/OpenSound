@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { PanelProps } from "../App";
+import { Icon } from "@iconify/react";
 import { installModel } from "../api";
 import type { InstallProgress } from "../types";
 import { Panel, Button, Spinner } from "../components/ui";
@@ -39,7 +40,7 @@ export default function ModelsPanel(props: PanelProps) {
       subtitle="查看与下载本地模型（类比 ollama pull）"
       actions={
         <Button variant="ghost" onClick={props.refresh}>
-          ↻ 刷新
+          <Icon icon="lucide:refresh-cw" width={16} height={16} /> 刷新
         </Button>
       }
     >
@@ -89,7 +90,14 @@ export default function ModelsPanel(props: PanelProps) {
                 p.type === "error" ? "err" : p.type === "done" ? "ok" : ""
               }`}
             >
-              {p.type === "done" ? "✅" : p.type === "error" ? "❌" : "·"} {p.message}
+              {p.type === "done" ? (
+                <Icon icon="lucide:check" width={14} height={14} />
+              ) : p.type === "error" ? (
+                <Icon icon="lucide:x" width={14} height={14} />
+              ) : (
+                "·"
+              )}{" "}
+              {p.message}
             </div>
           ))}
         </div>

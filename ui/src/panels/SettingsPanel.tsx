@@ -51,10 +51,10 @@ export default function SettingsPanel(props: PanelProps) {
       await invoke("set_server_path", { path: serverPath });
       // 重启服务使新路径生效
       await invoke("start_service_cmd");
-      setPathMsg("✅ 已保存并重启服务");
+      setPathMsg("已保存并重启服务");
       setTimeout(() => props.refresh(), 500);
     } catch (e) {
-      setPathMsg("❌ " + e);
+      setPathMsg("失败: " + e);
     } finally {
       setRestarting(false);
     }
@@ -65,7 +65,7 @@ export default function SettingsPanel(props: PanelProps) {
       title="设置"
       subtitle="服务连接、鉴权与运行信息"
       actions={
-        <Button onClick={save}>{saved ? "已保存 ✓" : "保存"}</Button>
+        <Button onClick={save}>{saved ? "已保存" : "保存"}</Button>
       }
     >
       <div className="settings-block">

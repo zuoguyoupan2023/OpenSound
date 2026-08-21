@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PanelProps } from "../App";
+import { Icon } from "@iconify/react";
 import {
   listVoices,
   createVoice,
@@ -222,20 +223,24 @@ export default function VoicePanel(_props: PanelProps) {
       subtitle="把录音样本变成可复用的克隆音色，供朗读/对话引擎选用"
       actions={
         <Button variant="ghost" onClick={refresh}>
-          🔄 刷新
+          <Icon icon="lucide:refresh-cw" width={16} height={16} /> 刷新
         </Button>
       }
     >
       <div className="voice-banner">
-        🎨 克隆音色由本地 CosyVoice3 引擎生成。新建时从音频库选一段已标记为「🎨
+        克隆音色由本地 CosyVoice3 引擎生成。新建时从音频库选一段已标记为「
         作样本」的录音，即可生成可复用的克隆音色。
       </div>
 
-      {error && <div className="error-box">⚠️ {error}</div>}
+      {error && (
+        <div className="error-box">
+          <Icon icon="lucide:triangle-alert" width={16} height={16} /> {error}
+        </div>
+      )}
 
       <div className="voice-toolbar">
         <Button onClick={openCreate} disabled={showCreate}>
-          🆕 新建音色
+          <Icon icon="lucide:plus" width={16} height={16} /> 新建音色
         </Button>
       </div>
 
@@ -281,7 +286,7 @@ export default function VoicePanel(_props: PanelProps) {
                     >
                       {samples.map((s) => (
                         <option key={s.id} value={s.id}>
-                          {s.is_clone_sample ? "🎨 " : ""}
+                          {s.is_clone_sample ? "[样本] " : ""}
                           {s.text ? truncate(s.text, 24) : "（无文本）"} ·{" "}
                           {new Date(s.created_at).toLocaleString()}
                         </option>
@@ -291,7 +296,14 @@ export default function VoicePanel(_props: PanelProps) {
                 </label>
                 <div className="import-audio-row">
                   <label className="file-btn">
-                    {importing ? <Spinner /> : "📂 导入音频文件"}
+                    {importing ? (
+                      <Spinner />
+                    ) : (
+                      <>
+                        <Icon icon="lucide:folder-open" width={16} height={16} />{" "}
+                        导入音频文件
+                      </>
+                    )}
                     <input
                       type="file"
                       accept="audio/*,.wav,.mp3,.m4a,.flac,.aac"
@@ -320,7 +332,7 @@ export default function VoicePanel(_props: PanelProps) {
                 </label>
                 {importedInfo?.asr ? (
                   <div className="import-hint">
-                    ✅ 已用 ASR 自动识别出参考文本（见上方输入框）。请核对是否准确——
+                    已用 ASR 自动识别出参考文本（见上方输入框）。请核对是否准确——
                     准确的参考文本能让克隆音色质量更高。可直接修改，或点「生成」（跳过核对，用识别结果）。
                   </div>
                 ) : selectedSample?.text ? (
@@ -351,14 +363,14 @@ export default function VoicePanel(_props: PanelProps) {
 
       {voices.length === 0 ? (
         <div className="empty">
-          还没有克隆音色。点「🆕 新建音色」，从已标记的录音样本生成一个。
+          还没有克隆音色。点「新建音色」，从已标记的录音样本生成一个。
         </div>
       ) : (
         <div className="audio-list">
           {voices.map((v) => (
             <div key={v.id} className="audio-row">
               <div className="audio-info">
-                <div className="audio-title">🎨 {v.name}</div>
+                <div className="audio-title">{v.name}</div>
                 <div className="model-meta">
                   <span>{fmtTime(v.created_at)}</span>
                   <span className="model-cat">CosyVoice3 克隆</span>
@@ -372,13 +384,21 @@ export default function VoicePanel(_props: PanelProps) {
                   title="试听该克隆音色（用此音色合成一句）"
                   disabled={playingId !== null && playingId !== v.id}
                 >
-                  {playingId === v.id ? "⏹ 停止" : "▶️ 试听"}
+                  {playingId === v.id ? (
+                    <>
+                      <Icon icon="lucide:square" width={16} height={16} /> 停止
+                    </>
+                  ) : (
+                    <>
+                      <Icon icon="lucide:play" width={16} height={16} /> 试听
+                    </>
+                  )}
                 </Button>
                 <Button variant="ghost" onClick={() => onRename(v)} title="改名">
-                  ✏️
+                  <Icon icon="lucide:pencil" width={16} height={16} />
                 </Button>
                 <Button variant="danger" onClick={() => onDelete(v)}>
-                  🗑
+                  <Icon icon="lucide:trash-2" width={16} height={16} />
                 </Button>
               </div>
             </div>
