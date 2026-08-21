@@ -700,6 +700,25 @@ const LLM_MODELS = {
 };
 const OLLAMA_URL = (process.env.OLLAMA_URL || 'http://127.0.0.1:11434').replace(/\/+$/, '');
 
+// 云端 LLM（OpenAI 兼容协议）：DeepSeek / 智谱 GLM，与本地引擎并列可选
+// API Key 优先由前端请求传入（用户在设置面板填写），环境变量作兜底
+const CLOUD_ENGINES = {
+  deepseek: {
+    label: 'DeepSeek',
+    url: 'https://api.deepseek.com/chat/completions',
+    envKey: 'DEEPSEEK_API_KEY',
+    defaultModel: 'deepseek-v4-flash',
+    models: ['deepseek-v4-flash', 'deepseek-v4-pro'],
+  },
+  zhipu: {
+    label: '智谱 GLM',
+    url: 'https://open.bigmodel.cn/api/paas/v4/chat/completions',
+    envKey: 'ZHIPU_API_KEY',
+    defaultModel: 'glm-4.7',
+    models: ['glm-4.7', 'glm-4.6'],
+  },
+};
+
 function llmPathOf(key) { const m = LLM_MODELS[key]; return m ? path.join(LLM_DIR, m.file) : null; }
 function llmReady(keyOrPath) {
   const p = keyOrPath && LLM_MODELS[keyOrPath] ? llmPathOf(keyOrPath) : (keyOrPath || LLM_MODEL);
@@ -780,11 +799,41 @@ async function chatOllama(messages, opts = {}) {
   return String(data.message?.content || '').trim();
 }
 
+// 云端引擎通用调用（DeepSeek / 智谱均为 OpenAI 兼容 chat/completions）
+async function chatCloud(engine, messages, opts = {}) {
+  const conf = CLOUD_ENGINES[engine];
+  const apiKey = opts.apiKey || process.env[conf.envKey];
+  if (!apiKey) throw new Error(conf.label + ' 未配置 API Key：请在设置面板填写，或设置环境变量 ' + conf.envKey);
+  const body = {
+    model: opts.model || conf.defaultModel,
+    messages,
+    temperature: opts.temperature ?? 0.7,
+    top_p: opts.top_p ?? 0.9,
+    max_tokens: opts.maxTokens ?? 512,
+    stream: false,
+    // 语音助手场景默认关闭深度思考，降低首字延迟
+    thinking: { type: 'disabled' },
+  };
+  const res = await fetch(conf.url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + apiKey },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(60000),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const detail = data.error?.message || data.message || JSON.stringify(data).slice(0, 200);
+    throw new Error(conf.label + ' API 错误：HTTP ' + res.status + ' ' + detail);
+  }
+  return String(data.choices?.[0]?.message?.content || '').trim();
+}
+
 async function llmChat(engine, messages, opts = {}) {
   const e = (engine || 'llama-cpp').toLowerCase();
   if (e === 'llama-cpp') return chatLlamaCpp(messages, opts);
   if (e === 'ollama') return chatOllama(messages, opts);
-  throw new Error('未知 LLM 引擎: ' + e + '（支持 llama-cpp / ollama）');
+  if (CLOUD_ENGINES[e]) return chatCloud(e, messages, opts);
+  throw new Error('未知 LLM 引擎: ' + e + '（支持 llama-cpp / ollama / deepseek / zhipu）');
 }
 
 // Ollama 可达性（缓存 30s）
@@ -1077,7 +1126,8 @@ const server = http.createServer(async (req, res) => {
     }
     try {
       const text = await llmChat(body.engine, messages, {
-        temperature: body.temperature, top_p: body.top_p, maxTokens: body.maxTokens, model: body.model
+        temperature: body.temperature, top_p: body.top_p, maxTokens: body.maxTokens, model: body.model,
+        apiKey: body.apiKey
       });
       return send(200, { text, engine: (body.engine || 'llama-cpp').toLowerCase() });
     } catch (e) {
@@ -1115,7 +1165,10 @@ const server = http.createServer(async (req, res) => {
         { role: 'system', content: system },
         { role: 'user', content: (prompt ? prompt + '\n' : '') + recognized }
       ];
-      const answer = await llmChat(llmEngine, messages, { model: url.searchParams.get('llmModel') || undefined });
+      const answer = await llmChat(llmEngine, messages, {
+        model: url.searchParams.get('llmModel') || undefined,
+        apiKey: url.searchParams.get('llmApiKey') || undefined
+      });
       log('voice-chat 识别:「' + recognized + '」→ LLM:「' + answer + '」');
       // ③ 朗读（qwen3 不可达时自动回退 kokoro，保证全链路始终可用）；经 TTS_ENGINES.wav() 统一（014 §5.2）
       let wav;

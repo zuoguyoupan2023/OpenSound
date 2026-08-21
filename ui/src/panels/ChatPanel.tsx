@@ -1,6 +1,6 @@
 import { useRef, useState, useEffect } from "react";
 import type { PanelProps } from "../App";
-import { chat, transcribe, speakStream } from "../api";
+import { chat, transcribe, speakStream, getCloudApiKey } from "../api";
 import { createRecorder, type Recorder, createFramePlayer, stopAudio } from "../audio";
 import { saveRecording, teeCollect, mergeWavFrames, saveTts } from "../audioStore";
 import { listVoices, type CloneVoice } from "../voiceStore";
@@ -11,11 +11,32 @@ interface Msg {
   content: string;
 }
 
+// 云端 LLM 档位（与后端 CLOUD_ENGINES 保持一致）
+const CLOUD_LLM_MODELS: Record<string, { value: string; label: string }[]> = {
+  deepseek: [
+    { value: "deepseek-v4-flash", label: "模型: DeepSeek-V4-Flash（快·便宜）" },
+    { value: "deepseek-v4-pro", label: "模型: DeepSeek-V4-Pro（更强）" },
+  ],
+  zhipu: [
+    { value: "glm-4.7", label: "模型: GLM-4.7（最新）" },
+    { value: "glm-4.6", label: "模型: GLM-4.6" },
+  ],
+};
+const CLOUD_DEFAULT_MODEL: Record<string, string> = {
+  deepseek: "deepseek-v4-flash",
+  zhipu: "glm-4.7",
+};
+const CLOUD_LABELS: Record<string, string> = {
+  deepseek: "DeepSeek",
+  zhipu: "智谱 GLM",
+};
+
 export default function ChatPanel(props: PanelProps) {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [engine, setEngine] = useState<string>("llama-cpp");
   const [llmModel, setLlmModel] = useState<string>("llm-qwen3-8b");
+  const [cloudModel, setCloudModel] = useState<string>("deepseek-v4-flash");
   const [ttsEngine, setTtsEngine] = useState<"kokoro" | "qwen3" | "clone">("kokoro");
   const [cloneVoices, setCloneVoices] = useState<CloneVoice[]>([]);
   const [cloneVoiceId, setCloneVoiceId] = useState<string>("");
@@ -45,6 +66,11 @@ export default function ChatPanel(props: PanelProps) {
   const sendText = async (content: string) => {
     if (!content.trim() || busy) return;
     setError("");
+    const apiKey = getCloudApiKey(engine);
+    if (CLOUD_LLM_MODELS[engine] && !apiKey) {
+      setError(`请先在「设置」面板填写 ${CLOUD_LABELS[engine]} 的 API Key`);
+      return;
+    }
     setMessages((m) => [...m, { role: "user", content }]);
     setInput("");
     setBusy(true);
@@ -54,7 +80,8 @@ export default function ChatPanel(props: PanelProps) {
         ...messages.map((m) => ({ role: m.role, content: m.content })),
         { role: "user", content },
       ];
-      const r = await chat(history, engine, llmModel);
+      const model = engine === "llama-cpp" ? llmModel : cloudModel;
+      const r = await chat(history, engine, model, apiKey || undefined);
       setMessages((m) => [...m, { role: "assistant", content: r.text }]);
     } catch (e) {
       setError(String(e));
@@ -131,7 +158,7 @@ export default function ChatPanel(props: PanelProps) {
   return (
     <Panel
       title="对话面板"
-      subtitle="文字或语音 → 本地 LLM → 朗读回答"
+      subtitle="文字或语音 → 本地/云端 LLM → 朗读回答"
       actions={
         speaking ? (
           <Button variant="danger" onClick={stopSpeak}>
@@ -199,10 +226,21 @@ export default function ChatPanel(props: PanelProps) {
       <div className="chat-opts">
         <Select
           value={engine}
-          onChange={setEngine}
+          onChange={(v) => {
+            setEngine(v);
+            if (CLOUD_DEFAULT_MODEL[v]) setCloudModel(CLOUD_DEFAULT_MODEL[v]);
+          }}
           options={[
             { value: "llama-cpp", label: "LLM: llama-cpp" },
             { value: "ollama", label: "LLM: Ollama" },
+            {
+              value: "deepseek",
+              label: `LLM: DeepSeek（云）${getCloudApiKey("deepseek") ? "" : " · 未填Key"}`,
+            },
+            {
+              value: "zhipu",
+              label: `LLM: 智谱 GLM（云）${getCloudApiKey("zhipu") ? "" : " · 未填Key"}`,
+            },
           ]}
         />
         {engine === "llama-cpp" && (
@@ -217,6 +255,13 @@ export default function ChatPanel(props: PanelProps) {
                   }))
                 : [{ value: "llm-qwen3-8b", label: "模型: Qwen3-8B（未下载）" }]
             }
+          />
+        )}
+        {CLOUD_LLM_MODELS[engine] && (
+          <Select
+            value={cloudModel}
+            onChange={setCloudModel}
+            options={CLOUD_LLM_MODELS[engine]}
           />
         )}
         <Select

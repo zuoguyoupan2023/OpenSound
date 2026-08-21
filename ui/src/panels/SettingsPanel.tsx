@@ -11,6 +11,8 @@ import { Panel, Button, Spinner } from "../components/ui";
 export default function SettingsPanel(props: PanelProps) {
   const [baseUrl, setBaseUrl] = useState(getBaseUrl());
   const [token, setToken] = useState("");
+  const [deepseekKey, setDeepseekKey] = useState("");
+  const [zhipuKey, setZhipuKey] = useState("");
   const [saved, setSaved] = useState(false);
   const [serverPath, setServerPath] = useState("");
   const [pathLoading, setPathLoading] = useState(true);
@@ -21,6 +23,8 @@ export default function SettingsPanel(props: PanelProps) {
     const s = getPersistedSettings();
     setBaseUrl(s.baseUrl || "http://127.0.0.1:9528");
     setToken(s.token || "");
+    setDeepseekKey(s.deepseekKey || "");
+    setZhipuKey(s.zhipuKey || "");
     (async () => {
       try {
         const p = await invoke<string>("get_server_path");
@@ -34,7 +38,7 @@ export default function SettingsPanel(props: PanelProps) {
   }, []);
 
   const save = () => {
-    saveSettings({ baseUrl, token });
+    saveSettings({ ...getPersistedSettings(), baseUrl, token, deepseekKey, zhipuKey });
     setSaved(true);
     setTimeout(() => setSaved(false), 1500);
     props.refresh();
@@ -96,6 +100,34 @@ export default function SettingsPanel(props: PanelProps) {
             指向本机 asr-server 目录（含 start-all.js）。模型本地已有则直接复用，缺的首次按需下载。
           </p>
           {pathMsg && <p className="settings-msg">{pathMsg}</p>}
+        </div>
+
+        <div className="settings-item">
+          <label className="settings-label">DeepSeek API Key（可选）</label>
+          <input
+            className="input"
+            type="password"
+            value={deepseekKey}
+            onChange={(e) => setDeepseekKey(e.target.value)}
+            placeholder="sk-…（platform.deepseek.com 申请）"
+          />
+          <p className="settings-hint">
+            填写后对话面板可选 DeepSeek 云端模型（V4-Flash / V4-Pro），与本地 LLM 并列。仅保存在本机。
+          </p>
+        </div>
+
+        <div className="settings-item">
+          <label className="settings-label">智谱 GLM API Key（可选）</label>
+          <input
+            className="input"
+            type="password"
+            value={zhipuKey}
+            onChange={(e) => setZhipuKey(e.target.value)}
+            placeholder="…（open.bigmodel.cn 申请）"
+          />
+          <p className="settings-hint">
+            填写后对话面板可选智谱云端模型（GLM-4.7 / GLM-4.6），与本地 LLM 并列。仅保存在本机。
+          </p>
         </div>
 
         <div className="settings-item">
