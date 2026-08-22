@@ -86,9 +86,25 @@ fn config_path(app: &tauri::AppHandle) -> Option<PathBuf> {
     Some(dir.join("config.json"))
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
+struct UiSettings {
+    #[serde(default)]
+    base_url: String,
+    #[serde(default)]
+    token: String,
+    #[serde(default)]
+    deepseek_key: String,
+    #[serde(default)]
+    zhipu_key: String,
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct PersistedConfig {
     server_path: Option<String>,
+    /// GUI 设置（服务地址/鉴权/云端 API Key）。此前存 WebView localStorage，
+    /// 现统一迁入 config.json（见 011 §5.6 存储规范）。
+    #[serde(default)]
+    ui: UiSettings,
 }
 
 fn load_config(app: &tauri::AppHandle) -> PersistedConfig {
@@ -124,6 +140,70 @@ fn set_server_path(app: tauri::AppHandle, state: State<'_, Arc<AppState>>, path:
     save_config(&app, &cfg)?;
     *state.server_path.lock().unwrap() = if trimmed.is_empty() { None } else { Some(trimmed.clone()) };
     Ok(())
+}
+
+// ---------- GUI 设置读写（config.json 的 ui 节；只覆盖传入的字段） ----------
+#[tauri::command]
+fn get_ui_settings(app: tauri::AppHandle) -> Result<UiSettings, String> {
+    Ok(load_config(&app).ui)
+}
+
+#[tauri::command]
+fn set_ui_settings(
+    app: tauri::AppHandle,
+    base_url: Option<String>,
+    token: Option<String>,
+    deepseek_key: Option<String>,
+    zhipu_key: Option<String>,
+) -> Result<(), String> {
+    let mut cfg = load_config(&app);
+    if let Some(v) = base_url { cfg.ui.base_url = v; }
+    if let Some(v) = token { cfg.ui.token = v; }
+    if let Some(v) = deepseek_key { cfg.ui.deepseek_key = v; }
+    if let Some(v) = zhipu_key { cfg.ui.zhipu_key = v; }
+    save_config(&app, &cfg)
+}
+
+/// 返回应用数据目录绝对路径（不打开；设置面板展示用）
+#[tauri::command]
+fn get_data_dir(app: tauri::AppHandle) -> Result<String, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("无法定位应用数据目录: {e}"))?;
+    Ok(dir.to_string_lossy().into_owned())
+}
+
+/// 在系统文件管理器中打开应用数据目录（音频库/对话历史/config.json 都在这里）
+#[tauri::command]
+fn open_data_dir(app: tauri::AppHandle) -> Result<String, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("无法定位应用数据目录: {e}"))?;
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&dir)
+            .spawn()
+            .map_err(|e| format!("打开失败: {e}"))?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(&dir)
+            .spawn()
+            .map_err(|e| format!("打开失败: {e}"))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&dir)
+            .spawn()
+            .map_err(|e| format!("打开失败: {e}"))?;
+    }
+    Ok(dir.to_string_lossy().into_owned())
 }
 
 // ---------- 定位 asr-server 目录 ----------
@@ -439,6 +519,10 @@ pub fn run() {
             realtime_is_paused,
             get_server_path,
             set_server_path,
+            get_ui_settings,
+            set_ui_settings,
+            get_data_dir,
+            open_data_dir,
             audio_store::audio_save,
             audio_store::audio_list,
             audio_store::audio_delete,

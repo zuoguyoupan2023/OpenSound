@@ -1,8 +1,9 @@
 import type { HealthInfo, ModelInfo, InstallProgress } from "./types";
+import { invoke } from "@tauri-apps/api/core";
 
 // 后端基地址（Tabu-Local 服务，端口约定 9528，与 Tabu-AI 一致）
-// 可从 localStorage 覆盖（设置面板），默认 9528
-const LS_KEY = "tabu_settings";
+// 设置统一存放在 config.json 的 ui 节（Rust 侧），启动时载入内存缓存；
+// 旧版本存 WebView localStorage(tabu_settings)，首次启动自动迁入并清除（011 §5.6 存储规范）
 interface PersistedSettings {
   baseUrl?: string;
   token?: string;
@@ -10,7 +11,19 @@ interface PersistedSettings {
   zhipuKey?: string;
 }
 
-function readSettings(): PersistedSettings {
+const LS_KEY = "tabu_settings";
+const DEFAULT_BASE_URL = "http://127.0.0.1:9528";
+
+let settingsCache: PersistedSettings | null = null;
+
+function inTauri(): boolean {
+  return (
+    typeof navigator !== "undefined" &&
+    navigator.userAgent.includes("Tauri")
+  );
+}
+
+function readLegacyLocalStorage(): PersistedSettings {
   try {
     return JSON.parse(localStorage.getItem(LS_KEY) || "{}");
   } catch {
@@ -18,28 +31,98 @@ function readSettings(): PersistedSettings {
   }
 }
 
+function legacyHasValue(s: PersistedSettings): boolean {
+  return Boolean(s.baseUrl || s.token || s.deepseekKey || s.zhipuKey);
+}
+
+// 应用启动时调用一次：读 config.json → 内存缓存；为空且有旧 localStorage 数据则一键迁移
+export async function initSettings(): Promise<void> {
+  if (!inTauri()) {
+    settingsCache = readLegacyLocalStorage();
+    return;
+  }
+  try {
+    const ui = await invoke<{
+      base_url: string;
+      token: string;
+      deepseek_key: string;
+      zhipu_key: string;
+    }>("get_ui_settings");
+    let s: PersistedSettings = {
+      baseUrl: ui.base_url || "",
+      token: ui.token || "",
+      deepseekKey: ui.deepseek_key || "",
+      zhipuKey: ui.zhipu_key || "",
+    };
+    const legacy = readLegacyLocalStorage();
+    const emptyInConfig =
+      !s.baseUrl && !s.token && !s.deepseekKey && !s.zhipuKey;
+    if (emptyInConfig && legacyHasValue(legacy)) {
+      await invoke("set_ui_settings", {
+        baseUrl: legacy.baseUrl ?? "",
+        token: legacy.token ?? "",
+        deepseekKey: legacy.deepseekKey ?? "",
+        zhipuKey: legacy.zhipuKey ?? "",
+      });
+      s = { ...legacy };
+      try {
+        localStorage.removeItem(LS_KEY);
+      } catch {
+        /* ignore */
+      }
+      console.info("已把 localStorage 旧设置迁移到 config.json");
+    }
+    settingsCache = s;
+  } catch (e) {
+    console.error("读取设置失败，回退 localStorage:", e);
+    settingsCache = readLegacyLocalStorage();
+  }
+}
+
+function currentSettings(): PersistedSettings {
+  if (settingsCache) return settingsCache;
+  return inTauri() ? {} : readLegacyLocalStorage();
+}
+
 export function getBaseUrl(): string {
-  return readSettings().baseUrl || "http://127.0.0.1:9528";
+  return currentSettings().baseUrl || DEFAULT_BASE_URL;
 }
 
 export function getToken(): string {
-  return readSettings().token || "";
-}
-
-export function saveSettings(next: PersistedSettings) {
-  localStorage.setItem(LS_KEY, JSON.stringify(next));
+  return currentSettings().token || "";
 }
 
 export function getPersistedSettings(): PersistedSettings {
-  return readSettings();
+  return currentSettings();
 }
 
-// 云端 LLM 的 API Key（用户在设置面板填写，仅存本机 localStorage）
+// 云端 LLM 的 API Key（仅存本机 config.json）
 export function getCloudApiKey(engine: string): string {
-  const s = readSettings();
+  const s = currentSettings();
   if (engine === "deepseek") return s.deepseekKey || "";
   if (engine === "zhipu") return s.zhipuKey || "";
   return "";
+}
+
+// 局部更新设置：先更内存缓存再持久化到 config.json（未传的字段不动）
+export async function updateSettings(
+  partial: Partial<PersistedSettings>
+): Promise<void> {
+  settingsCache = { ...(settingsCache ?? {}), ...partial };
+  if (!inTauri()) {
+    try {
+      localStorage.setItem(LS_KEY, JSON.stringify(settingsCache));
+    } catch {
+      /* ignore */
+    }
+    return;
+  }
+  await invoke("set_ui_settings", {
+    baseUrl: partial.baseUrl,
+    token: partial.token,
+    deepseekKey: partial.deepseekKey,
+    zhipuKey: partial.zhipuKey,
+  });
 }
 
 function authHeaders(init?: RequestInit): RequestInit {

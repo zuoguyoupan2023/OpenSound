@@ -366,7 +366,29 @@ wx.request({
 
 ---
 
-## 六、变更与维护
+## 六、本地数据存储规范（GUI 侧）
+
+> 详细方案与决策记录见 `011-朗读历史与生成策略方案.md §2.3 / §5.6`；本节为对外事实摘要。
+
+```
+~/Library/Application Support/com.tabu.local/     （Tauri app_data_dir，Windows/Linux 由 Tauri 定位）
+├─ config.json            # 启动配置 + GUI 设置（服务地址/token/云端 API Key，ui 节）
+├─ audio/
+│   ├─ recordings/*.wav   # 用户录音（16kHz WAV）
+│   ├─ tts/*.wav          # 朗读结果（各引擎帧合并，24kHz）
+│   └─ index.json         # 音频元数据索引（kind/source/engine/text/voice…）
+└─ conversations/
+    ├─ index.json         # 会话列表元数据
+    └─ <session_id>.json  # 单会话消息全文
+
+asr-server 进程侧（独立目录）：models/…（模型）、data/clone-voices/<id>/（克隆音色）。
+```
+
+存储六原则：① GUI 用户数据一律集中 app_data_dir，禁止散落工程目录或 WebView 存储；② JSON 索引与资产文件分离，索引只存相对路径；③ 小索引全量重写、大体量按 id 分文件；④ 新增字段必须 `#[serde(default)]` 向后兼容；⑤ 删除=删文件+更新索引，导出统一 zip；⑥ 设置面板提供「打开数据文件夹」入口。
+
+---
+
+## 七、变更与维护
 
 - 端口约定保持稳定，仅新增能力不改既有端点。
 - 能力/模型变化 → 同步更新本文档、`GUIDE.md`、`asr-server/README.md`。

@@ -1,11 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { PanelProps } from "../App";
 import {
   getPersistedSettings,
-  saveSettings,
+  updateSettings,
   getBaseUrl,
 } from "../api";
+import { showToast } from "../toast";
 import { Panel, Button, Spinner } from "../components/ui";
 
 export default function SettingsPanel(props: PanelProps) {
@@ -13,18 +14,31 @@ export default function SettingsPanel(props: PanelProps) {
   const [token, setToken] = useState("");
   const [deepseekKey, setDeepseekKey] = useState("");
   const [zhipuKey, setZhipuKey] = useState("");
-  const [saved, setSaved] = useState(false);
   const [serverPath, setServerPath] = useState("");
   const [pathLoading, setPathLoading] = useState(true);
   const [restarting, setRestarting] = useState(false);
   const [pathMsg, setPathMsg] = useState("");
+  // 数据目录（存储规范：音频库/对话历史/config.json 都在这里）
+  const [dataDir, setDataDir] = useState("");
+
+  // 自动保存控制：载入完成后才启用；与上次已保存快照相同则跳过
+  const loadedRef = useRef(false);
+  const savedSnapshotRef = useRef("");
 
   useEffect(() => {
     const s = getPersistedSettings();
-    setBaseUrl(s.baseUrl || "http://127.0.0.1:9528");
-    setToken(s.token || "");
-    setDeepseekKey(s.deepseekKey || "");
-    setZhipuKey(s.zhipuKey || "");
+    const initial = [
+      s.baseUrl || "http://127.0.0.1:9528",
+      s.token || "",
+      s.deepseekKey || "",
+      s.zhipuKey || "",
+    ];
+    setBaseUrl(initial[0]);
+    setToken(initial[1]);
+    setDeepseekKey(initial[2]);
+    setZhipuKey(initial[3]);
+    savedSnapshotRef.current = JSON.stringify(initial);
+    loadedRef.current = true;
     (async () => {
       try {
         const p = await invoke<string>("get_server_path");
@@ -35,13 +49,46 @@ export default function SettingsPanel(props: PanelProps) {
         setPathLoading(false);
       }
     })();
+    invoke<string>("get_data_dir")
+      .then(setDataDir)
+      .catch((e) => console.error("get_data_dir 失败:", e));
   }, []);
 
-  const save = () => {
-    saveSettings({ ...getPersistedSettings(), baseUrl, token, deepseekKey, zhipuKey });
-    setSaved(true);
-    setTimeout(() => setSaved(false), 1500);
-    props.refresh();
+  // 填写后自动保存（600ms 防抖）+ toast「已保存」
+  useEffect(() => {
+    if (!loadedRef.current) return;
+    const t = setTimeout(() => {
+      const next = JSON.stringify([
+        baseUrl.trim(),
+        token.trim(),
+        deepseekKey.trim(),
+        zhipuKey.trim(),
+      ]);
+      if (next === savedSnapshotRef.current) return;
+      updateSettings({
+        baseUrl: baseUrl.trim(),
+        token: token.trim(),
+        deepseekKey: deepseekKey.trim(),
+        zhipuKey: zhipuKey.trim(),
+      })
+        .then(() => {
+          savedSnapshotRef.current = next;
+          showToast("已保存");
+          props.refresh();
+        })
+        .catch((e) => console.error("自动保存设置失败:", e));
+    }, 600);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [baseUrl, token, deepseekKey, zhipuKey]);
+
+  const openDataDir = async () => {
+    try {
+      const p = await invoke<string>("open_data_dir");
+      setDataDir(p);
+    } catch (e) {
+      showToast("打开失败: " + String(e));
+    }
   };
 
   const savePath = async () => {
@@ -63,9 +110,11 @@ export default function SettingsPanel(props: PanelProps) {
   return (
     <Panel
       title="设置"
-      subtitle="服务连接、鉴权与运行信息"
+      subtitle="服务连接、鉴权与运行信息（修改后自动保存）"
       actions={
-        <Button onClick={save}>{saved ? "已保存" : "保存"}</Button>
+        <Button variant="ghost" onClick={openDataDir}>
+          📂 打开数据文件夹
+        </Button>
       }
     >
       <div className="settings-block">
@@ -78,7 +127,7 @@ export default function SettingsPanel(props: PanelProps) {
             placeholder="http://127.0.0.1:9528"
           />
           <p className="settings-hint">
-            默认 9528（asr-server 主入口）。若开启局域网接入，改为实际地址。
+            默认 9528（asr-server 主入口）。若开启局域网接入，改为实际地址。修改后自动保存。
           </p>
         </div>
 
@@ -112,7 +161,7 @@ export default function SettingsPanel(props: PanelProps) {
             placeholder="sk-…（platform.deepseek.com 申请）"
           />
           <p className="settings-hint">
-            填写后对话面板可选 DeepSeek 云端模型（V4-Flash / V4-Pro），与本地 LLM 并列。仅保存在本机。
+            填写后对话面板可选 DeepSeek 云端模型（V4-Flash / V4-Pro），与本地 LLM 并列。仅保存在本机 config.json。
           </p>
         </div>
 
@@ -126,7 +175,7 @@ export default function SettingsPanel(props: PanelProps) {
             placeholder="…（open.bigmodel.cn 申请）"
           />
           <p className="settings-hint">
-            填写后对话面板可选智谱云端模型（GLM-4.7 / GLM-4.6），与本地 LLM 并列。仅保存在本机。
+            填写后对话面板可选智谱云端模型（GLM-4.7 / GLM-4.6），与本地 LLM 并列。仅保存在本机 config.json。
           </p>
         </div>
 
@@ -141,6 +190,25 @@ export default function SettingsPanel(props: PanelProps) {
           <p className="settings-hint">
             本机默认无需 Token；开放局域网时才需要，与浏览器插件设置保持一致。
           </p>
+        </div>
+      </div>
+
+      <div className="settings-block">
+        <div className="settings-item">
+          <label className="settings-label">数据存放位置</label>
+          <p className="settings-hint">
+            音频库、对话历史、config.json 统一存放在应用数据目录：
+          </p>
+          {dataDir && (
+            <p className="settings-msg" style={{ wordBreak: "break-all" }}>
+              {dataDir}
+            </p>
+          )}
+          <div style={{ marginTop: 8 }}>
+            <Button variant="ghost" onClick={openDataDir}>
+              📂 打开数据文件夹
+            </Button>
+          </div>
         </div>
       </div>
 
