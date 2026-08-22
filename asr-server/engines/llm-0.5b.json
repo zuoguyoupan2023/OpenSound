@@ -1,0 +1,26 @@
+{
+  "id": "llm-0.5b",
+  "category": "llm",
+  "label": "Qwen2.5-0.5B-Instruct（默认 · 兜底）",
+  "sizeHint": "~469MB",
+  "license": "Apache-2.0 / Qwen 研究许可（GGUF 转换）",
+  "checks": [
+    { "type": "file", "path": "models/llm/qwen2.5-0.5b-instruct-q4_k_m.gguf", "bytes": 491400032 }
+  ],
+  "runtime": [
+    { "kind": "path", "path": "node_modules/node-llama-cpp/package.json", "label": "npm: node-llama-cpp" }
+  ],
+  "install": {
+    "kind": "url-multi",
+    "files": [
+      {
+        "file": "models/llm/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+        "bytes": 491400032,
+        "mirrors": [
+          { "name": "huggingface", "url": "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf" },
+          { "name": "hf-mirror", "url": "https://hf-mirror.com/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf" }
+        ]
+      }
+    ]
+  }
+}

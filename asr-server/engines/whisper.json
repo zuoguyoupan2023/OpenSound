@@ -1,0 +1,17 @@
+{
+  "id": "whisper",
+  "category": "asr",
+  "label": "Whisper base（多语兜底）",
+  "sizeHint": "~150MB（q8，随 MODEL_SIZE 档位变化）",
+  "license": "MIT（OpenAI Whisper，onnx-community 转换版）",
+  "checks": [
+    { "type": "glob", "pattern": "models/hf/onnx-community/whisper-*" }
+  ],
+  "runtime": [
+    { "kind": "path", "path": "node_modules/@huggingface/transformers/package.json", "label": "npm: @huggingface/transformers" }
+  ],
+  "install": {
+    "kind": "hint",
+    "message": "Whisper 无独立下载脚本：首次识别时由 transformers.js 自动下载到 models/hf/（S1 已统一落盘）。"
+  }
+}

@@ -16,7 +16,7 @@
 
 import http from 'node:http';
 import { execSync, spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, renameSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -26,7 +26,7 @@ const MODEL_SIZE = process.env.ASR_MODEL_SIZE || 'base'; // tiny | base | small 
 const ASR_ENGINE = (process.env.ASR_ENGINE || 'auto').toLowerCase(); // auto | sensevoice | whisper —— 选择默认识别模型
 // asr-server 架构版本：2.x = 含 sensevoice-original + VAD + 标点。
 // 供 start-all.js 探测时判断 9528 上是否旧进程（旧代码无此字段/不同版本 → 视为残留，终止后重启）。
-const SERVER_VERSION = '2.2.0';
+const SERVER_VERSION = '2.3.0'; // 2.3.0 = S2：engines/*.json 清单 + /models 就绪明细 + 多镜像通用下载器
 const WHISPER_MODEL = `onnx-community/whisper-${MODEL_SIZE}`;
 
 // 模型缓存目录
@@ -851,11 +851,11 @@ async function checkOllama() {
 }
 
 // ---------- 模型清单与安装（014 §5.2：/models + /install-model，服务端按名拉取） ----------
-// whisper 由 transformers.js 缓存到 models/hf/，检查目录里是否有对应模型
+// whisper 由 transformers.js 缓存到 models/hf/onnx-community/whisper-*（S2：与 engines/whisper.json 的 glob 校验同一路径）
 function whisperInstalled() {
-  const hfDir = path.join(CACHE_DIR, 'hf');
-  if (!existsSync(hfDir)) return false;
-  try { return readdirSync(hfDir).some((n) => n.includes('whisper')); } catch { return false; }
+  const base = path.join(CACHE_DIR, 'hf', 'onnx-community');
+  if (!existsSync(base)) return false;
+  try { return readdirSync(base).some((n) => n.includes('whisper')); } catch { return false; }
 }
 
 const MODEL_ITEMS = [
@@ -871,10 +871,133 @@ const MODEL_ITEMS = [
 
 async function collectModels() {
   const out = [];
+  const byId = new Map(MODEL_ITEMS.map((m) => [m.engine, m]));
+  // S2：以 engines/*.json 为主，逐引擎输出就绪明细（state / missingFiles / missingRuntime）
+  for (const mf of ENGINE_MANIFESTS) {
+    const legacy = byId.get(mf.id);
+    const d = await engineReadiness(mf);
+    let installed = d.state === 'running' || d.state === 'ready';
+    if (legacy) { try { installed = !!(await legacy.installed()); } catch {} }
+    out.push({
+      category: mf.category || legacy?.category || '',
+      engine: mf.id,
+      label: mf.label || legacy?.label || mf.id,
+      size: mf.sizeHint || legacy?.size || '',
+      license: mf.license || '',
+      installed,
+      state: d.state,
+      serviceUp: d.serviceUp,
+      missingFiles: d.missingFiles,
+      missingRuntime: d.missingRuntime,
+      totalMissingBytes: d.totalMissingBytes
+    });
+  }
+  // 兜底：MODEL_ITEMS 里没有对应 manifest 的条目按旧格式输出（防漏）
   for (const m of MODEL_ITEMS) {
-    out.push({ category: m.category, engine: m.engine, label: m.label, size: m.size, installed: !!(await m.installed()) });
+    if (!ENGINE_MANIFESTS.some((x) => x.id === m.engine)) {
+      out.push({ category: m.category, engine: m.engine, label: m.label, size: m.size, installed: !!(await m.installed()) });
+    }
   }
   return out;
+}
+
+// ---------- S2 引擎清单（engines/*.json）与就绪明细（002-plan §三） ----------
+// 每引擎一份 JSON：checks=必需文件/目录逐项核对；runtime=运行时依赖；
+// install.kind: script(现有下载脚本) / url-multi(通用多镜像下载) / hint(提示) / legacy(沿用 INSTALLERS)
+const ENGINES_DIR = path.join(__dirname, 'engines');
+function loadEngineManifests() {
+  try {
+    return readdirSync(ENGINES_DIR).filter((f) => f.endsWith('.json')).sort()
+      .map((f) => {
+        const mf = JSON.parse(readFileSync(path.join(ENGINES_DIR, f), 'utf8'));
+        return mf;
+      });
+  } catch (e) {
+    console.error('[manifests] 引擎清单加载失败:', e.message);
+    return [];
+  }
+}
+const ENGINE_MANIFESTS = loadEngineManifests();
+console.log(`[manifests] 已加载 ${ENGINE_MANIFESTS.length} 份引擎清单（engines/*.json）`);
+
+// 最小 glob：仅支持「目录/*」一段通配（够 whisper 场景）
+function globExists(pattern) {
+  const abs = path.join(__dirname, pattern);
+  if (!pattern.includes('*')) return existsSync(abs);
+  const sep = abs.lastIndexOf(path.sep, abs.indexOf('*'));
+  const baseDir = abs.slice(0, sep);
+  const tail = abs.slice(sep + 1);
+  const rx = new RegExp('^' + tail.split('*').map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$');
+  try {
+    return readdirSync(baseDir).some((n) => rx.test(n) && existsSync(path.join(baseDir, n)));
+  } catch { return false; }
+}
+
+// 目录内文件计数（含子目录，设上限防呆）
+function countFilesDeep(dir, cap = 5000) {
+  let n = 0;
+  const walk = (d) => {
+    if (n >= cap) return;
+    let items;
+    try { items = readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const it of items) {
+      if (n >= cap) return;
+      if (it.isDirectory()) walk(path.join(d, it.name));
+      else n++;
+    }
+  };
+  walk(dir);
+  return n;
+}
+
+// 单项校验：null=通过；否则返回缺失描述
+function checkEntry(c) {
+  if (c.type === 'file') {
+    const p = path.join(__dirname, c.path);
+    if (!existsSync(p)) return { path: c.path, type: '缺文件', expectBytes: c.bytes || 0 };
+    if (c.bytes) {
+      try {
+        const s = statSync(p).size;
+        if (s !== c.bytes) return { path: c.path, type: '大小不符', expectBytes: c.bytes, actualBytes: s };
+      } catch { return { path: c.path, type: '不可读', expectBytes: c.bytes }; }
+    }
+    return null;
+  }
+  if (c.type === 'dir') {
+    const p = path.join(__dirname, c.path);
+    if (!existsSync(p)) return { path: c.path, type: '缺目录', expectFiles: c.minFiles || 1 };
+    if (c.minFiles && countFilesDeep(p) < c.minFiles) return { path: c.path, type: '目录不完整', expectFiles: c.minFiles };
+    return null;
+  }
+  if (c.type === 'glob') return globExists(c.pattern) ? null : { path: c.pattern, type: '无匹配' };
+  return null;
+}
+
+// 就绪检查：state ∈ running | ready | partial-files | missing-runtime | incomplete
+async function engineReadiness(mf) {
+  const missingFiles = [];
+  const missingRuntime = [];
+  for (const c of mf.checks || []) {
+    const r = checkEntry(c);
+    if (r) missingFiles.push(r);
+  }
+  for (const r of mf.runtime || []) {
+    if (r.kind === 'path') {
+      if (!existsSync(path.join(__dirname, r.path))) missingRuntime.push({ kind: '缺失', label: r.label || r.path });
+    } else if (r.kind === 'bin') {
+      try { execSync(`which ${r.name}`, { stdio: 'ignore' }); } catch { missingRuntime.push({ kind: '缺失', label: r.label || ('命令 ' + r.name) }); }
+    }
+  }
+  // 服务是否在跑：复用 MODEL_ITEMS 的探针（多数即 /health 健康检查）
+  const legacy = MODEL_ITEMS.find((x) => x.engine === mf.id);
+  let serviceUp = false;
+  if (legacy) { try { serviceUp = !!(await legacy.installed()); } catch {} }
+  const state = missingRuntime.length
+    ? (missingFiles.length ? 'incomplete' : 'missing-runtime')
+    : missingFiles.length ? 'partial-files'
+      : (serviceUp ? 'running' : 'ready');
+  const totalMissingBytes = missingFiles.reduce((a, b) => a + (b.expectBytes || 0), 0);
+  return { state, missingFiles, missingRuntime, totalMissingBytes, serviceUp };
 }
 
 // 子进程下载器 → NDJSON 流式进度；退出码 0 视为完成
@@ -903,42 +1026,71 @@ function runDownload(cmd, args) {
   });
 }
 
-// LLM 专用下载器：先下载到 .part 临时文件，完整下载成功后 rename 成正式文件名。
-// 这样 installed 只检查正式文件是否存在 → 下载中（仅 .part）不算已安装，避免误导。
-function runLlmDownload(file, url) {
-  return (ctx) => new Promise((resolve, reject) => {
-    const target = path.join(LLM_DIR, file);
-    const part = target + '.part';
-    ctx.nd({ type: 'log', message: '开始下载（下载中未完成前不显示"已安装"）…' });
-    const p = spawn('curl', ['-L', '-C', '-', '--connect-timeout', '15', '--max-time', '14400', '-o', part, url], {
-      cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let buf = '';
-    const onData = (chunk) => {
-      buf += chunk.toString();
-      let idx;
-      while ((idx = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, idx).replace(/\r$/, '').trim();
-        buf = buf.slice(idx + 1);
-        if (line) ctx.nd({ type: 'log', message: line });
+// S2 通用单文件多镜像下载器（manifest install.kind=url-multi 专用）：
+// .part 临时文件 → 完成后原子 rename；curl -C - 断点续传；
+// --speed-limit/--speed-time：速度低于阈值持续一段时间视为失败 → 自动换下一个镜像源。
+// 注：原 runLlmDownload 有 fs.renameSync 未定义的潜在 bug（本机权重齐全从未触发），此处一并根治。
+function downloadOneFile(fileSpec, ctx) {
+  const target = path.join(__dirname, fileSpec.file);
+  mkdirSync(path.dirname(target), { recursive: true });
+  return new Promise((resolve, reject) => {
+    let i = 0;
+    const tryMirror = () => {
+      if (i >= (fileSpec.mirrors || []).length) {
+        return reject(new Error(`所有镜像均失败：${fileSpec.file}（已保留 .part，可重试续传）`));
       }
+      const m = fileSpec.mirrors[i++];
+      ctx.nd({ type: 'log', message: `下载 ${path.basename(fileSpec.file)} ← ${m.name} …` });
+      const part = target + '.part';
+      const p = spawn('curl', ['-L', '-C', '-', '--connect-timeout', '15', '--max-time', '14400',
+        '--speed-limit', '20480', '--speed-time', '90', // <20KB/s 持续 90s 判失败 → 换源
+        '-o', part, m.url], { cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'] });
+      let buf = '';
+      const onData = (chunk) => {
+        buf += chunk.toString();
+        let idx;
+        while ((idx = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, idx).replace(/\r$/, '').trim();
+          buf = buf.slice(idx + 1);
+          if (line) ctx.nd({ type: 'log', message: line });
+        }
+      };
+      p.stdout.on('data', onData);
+      p.stderr.on('data', onData);
+      p.on('error', (e) => { try { p.kill(); } catch {} reject(new Error('无法启动 curl：' + e.message)); });
+      p.on('exit', (code) => {
+        if (buf.trim()) ctx.nd({ type: 'log', message: buf.trim() });
+        if (code === 0) {
+          try { renameSync(part, target); } catch (e) { return reject(new Error('改名失败：' + e.message)); }
+          return resolve(target);
+        }
+        // 失败保留 .part 供断点续传，自动换下一个镜像
+        ctx.nd({ type: 'log', message: `镜像 ${m.name} 失败（exit=${code}），尝试下一镜像…` });
+        tryMirror();
+      });
     };
-    p.stdout.on('data', onData);
-    p.stderr.on('data', onData);
-    p.on('error', (e) => reject(new Error('无法启动下载器：' + e.message)));
-    p.on('exit', (code) => {
-      if (buf.trim()) ctx.nd({ type: 'log', message: buf.trim() });
-      if (code === 0) {
-        // 下载完成：把 .part 原子地 rename 成正式文件 → installed 才变为 true
-        fs.renameSync(part, target);
-        ctx.nd({ type: 'done', message: '安装完成：' + file });
-        resolve();
-      } else {
-        // 失败保留 .part 供断点续传；不产生正式文件
-        reject(new Error('下载失败（退出码 ' + code + '），已保留部分文件，可重试续传'));
-      }
-    });
+    tryMirror();
   });
+}
+
+// manifest install.kind=url-multi 的安装器工厂
+function manifestUrlMultiInstaller(mf) {
+  return async (ctx) => {
+    for (const f of mf.install.files || []) {
+      const target = path.join(__dirname, f.file);
+      if (existsSync(target)) {
+        ctx.nd({ type: 'log', message: `已存在，跳过：${f.file}` });
+        continue;
+      }
+      await downloadOneFile(f, ctx);
+      if (f.bytes) {
+        const s = statSync(target).size;
+        if (s !== f.bytes) ctx.nd({ type: 'log', message: `⚠️ 大小不符（期望 ${f.bytes} / 实际 ${s}），建议删除后重新安装` });
+        else ctx.nd({ type: 'log', message: `✓ 字节数校验通过（${s}）` });
+      }
+    }
+    ctx.nd({ type: 'done', message: `安装完成：${mf.id}` });
+  };
 }
 
 mkdirSync(LLM_DIR, { recursive: true }); // 供 LLM 模型落盘
@@ -946,12 +1098,10 @@ mkdirSync(LLM_DIR, { recursive: true }); // 供 LLM 模型落盘
 const INSTALLERS = {
   kokoro: runDownload(process.execPath, ['download-kokoro.js']),
   sensevoice: runDownload(process.execPath, ['asr-server-download.js']),
-  // 多档位 LLM 模型：按 LLM_MODELS 注册表动态生成下载器
+  // 多档位 LLM：S2 起由 engines/llm-*.json 驱动（install.kind=url-multi，多镜像自动换源 + 字节数校验）
   ...Object.fromEntries(
-    Object.entries(LLM_MODELS).map(([key, m]) => [
-      key,
-      runLlmDownload(m.file, m.url),
-    ])
+    ENGINE_MANIFESTS.filter((mf) => mf.install && mf.install.kind === 'url-multi')
+      .map((mf) => [mf.id, manifestUrlMultiInstaller(mf)])
   ),
   qwen3: (ctx) => ctx.nd({ type: 'done', message: 'Qwen3-TTS 无独立下载脚本：模型在首次启动 qwen3 服务（npm run start-qwen3）时自动下载。' }),
   whisper: (ctx) => ctx.nd({ type: 'done', message: 'Whisper 无独立下载脚本：首次识别时由 transformers.js 自动下载。' }),

@@ -1,0 +1,22 @@
+{
+  "id": "sensevoice-original",
+  "category": "asr",
+  "label": "SenseVoice 原始版（funasr · 高精度）",
+  "sizeHint": "~900MB + VAD/标点辅助包",
+  "license": "Apache-2.0（ModelSense SenseVoiceSmall）",
+  "checks": [
+    { "type": "file", "path": "models/sensevoice-original/model.pt", "bytes": 936291369 },
+    { "type": "file", "path": "models/sensevoice-original/config.yaml" },
+    { "type": "file", "path": "models/sensevoice-original/am.mvn" },
+    { "type": "file", "path": "models/sensevoice-original/chn_jpn_yue_eng_ko_spectok.bpe.model" },
+    { "type": "dir", "path": "models/fsmn-vad", "minFiles": 5, "note": "VAD 过滤静音辅助模型" },
+    { "type": "dir", "path": "models/punc-cn-en", "minFiles": 6, "note": "标点辅助；⚠️ 权重文件构成待查（.mdl 指针按需拉取），S2 验收项" }
+  ],
+  "runtime": [
+    { "kind": "bin", "name": "python3", "minVersion": "3.10", "label": "系统 python3（S4 将改为受管 venv .venv-funasr）" }
+  ],
+  "install": {
+    "kind": "hint",
+    "message": "SenseVoice 原始版无独立下载器：权重已在 models/sensevoice-original 本地化，由 funasr 服务启动时加载。"
+  }
+}

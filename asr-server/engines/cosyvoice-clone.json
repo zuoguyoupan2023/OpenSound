@@ -1,0 +1,28 @@
+{
+  "id": "cosyvoice-clone",
+  "category": "tts",
+  "label": "CosyVoice3 语音克隆（0.5B · MPS）",
+  "sizeHint": "~4.4GB 必需（全量目录 ~9GB，非必需文件见 optionalFiles）",
+  "license": "Apache-2.0",
+  "checks": [
+    { "type": "file", "path": "models/cosyvoice/Fun-CosyVoice3-0.5B/llm.pt", "bytes": 2024669519 },
+    { "type": "file", "path": "models/cosyvoice/Fun-CosyVoice3-0.5B/flow.pt", "bytes": 1329116148 },
+    { "type": "file", "path": "models/cosyvoice/Fun-CosyVoice3-0.5B/hift.pt", "bytes": 83202622 },
+    { "type": "file", "path": "models/cosyvoice/Fun-CosyVoice3-0.5B/speech_tokenizer_v3.onnx", "bytes": 969451503 },
+    { "type": "file", "path": "models/cosyvoice/Fun-CosyVoice3-0.5B/campplus.onnx", "bytes": 28303423 },
+    { "type": "file", "path": "models/cosyvoice/Fun-CosyVoice3-0.5B/cosyvoice3.yaml", "bytes": 6934 }
+  ],
+  "optionalFiles": [
+    { "path": "models/cosyvoice/Fun-CosyVoice3-0.5B/llm.rl.pt", "note": "与 llm.pt 二选一？S4 读 cosyvoice3.yaml 甄别后定" },
+    { "path": "models/cosyvoice/Fun-CosyVoice3-0.5B/speech_tokenizer_v3.batch.onnx", "note": "批量变体，疑似非必需" },
+    { "path": "models/cosyvoice/Fun-CosyVoice3-0.5B/flow.decoder.estimator.fp32.onnx", "note": "onnx 变体，疑似非必需" }
+  ],
+  "runtime": [
+    { "kind": "path", "path": ".venv-cosyvoice/bin/python3", "label": "受管 venv：.venv-cosyvoice" },
+    { "kind": "path", "path": "CosyVoice/cosyvoice/cli/cosyvoice.py", "label": "CosyVoice 源码子集（S4 vendoring 根治；现由 installer git clone 兜底）" }
+  ],
+  "install": {
+    "kind": "legacy",
+    "note": "沿用现有 cosyvoice-clone 安装器：校验模型 + 缺源码自动浅克隆"
+  }
+}

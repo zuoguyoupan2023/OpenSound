@@ -1,0 +1,24 @@
+{
+  "id": "kokoro",
+  "category": "tts",
+  "label": "Kokoro（中英混合 · 53 音色）",
+  "sizeHint": "~383MB",
+  "license": "Apache-2.0",
+  "checks": [
+    { "type": "file", "path": "models/tts/kokoro-multi-lang-v1_0/model.onnx", "bytes": 325630829 },
+    { "type": "file", "path": "models/tts/kokoro-multi-lang-v1_0/tokens.txt", "bytes": 687 },
+    { "type": "file", "path": "models/tts/kokoro-multi-lang-v1_0/voices.bin", "bytes": 27678720 },
+    { "type": "file", "path": "models/tts/kokoro-multi-lang-v1_0/lexicon-zh.txt", "bytes": 2364621 },
+    { "type": "file", "path": "models/tts/kokoro-multi-lang-v1_0/lexicon-us-en.txt" },
+    { "type": "file", "path": "models/tts/kokoro-multi-lang-v1_0/lexicon-gb-en.txt" },
+    { "type": "file", "path": "models/tts/kokoro-multi-lang-v1_0/date-zh.fst", "bytes": 59154 },
+    { "type": "file", "path": "models/tts/kokoro-multi-lang-v1_0/number-zh.fst" },
+    { "type": "file", "path": "models/tts/kokoro-multi-lang-v1_0/phone-zh.fst" },
+    { "type": "dir", "path": "models/tts/kokoro-multi-lang-v1_0/espeak-ng-data", "minFiles": 300 },
+    { "type": "dir", "path": "models/tts/kokoro-multi-lang-v1_0/dict", "minFiles": 8 }
+  ],
+  "runtime": [
+    { "kind": "path", "path": "node_modules/sherpa-onnx-node/package.json", "label": "npm: sherpa-onnx-node" }
+  ],
+  "install": { "kind": "script", "cmd": "node", "args": ["download-kokoro.js"], "note": "hf-mirror 清单化并发下载，GitHub tar 兜底" }
+}

@@ -1,0 +1,15 @@
+{
+  "id": "sensevoice",
+  "category": "asr",
+  "label": "SenseVoice（中文/粤/日/韩最优）",
+  "sizeHint": "~228MB",
+  "license": "Apache-2.0",
+  "checks": [
+    { "type": "file", "path": "models/sensevoice/model.int8.onnx", "bytes": 239233841 },
+    { "type": "file", "path": "models/sensevoice/tokens.txt", "bytes": 315894 }
+  ],
+  "runtime": [
+    { "kind": "path", "path": "node_modules/sherpa-onnx-node/package.json", "label": "npm: sherpa-onnx-node" }
+  ],
+  "install": { "kind": "script", "cmd": "node", "args": ["asr-server-download.js"], "note": "hf-mirror 逐文件下载" }
+}

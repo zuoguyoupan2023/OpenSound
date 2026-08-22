@@ -68,7 +68,7 @@ const SKIP_COSYVOICE = ['1', 'true', 'yes'].includes(String(process.env.TABU_SKI
 const SKIP_SENSE_ORIGINAL = ['1', 'true', 'yes'].includes(String(process.env.TABU_SKIP_SENSEVOICE_ORIGINAL || '').toLowerCase());
 // 期望的 asr-server 架构版本（须与 asr-server.js 的 SERVER_VERSION 一致）：
 // 若 9528 上的服务 version 与之不符 → 判定为旧进程残留 → 终止后重启。
-const EXPECTED_VERSION = '2.2.0';
+const EXPECTED_VERSION = '2.3.0';
 
 function run(cmd, args, name, env = {}) {
   const p = spawn(cmd, args, { stdio: 'inherit', cwd: __dirname, env: { ...process.env, ...MANAGED_ENV, ...env } });
@@ -100,11 +100,13 @@ async function probe(url) {
   } catch { return { up: false, version: null }; }
 }
 
-// 返回占用某端口(仅 TCP 监听)的进程 PID 列表（macOS/Linux 用 lsof；跨平台可换 netstat）
+// 返回占用某端口(仅 TCP LISTEN)的进程 PID 列表。
+// ⚠️ 必须加 -sTCP:LISTEN 且排除自身：探测 /health 的出站连接同样带 tcp:9528，
+//    否则旧版本替换分支会把自己也列进去 → 自杀（S2 实测踩坑：exit 143）。
 function portPids(port) {
   try {
-    const out = execSync(`lsof -ti tcp:${port}`).toString().trim();
-    return out ? out.split('\n').filter(Boolean) : [];
+    const out = execSync(`lsof -ti tcp:${port} -sTCP:LISTEN`).toString().trim();
+    return out ? out.split('\n').map(Number).filter((n) => n && n !== process.pid) : [];
   } catch { return []; }
 }
 function killPids(pids) {

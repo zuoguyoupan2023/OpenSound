@@ -1,0 +1,26 @@
+{
+  "id": "llm-qwen3-8b",
+  "category": "llm",
+  "label": "Qwen3-8B Q4_K_M（推荐 · 对话更强）",
+  "sizeHint": "~4.7GB",
+  "license": "Apache-2.0",
+  "checks": [
+    { "type": "file", "path": "models/llm/Qwen3-8B-Q4_K_M.gguf", "bytes": 5027783488 }
+  ],
+  "runtime": [
+    { "kind": "path", "path": "node_modules/node-llama-cpp/package.json", "label": "npm: node-llama-cpp" }
+  ],
+  "install": {
+    "kind": "url-multi",
+    "files": [
+      {
+        "file": "models/llm/Qwen3-8B-Q4_K_M.gguf",
+        "bytes": 5027783488,
+        "mirrors": [
+          { "name": "huggingface", "url": "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf" },
+          { "name": "hf-mirror", "url": "https://hf-mirror.com/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf" }
+        ]
+      }
+    ]
+  }
+}

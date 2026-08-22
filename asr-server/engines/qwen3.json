@@ -1,0 +1,18 @@
+{
+  "id": "qwen3",
+  "category": "tts",
+  "label": "Qwen3-TTS 0.6B（MPS · 流式）",
+  "sizeHint": "~2.3GB（python hub 缓存）",
+  "license": "Apache-2.0",
+  "checks": [
+    { "type": "dir", "path": "models/hf/hub/models--Qwen--Qwen3-TTS-12Hz-0.6B-CustomVoice", "minFiles": 10,
+      "note": "python hub 缓存结构（blobs+snapshots），S1 起落位 models/hf/hub/" }
+  ],
+  "runtime": [
+    { "kind": "path", "path": ".venv-qwen3/bin/python3", "label": "受管 venv：.venv-qwen3（S4/S5 自动创建）" }
+  ],
+  "install": {
+    "kind": "hint",
+    "message": "Qwen3-TTS 无独立下载脚本：模型在 qwen3 服务首次启动时经 HF_HOME(models/hf) 自动下载。"
+  }
+}
