@@ -246,23 +246,64 @@ fn repair_wav_header_if_broken(path: &Path, engine: &str) -> Option<u32> {
     f.write_all(&head).is_ok().then_some(data_size)
 }
 
+/// 二次纠正：更早一版修复把 24kHz 的 TTS 文件按 16k 标注（能播放但变慢变调）。
+/// 仅处理：头完整正常、声明 16kHz、单声道 16-bit 且引擎属 24k 引擎的 tts 记录。幂等。
+fn relabel_mislabeled_tts_rate(path: &Path) -> Option<u32> {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = fs::OpenOptions::new().read(true).write(true).open(path) else {
+        return None;
+    };
+    let mut head = [0u8; 44];
+    if f.read_exact(&mut head).is_err() {
+        return None;
+    }
+    if &head[0..4] != b"RIFF" || &head[8..12] != b"WAVE" || &head[36..40] != b"data" {
+        return None;
+    }
+    let sr = u32::from_le_bytes(head[24..28].try_into().ok()?);
+    if sr != 16000 {
+        return None; // 已是正确标注（或本就 16k），不动
+    }
+    let ch = u16::from_le_bytes(head[22..24].try_into().ok()?);
+    let bits = u16::from_le_bytes(head[34..36].try_into().ok()?);
+    if ch != 1 || bits != 16 {
+        return None;
+    }
+    let data_size = u32::from_le_bytes(head[40..44].try_into().ok()?);
+    head[24..28].copy_from_slice(&24000u32.to_le_bytes());
+    head[28..32].copy_from_slice(&48000u32.to_le_bytes());
+    if f.seek(SeekFrom::Start(0)).is_err() {
+        return None;
+    }
+    f.write_all(&head).is_ok().then_some(data_size)
+}
+
+fn is_24k_engine(engine: &str) -> bool {
+    matches!(engine, "kokoro" | "qwen3" | "clone" | "cosyvoice")
+}
+
 /// 返回音频库根目录绝对路径（用于 asset URL 与"打开位置"）
 #[tauri::command]
 pub fn audio_get_dir(app: tauri::AppHandle) -> Result<String, String> {
     let dir = audio_dir(&app)?;
     fs::create_dir_all(recordings_dir(&dir)).map_err(|e| e.to_string())?;
     fs::create_dir_all(tts_dir(&dir)).map_err(|e| e.to_string())?;
-    // 顺手修复历史坏头文件（幂等：正常头直接跳过），并纠正被 1.5x 高估的时长
+    // 顺手修复历史坏头文件（幂等：正常头直接跳过），并纠正被高估的时长
     let mut idx = read_index(&dir);
     let mut changed = false;
     for rec in idx.items.iter_mut() {
-        if rec.kind == "tts" {
-            if let Some(data_size) = repair_wav_header_if_broken(&dir.join(&rec.file), &rec.engine)
-            {
-                let true_dur = data_size as f64 / engine_sample_rate(&rec.engine) as f64 / 2.0;
-                if (rec.duration_sec - true_dur).abs() > 0.05 {
-                    rec.duration_sec = (true_dur * 10.0).round() / 10.0;
-                }
+        if rec.kind != "tts" {
+            continue;
+        }
+        if let Some(data_size) = repair_wav_header_if_broken(&dir.join(&rec.file), &rec.engine) {
+            rec.duration_sec =
+                ((data_size as f64 / engine_sample_rate(&rec.engine) as f64 / 2.0) * 10.0).round()
+                    / 10.0;
+            changed = true;
+        } else if is_24k_engine(&rec.engine) {
+            // 二次纠正：被按 16k 错误标注的 24k 文件
+            if let Some(data_size) = relabel_mislabeled_tts_rate(&dir.join(&rec.file)) {
+                rec.duration_sec = ((data_size as f64 / 48000.0) * 10.0).round() / 10.0;
                 changed = true;
             }
         }

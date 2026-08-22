@@ -1002,6 +1002,90 @@ textarea:focus,
   overflow-y: auto;
 }
 
+/* ===== 对话历史 ===== */
+.chat-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.chat-session-hint {
+  font-size: 12px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.chat-history-wrap {
+  position: relative;
+}
+.chat-history-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 60;
+  width: 340px;
+  max-height: 360px;
+  overflow-y: auto;
+  background: var(--bg-2, #fff);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.18);
+  padding: 6px;
+}
+.chat-history-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 8px;
+}
+.chat-history-item:hover {
+  background: rgba(59, 130, 246, 0.08);
+}
+.chat-history-item.current .chat-history-open .t {
+  color: var(--accent);
+}
+.chat-history-open {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 8px 10px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: inherit;
+}
+.chat-history-open .t {
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chat-history-open .s {
+  font-size: 11px;
+  color: var(--muted);
+}
+.chat-history-del {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 6px;
+  flex-shrink: 0;
+}
+.chat-history-del:hover {
+  color: #f87171;
+}
+.chat-history-empty {
+  padding: 14px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 /* ===== Toast 提示 ===== */
 .toast {
   position: fixed;

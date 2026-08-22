@@ -4,12 +4,26 @@ import { Icon } from "@iconify/react";
 import { chat, transcribe, speakStream, getCloudApiKey } from "../api";
 import { createRecorder, type Recorder, createFramePlayer, stopAudio } from "../audio";
 import { saveRecording, teeCollect, mergeWavFrames, saveTts } from "../audioStore";
+import {
+  conversationList,
+  conversationGet,
+  conversationSave,
+  conversationDelete,
+  newSessionId,
+  type ConversationMetaRec,
+} from "../conversationStore";
+import { fmtTime, truncate } from "../format";
 import { listVoices, type CloneVoice } from "../voiceStore";
 import { Panel, Button, Select, Spinner, EngineBadge } from "../components/ui";
 
 interface Msg {
   role: "user" | "assistant";
   content: string;
+  ts?: number;
+  engine?: string;
+  model?: string;
+  /** 关联音频库中该轮朗读的记录 id */
+  tts_audio_id?: string;
 }
 
 // 云端 LLM 档位（与后端 CLOUD_ENGINES 保持一致）
@@ -50,6 +64,17 @@ export default function ChatPanel(props: PanelProps) {
   // 朗读中断控制：停止时 abort 底层流，避免服务端继续合成、前端继续收流
   const speakAbortRef = useRef<AbortController | null>(null);
   const speakStoppedRef = useRef(false);
+  // ===== 对话历史（011 §5.5：每轮自动保存，不设上限，手动删） =====
+  const [sessionId, setSessionId] = useState<string>(() => newSessionId());
+  const [convList, setConvList] = useState<ConversationMetaRec[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
+  const sessionTitleRef = useRef("");
+  // 渲染期同步的引用：供异步回调拿到最新消息序列与引擎组合
+  const messagesRef = useRef<Msg[]>([]);
+  messagesRef.current = messages;
+  const currentModel = engine === "llama-cpp" ? llmModel : cloudModel;
+  const engineModelRef = useRef({ engine: "", model: "" });
+  engineModelRef.current = { engine, model: currentModel };
 
   const llmReady = props.health?.llm?.model !== "missing";
   // 已安装的 LLM 档位（来自 /models）
@@ -67,6 +92,67 @@ export default function ChatPanel(props: PanelProps) {
       .catch(() => {});
   }, []);
 
+  // ===== 会话历史逻辑 =====
+  const refreshConvList = () => {
+    conversationList()
+      .then(setConvList)
+      .catch((e) => console.error("载入会话列表失败:", e));
+  };
+
+  useEffect(() => {
+    refreshConvList();
+  }, []);
+
+  // 每轮对话后整体保存当前会话（不阻塞 UI）
+  const autoSaveSession = (msgs: Msg[], engineId: string, modelId: string) => {
+    if (!msgs.length) return;
+    if (!sessionTitleRef.current) {
+      const firstUser = msgs.find((m) => m.role === "user");
+      sessionTitleRef.current = firstUser ? truncate(firstUser.content, 20) : "";
+    }
+    conversationSave({
+      id: sessionId,
+      title: sessionTitleRef.current || "未命名会话",
+      engine: engineId,
+      model: modelId,
+      messages: msgs,
+    })
+      .then(refreshConvList)
+      .catch((e) => console.error("自动保存会话失败:", e));
+  };
+
+  const newChat = () => {
+    setMessages([]);
+    setSessionId(newSessionId());
+    sessionTitleRef.current = "";
+    setShowHistory(false);
+  };
+
+  const openSession = async (meta: ConversationMetaRec) => {
+    setError("");
+    try {
+      const c = await conversationGet(meta.id);
+      setMessages(c.messages ?? []);
+      setSessionId(c.id);
+      sessionTitleRef.current = c.title;
+      setShowHistory(false);
+    } catch (e) {
+      setError("载入会话失败: " + String(e));
+    }
+  };
+
+  const removeSession = async (id: string) => {
+    if (!window.confirm("删除这个会话记录？")) return;
+    try {
+      await conversationDelete(id);
+      refreshConvList();
+      if (id === sessionId) newChat();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+
   const sendText = async (content: string) => {
     if (!content.trim() || busy) return;
     setError("");
@@ -75,7 +161,8 @@ export default function ChatPanel(props: PanelProps) {
       setError(`请先在「设置」面板填写 ${CLOUD_LABELS[engine]} 的 API Key`);
       return;
     }
-    setMessages((m) => [...m, { role: "user", content }]);
+    const base: Msg[] = [...messages, { role: "user", content, ts: Date.now() }];
+    setMessages(base);
     setInput("");
     setBusy(true);
     try {
@@ -86,7 +173,13 @@ export default function ChatPanel(props: PanelProps) {
       ];
       const model = engine === "llama-cpp" ? llmModel : cloudModel;
       const r = await chat(history, engine, model, apiKey || undefined);
-      setMessages((m) => [...m, { role: "assistant", content: r.text }]);
+      // 组装完整消息序列（含本轮引擎信息），一次性更新并自动保存
+      const next: Msg[] = [
+        ...base,
+        { role: "assistant", content: r.text, ts: Date.now(), engine, model },
+      ];
+      setMessages(next);
+      autoSaveSession(next, engine, model);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -151,7 +244,27 @@ export default function ChatPanel(props: PanelProps) {
             source: "chat",
             voice: ttsEngine === "clone" ? cloneVoiceId : undefined,
             interrupted: speakStoppedRef.current || undefined,
-          }).catch((e) => console.error("保存朗读失败:", e));
+          })
+            .then((rec) => {
+              // 把该轮朗读音频 id 关联回对应的消息（供将来"点击重听"）
+              if (!rec) return;
+              const next = messagesRef.current.map((x) =>
+                x.role === "assistant" && x.content === text && !x.tts_audio_id
+                  ? { ...x, tts_audio_id: rec.id }
+                  : x
+              );
+              setMessages(next);
+              conversationSave({
+                id: sessionId,
+                title: sessionTitleRef.current || "未命名会话",
+                engine: engineModelRef.current.engine,
+                model: engineModelRef.current.model,
+                messages: next,
+              })
+                .then(refreshConvList)
+                .catch(() => {});
+            })
+            .catch((e) => console.error("保存朗读失败:", e));
         })
         .catch((e) => console.error("收集朗读帧失败:", e));
       await player.start(playStream);
@@ -185,6 +298,50 @@ export default function ChatPanel(props: PanelProps) {
         ) : undefined
       }
     >
+      <div className="chat-toolbar">
+        <Button variant="ghost" onClick={newChat}>
+          <Icon icon="lucide:plus" width={16} height={16} /> 新会话
+        </Button>
+        <div className="chat-history-wrap">
+          <Button variant="ghost" onClick={() => setShowHistory((s) => !s)}>
+            <Icon icon="lucide:history" width={16} height={16} /> 历史
+            {convList.length ? `（${convList.length}）` : ""}
+          </Button>
+          {showHistory && (
+            <div className="chat-history-pop">
+              {convList.length === 0 ? (
+                <div className="chat-history-empty">暂无历史会话，聊一轮就会自动保存</div>
+              ) : (
+                convList.map((m) => (
+                  <div
+                    key={m.id}
+                    className={`chat-history-item ${m.id === sessionId ? "current" : ""}`}
+                  >
+                    <button className="chat-history-open" onClick={() => openSession(m)}>
+                      <span className="t">{m.title}</span>
+                      <span className="s">
+                        {fmtTime(m.updated_at).slice(5, 16)} · {m.message_count} 条 ·{" "}
+                        {m.engine}
+                      </span>
+                    </button>
+                    <button
+                      className="chat-history-del"
+                      title="删除此会话"
+                      onClick={() => removeSession(m.id)}
+                    >
+                      <Icon icon="lucide:trash-2" width={14} height={14} />
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+        </div>
+        <span className="muted chat-session-hint">
+          {sessionTitleRef.current || "当前会话每轮自动保存"}
+        </span>
+      </div>
+
       <div className="chat-box">
         {messages.length === 0 && (
           <div className="chat-empty">

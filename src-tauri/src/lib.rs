@@ -11,6 +11,7 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::{Emitter, Manager, State};
 
 mod audio_store;
+mod conversation_store;
 mod realtime;
 mod recorder;
 use realtime::Realtime;
@@ -444,7 +445,12 @@ pub fn run() {
             audio_store::audio_get_dir,
             audio_store::audio_export,
             audio_store::audio_set_clone_sample,
-            audio_store::audio_read_base64
+            audio_store::audio_read_base64,
+            conversation_store::conversation_list,
+            conversation_store::conversation_get,
+            conversation_store::conversation_save,
+            conversation_store::conversation_rename,
+            conversation_store::conversation_delete
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
