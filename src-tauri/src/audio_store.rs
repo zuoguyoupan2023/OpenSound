@@ -196,42 +196,54 @@ pub fn audio_delete(app: tauri::AppHandle, id: String) -> Result<(), String> {
     Ok(())
 }
 
+/// 各 TTS 引擎帧流的真实采样率（asr-server.js / qwen3 / cosyvoice 服务端均为 24kHz）
+fn engine_sample_rate(engine: &str) -> u32 {
+    match engine {
+        "kokoro" | "qwen3" | "clone" | "cosyvoice" => 24000,
+        _ => 16000,
+    }
+}
+
 /// 修复旧版 mergeWavFrames 写坏的 WAV 头（幂等）。
 /// 坏头特征：偏移 4..8 是 "WAVE" 且 8..12 是 "fmt "（正常文件偏移 4..8 是 RIFF 尺寸字段）。
-/// 帧流合并产物固定为 16kHz/单声道/16-bit，可确定性重建头部。
-fn repair_wav_header_if_broken(path: &Path) -> bool {
+/// 帧流合并产物为单声道 16-bit PCM；采样率按记录的 engine 取真实值
+/// （此前误写 16k 导致 24k 音频重播变慢变调，听起来"换了个人"）。
+/// 返回 Some(数据字节数) 表示执行了修复。
+fn repair_wav_header_if_broken(path: &Path, engine: &str) -> Option<u32> {
     use std::io::{Read, Seek, SeekFrom};
     let Ok(mut f) = fs::OpenOptions::new().read(true).write(true).open(path) else {
-        return false;
+        return None;
     };
     let mut head = [0u8; 44];
     if f.read_exact(&mut head).is_err() {
-        return false;
+        return None;
     }
     if &head[4..8] != b"WAVE" || &head[8..12] != b"fmt " {
-        return false; // 头正常，不动
+        return None; // 头正常，不动
     }
-    let Ok(meta) = f.metadata() else { return false };
+    let Ok(meta) = f.metadata() else { return None };
     if meta.len() <= 44 {
-        return false;
+        return None;
     }
     let data_size = (meta.len() - 44) as u32;
+    let sr = engine_sample_rate(engine);
+    let byte_rate = sr * 2; // 单声道 16-bit
     head[4..8].copy_from_slice(&(36 + data_size).to_le_bytes());
     head[8..12].copy_from_slice(b"WAVE");
     head[12..16].copy_from_slice(b"fmt ");
     head[16..20].copy_from_slice(&16u32.to_le_bytes());
     head[20..22].copy_from_slice(&1u16.to_le_bytes());
     head[22..24].copy_from_slice(&1u16.to_le_bytes());
-    head[24..28].copy_from_slice(&16000u32.to_le_bytes());
-    head[28..32].copy_from_slice(&32000u32.to_le_bytes());
+    head[24..28].copy_from_slice(&sr.to_le_bytes());
+    head[28..32].copy_from_slice(&byte_rate.to_le_bytes());
     head[32..34].copy_from_slice(&2u16.to_le_bytes());
     head[34..36].copy_from_slice(&16u16.to_le_bytes());
     head[36..40].copy_from_slice(b"data");
     head[40..44].copy_from_slice(&data_size.to_le_bytes());
     if f.seek(SeekFrom::Start(0)).is_err() {
-        return false;
+        return None;
     }
-    f.write_all(&head).is_ok()
+    f.write_all(&head).is_ok().then_some(data_size)
 }
 
 /// 返回音频库根目录绝对路径（用于 asset URL 与"打开位置"）
@@ -240,9 +252,23 @@ pub fn audio_get_dir(app: tauri::AppHandle) -> Result<String, String> {
     let dir = audio_dir(&app)?;
     fs::create_dir_all(recordings_dir(&dir)).map_err(|e| e.to_string())?;
     fs::create_dir_all(tts_dir(&dir)).map_err(|e| e.to_string())?;
-    // 顺手修复历史坏头文件（幂等：正常头直接跳过），让旧朗读记录恢复可播放
-    for rec in read_index(&dir).items {
-        repair_wav_header_if_broken(&dir.join(&rec.file));
+    // 顺手修复历史坏头文件（幂等：正常头直接跳过），并纠正被 1.5x 高估的时长
+    let mut idx = read_index(&dir);
+    let mut changed = false;
+    for rec in idx.items.iter_mut() {
+        if rec.kind == "tts" {
+            if let Some(data_size) = repair_wav_header_if_broken(&dir.join(&rec.file), &rec.engine)
+            {
+                let true_dur = data_size as f64 / engine_sample_rate(&rec.engine) as f64 / 2.0;
+                if (rec.duration_sec - true_dur).abs() > 0.05 {
+                    rec.duration_sec = (true_dur * 10.0).round() / 10.0;
+                }
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        write_index(&dir, &idx)?;
     }
     Ok(dir.to_string_lossy().into_owned())
 }

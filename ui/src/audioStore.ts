@@ -64,14 +64,52 @@ export function blobToBase64(blob: Blob): Promise<string> {
   });
 }
 
-// 16kHz 单声道 16-bit WAV 的近似时长（秒）
-export function wavDurationSec(blob: Blob): number {
-  return Math.max(0, (blob.size - 44) / 2 / 16000);
+// ---------- WAV 头解析与时长 ----------
+// 解析 WAV 头部关键参数；注意各 TTS 引擎帧均为 24kHz（kokoro/qwen3/cosyvoice），
+// 录音为 16kHz——绝不能写死采样率。
+function wavHeaderInfo(
+  bytes: Uint8Array
+): { sampleRate: number; channels: number; bitsPerSample: number } | null {
+  if (bytes.length < 44) return null;
+  const tag = (o: number) =>
+    String.fromCharCode(bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]);
+  if (tag(0) !== "RIFF" || tag(8) !== "WAVE") return null;
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return {
+    sampleRate: dv.getUint32(24, true),
+    channels: dv.getUint16(22, true),
+    bitsPerSample: dv.getUint16(34, true),
+  };
 }
 
+function durationFromHeaderWithPartial(head: Uint8Array, totalBytesApprox: number): number {
+  const h = wavHeaderInfo(head);
+  if (!h || !h.sampleRate || !h.channels || !h.bitsPerSample) {
+    return Math.max(0, (totalBytesApprox - 44) / 2 / 16000); // 兜底按 16k
+  }
+  const byteRate = h.sampleRate * h.channels * (h.bitsPerSample / 8);
+  return byteRate > 0 ? Math.max(0, (totalBytesApprox - 44) / byteRate) : 0;
+}
+
+// 按真实头部计算 Blob WAV 时长（TTS 各引擎为 24k、录音 16k，须读头而非写死）
+export async function wavBlobDuration(blob: Blob): Promise<number> {
+  const head = new Uint8Array(await blob.slice(0, 64).arrayBuffer());
+  return durationFromHeaderWithPartial(head, blob.size);
+}
+
+// base64 只解前缀即可拿到头部（避免整段解码）
 function wavDurationFromBase64(b64: string): number {
-  const bytes = (b64.length * 3) / 4 - (b64.endsWith("==") ? 2 : b64.endsWith("=") ? 1 : 0);
-  return Math.max(0, (bytes - 44) / 2 / 16000);
+  const slice = b64.slice(0, 1024);
+  const clean = slice.slice(0, slice.length - (slice.length % 4));
+  let bin: string;
+  try {
+    bin = atob(clean);
+  } catch {
+    return 0;
+  }
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return durationFromHeaderWithPartial(bytes, (b64.length * 3) / 4);
 }
 
 // ---------- 保存 ----------
@@ -100,7 +138,8 @@ export async function saveRecording(
   meta?: SaveMeta
 ): Promise<AudioRecord> {
   const b64 = await blobToBase64(wav);
-  return save("recording", b64, wavDurationSec(wav), engine, text, meta);
+  const duration = await wavBlobDuration(wav);
+  return save("recording", b64, duration, engine, text, meta);
 }
 
 // audio 可以是 Blob 或已是 base64 字符串
@@ -112,7 +151,7 @@ export async function saveTts(
 ): Promise<AudioRecord> {
   const isStr = typeof audio === "string";
   const b64 = isStr ? audio : await blobToBase64(audio);
-  const duration = isStr ? wavDurationFromBase64(b64) : wavDurationSec(audio);
+  const duration = isStr ? wavDurationFromBase64(b64) : await wavBlobDuration(audio);
   return save("tts", b64, duration, engine, text, meta);
 }
 
@@ -198,13 +237,22 @@ export async function collectFrames(
   return frames;
 }
 
-// 把多段完整 WAV 拼接为单个 16kHz 单声道 WAV（去掉每段自身 44 字节头）
-// 注意：头部字段全部用绝对偏移写入。此前版本用游标 o 连写字符串，
+// 把多段完整 WAV 拼接为单个 WAV（去掉每段自身 44 字节头）。
+// 头部参数从首帧读取：kokoro/qwen3/cosyvoice 帧均为 24kHz，录音帧为 16kHz，
+// 绝不能写死采样率——此前写死 16k 导致 24k 音频重播变慢变调（听起来"换了个人"）。
+// 注意：头部字段全部用绝对偏移写入。更早版本用游标 o 连写字符串，
 // 导致 RIFF 尺寸字段被覆盖、块名整体前移 4 字节，生成的文件无法播放。
 export function mergeWavFrames(frames: Uint8Array[]): Blob {
-  const datas = frames.filter((f) => f.length > 44).map((f) => f.subarray(44));
+  const full = frames.filter((f) => f.length > 44);
+  const datas = full.map((f) => f.subarray(44));
   let dataSize = 0;
   for (const d of datas) dataSize += d.length;
+
+  // 从首帧读真实音频格式
+  const info = wavHeaderInfo(full[0] ?? new Uint8Array(44));
+  const sampleRate = info?.sampleRate || 16000;
+  const channels = info?.channels || 1;
+  const bits = info?.bitsPerSample || 16;
 
   const out = new Uint8Array(44 + dataSize);
   const dv = new DataView(out.buffer);
@@ -217,11 +265,11 @@ export function mergeWavFrames(frames: Uint8Array[]): Blob {
   ws(12, "fmt ");
   dv.setUint32(16, 16, true); // fmt 块大小
   dv.setUint16(20, 1, true); // PCM
-  dv.setUint16(22, 1, true); // 单声道
-  dv.setUint32(24, 16000, true); // 采样率
-  dv.setUint32(28, 32000, true); // 字节率
-  dv.setUint16(32, 2, true); // 块对齐
-  dv.setUint16(34, 16, true); // 位深
+  dv.setUint16(22, channels, true);
+  dv.setUint32(24, sampleRate, true);
+  dv.setUint32(28, sampleRate * channels * (bits / 8), true); // 字节率
+  dv.setUint16(32, channels * (bits / 8), true); // 块对齐
+  dv.setUint16(34, bits, true); // 位深
   ws(36, "data");
   dv.setUint32(40, dataSize, true);
 
