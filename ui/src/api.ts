@@ -117,8 +117,10 @@ export interface SpeakParams {
 }
 
 // 返回可解析的帧流：每帧 = 4字节大端长度 + 一段 WAV
+// signal 用于「停止」时中断底层请求，避免服务端继续白算、前端继续收流
 export async function speakStream(
-  params: SpeakParams
+  params: SpeakParams,
+  signal?: AbortSignal
 ): Promise<ReadableStream<Uint8Array>> {
   const res = await fetch(
     `${getBaseUrl()}/speak?engine=${encodeURIComponent(params.engine)}`,
@@ -132,6 +134,7 @@ export async function speakStream(
         voice: params.voice,
         language: params.language,
       }),
+      signal,
     })
   );
   if (!res.ok || !res.body) {

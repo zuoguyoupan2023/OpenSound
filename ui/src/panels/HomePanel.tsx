@@ -42,11 +42,11 @@ export default function HomePanel(props: PanelProps) {
           ttsEngine,
         });
         // 顺手保存录音 + 朗读结果到音频库（不阻塞）
-        saveRecording(wav, asrEngine, r.recognized).catch((e) =>
-          console.error("保存录音失败:", e)
+        saveRecording(wav, asrEngine, r.recognized, { source: "home" }).catch(
+          (e) => console.error("保存录音失败:", e)
         );
-        saveTts(r.audioBase64, ttsEngine, r.answer).catch((e) =>
-          console.error("保存朗读失败:", e)
+        saveTts(r.audioBase64, ttsEngine, r.answer, { source: "home" }).catch(
+          (e) => console.error("保存朗读失败:", e)
         );
         setResult(r);
         setStage("speaking");

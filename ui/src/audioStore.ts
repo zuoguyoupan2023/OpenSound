@@ -11,6 +11,47 @@ export interface AudioRecord {
   engine: string;
   text: string;
   is_clone_sample: boolean;
+  /** 来源面板：asr|home|chat|realtime|voice|read（旧记录为空） */
+  source?: string;
+  /** TTS 参数快照 */
+  voice?: string;
+  sid?: number;
+  speed?: number;
+  language?: string;
+  /** 流式中途被手动停止，音频为已生成部分 */
+  interrupted?: boolean;
+}
+
+// 保存时的可选元数据
+export interface SaveMeta {
+  source?: string;
+  voice?: string;
+  sid?: number;
+  speed?: number;
+  language?: string;
+  interrupted?: boolean;
+}
+
+// 来源角标文案（六类来源 + 旧记录按 kind 回退）
+const SOURCE_LABELS: Record<string, string> = {
+  asr: "识别",
+  home: "工作台",
+  chat: "对话",
+  realtime: "实时",
+  voice: "音色导入",
+  read: "朗读",
+};
+
+export function sourceLabel(rec: AudioRecord): string {
+  if (rec.source && SOURCE_LABELS[rec.source]) return SOURCE_LABELS[rec.source];
+  return rec.kind === "recording" ? "识别" : "朗读";
+}
+
+// 角标配色类（与 App.css 中 .src-* 对应）
+export function sourceClass(rec: AudioRecord): string {
+  const known = ["asr", "home", "chat", "realtime", "voice", "read"];
+  if (rec.source && known.includes(rec.source)) return `src-${rec.source}`;
+  return rec.kind === "recording" ? "src-asr" : "src-read";
 }
 
 // ---------- 小工具 ----------
@@ -39,7 +80,8 @@ async function save(
   wavBase64: string,
   durationSec: number,
   engine: string,
-  text: string
+  text: string,
+  meta?: SaveMeta
 ): Promise<AudioRecord> {
   return invoke<AudioRecord>("audio_save", {
     kind,
@@ -47,28 +89,31 @@ async function save(
     durationSec,
     engine,
     text,
+    ...meta,
   });
 }
 
 export async function saveRecording(
   wav: Blob,
   engine: string,
-  text: string
+  text: string,
+  meta?: SaveMeta
 ): Promise<AudioRecord> {
   const b64 = await blobToBase64(wav);
-  return save("recording", b64, wavDurationSec(wav), engine, text);
+  return save("recording", b64, wavDurationSec(wav), engine, text, meta);
 }
 
 // audio 可以是 Blob 或已是 base64 字符串
 export async function saveTts(
   audio: Blob | string,
   engine: string,
-  text: string
+  text: string,
+  meta?: SaveMeta
 ): Promise<AudioRecord> {
   const isStr = typeof audio === "string";
   const b64 = isStr ? audio : await blobToBase64(audio);
   const duration = isStr ? wavDurationFromBase64(b64) : wavDurationSec(audio);
-  return save("tts", b64, duration, engine, text);
+  return save("tts", b64, duration, engine, text, meta);
 }
 
 // ---------- 列表 / 删除 ----------
@@ -116,7 +161,8 @@ export async function audioAssetUrl(rec: AudioRecord): Promise<string> {
 }
 
 // ---------- TTS 帧流合并为单个 WAV ----------
-// /speak 帧流：每帧 = 4 字节大端长度 + 一段完整 WAV。这里收集所有帧字节。
+// /speak 帧流：每帧 = 4 字节大端长度 + 一段完整 WAV。这里收集所有帧字节；
+// 流被中断（如用户点停止触发 abort）时，返回已收到的完整帧，供"已截断"入库。
 export async function collectFrames(
   stream: ReadableStream<Uint8Array>
 ): Promise<Uint8Array[]> {
@@ -125,24 +171,28 @@ export async function collectFrames(
   // 直接按原始字节流切帧
   let buf = new Uint8Array(0);
   const frames: Uint8Array[] = [];
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value) {
-      const nb = new Uint8Array(buf.length + value.length);
-      nb.set(buf, 0);
-      nb.set(value, buf.length);
-      buf = nb;
+  try {
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        const nb = new Uint8Array(buf.length + value.length);
+        nb.set(buf, 0);
+        nb.set(value, buf.length);
+        buf = nb;
+      }
+      // 切出完整帧
+      while (buf.length >= 4) {
+        const frameLen =
+          ((buf[0] << 24) | (buf[1] << 16) | (buf[2] << 8) | buf[3]) >>> 0;
+        if (buf.length < 4 + frameLen) break;
+        frames.push(buf.slice(4, 4 + frameLen));
+        buf = buf.slice(4 + frameLen);
+      }
     }
-    // 切出完整帧
-    while (buf.length >= 4) {
-      const frameLen =
-        ((buf[0] << 24) | (buf[1] << 16) | (buf[2] << 8) | buf[3]) >>> 0;
-      if (buf.length < 4 + frameLen) break;
-      frames.push(buf.slice(4, 4 + frameLen));
-      buf = buf.slice(4 + frameLen);
-    }
+  } catch {
+    // 中断：保留已收到的完整帧
   }
   void decoder;
   return frames;

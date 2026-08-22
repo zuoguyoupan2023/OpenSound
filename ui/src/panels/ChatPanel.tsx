@@ -47,6 +47,9 @@ export default function ChatPanel(props: PanelProps) {
   const [error, setError] = useState("");
   const recRef = useRef<Recorder | null>(null);
   const playerRef = useRef<ReturnType<typeof createFramePlayer> | null>(null);
+  // 朗读中断控制：停止时 abort 底层流，避免服务端继续合成、前端继续收流
+  const speakAbortRef = useRef<AbortController | null>(null);
+  const speakStoppedRef = useRef(false);
 
   const llmReady = props.health?.llm?.model !== "missing";
   // 已安装的 LLM 档位（来自 /models）
@@ -111,7 +114,7 @@ export default function ChatPanel(props: PanelProps) {
       const wav = await rec.stop();
       recRef.current = null;
       const r = await transcribe(wav, "auto");
-      saveRecording(wav, "auto", r.text).catch((e) =>
+      saveRecording(wav, "auto", r.text, { source: "chat" }).catch((e) =>
         console.error("保存录音失败:", e)
       );
       await sendText(r.text);
@@ -125,31 +128,45 @@ export default function ChatPanel(props: PanelProps) {
   const speakAnswer = async (text: string) => {
     stopAudio();
     setSpeaking(true);
+    speakStoppedRef.current = false;
+    const ac = new AbortController();
+    speakAbortRef.current = ac;
     const player = createFramePlayer();
     playerRef.current = player;
     try {
-      const stream = await speakStream({
-        text,
-        engine: ttsEngine,
-        voice: ttsEngine === "clone" ? cloneVoiceId : undefined,
-      });
+      const stream = await speakStream(
+        {
+          text,
+          engine: ttsEngine,
+          voice: ttsEngine === "clone" ? cloneVoiceId : undefined,
+        },
+        ac.signal
+      );
       const { playStream, collected } = teeCollect(stream);
-      await player.start(playStream);
-      setSpeaking(false);
-      // 播放完成后保存朗读结果（不阻塞）
+      // 落盘与播放解耦：流读完（含被中断）即保存，不等播放完成
       collected
         .then((frames) => {
-          if (frames.length)
-            return saveTts(mergeWavFrames(frames), ttsEngine, text);
+          if (!frames.length) return;
+          return saveTts(mergeWavFrames(frames), ttsEngine, text, {
+            source: "chat",
+            voice: ttsEngine === "clone" ? cloneVoiceId : undefined,
+            interrupted: speakStoppedRef.current || undefined,
+          }).catch((e) => console.error("保存朗读失败:", e));
         })
-        .catch((e) => console.error("保存朗读失败:", e));
+        .catch((e) => console.error("收集朗读帧失败:", e));
+      await player.start(playStream);
+      setSpeaking(false);
     } catch (e) {
-      setError(String(e));
+      // 主动停止不算错误
+      if (!speakStoppedRef.current) setError(String(e));
       setSpeaking(false);
     }
   };
 
   const stopSpeak = () => {
+    speakStoppedRef.current = true;
+    speakAbortRef.current?.abort();
+    speakAbortRef.current = null;
     playerRef.current?.stop();
     playerRef.current = null;
     stopAudio();

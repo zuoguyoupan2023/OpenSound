@@ -17,6 +17,10 @@ use zip::{CompressionMethod, ZipWriter};
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
+fn default_speed() -> f64 {
+    1.0
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct AudioRecord {
     pub id: String,
@@ -32,6 +36,21 @@ pub struct AudioRecord {
     /// 是否被标记为克隆音色样本来源
     #[serde(default)]
     pub is_clone_sample: bool,
+    /// 来源面板：asr|home|chat|realtime|voice|read（旧记录为空，前端按 kind 回退显示）
+    #[serde(default)]
+    pub source: String,
+    /// 以下为 TTS 参数快照（供历史展示与将来"按原参数重读"）
+    #[serde(default)]
+    pub voice: String,
+    #[serde(default)]
+    pub sid: i64,
+    #[serde(default = "default_speed")]
+    pub speed: f64,
+    #[serde(default)]
+    pub language: String,
+    /// 流式中途被手动停止，音频为已生成部分
+    #[serde(default)]
+    pub interrupted: bool,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -83,7 +102,7 @@ fn new_id() -> String {
     format!("{millis}{seq}")
 }
 
-/// 落盘一条音频。kind ∈ {"recording","tts"}
+/// 落盘一条音频。kind ∈ {"recording","tts"}；source/voice 等为可选元数据（旧调用可不传）
 #[tauri::command]
 pub fn audio_save(
     app: tauri::AppHandle,
@@ -92,6 +111,12 @@ pub fn audio_save(
     duration_sec: f64,
     engine: String,
     text: String,
+    source: Option<String>,
+    voice: Option<String>,
+    sid: Option<i64>,
+    speed: Option<f64>,
+    language: Option<String>,
+    interrupted: Option<bool>,
 ) -> Result<AudioRecord, String> {
     if kind != "recording" && kind != "tts" {
         return Err(format!("未知音频类型: {kind}"));
@@ -127,6 +152,12 @@ pub fn audio_save(
         engine,
         text,
         is_clone_sample: false,
+        source: source.unwrap_or_default(),
+        voice: voice.unwrap_or_default(),
+        sid: sid.unwrap_or(0),
+        speed: speed.unwrap_or(1.0),
+        language: language.unwrap_or_default(),
+        interrupted: interrupted.unwrap_or(false),
     };
 
     let mut idx = read_index(&dir);

@@ -35,7 +35,7 @@ export default function AsrPanel(props: PanelProps) {
       try {
         const r = await transcribe(wav, engine, punc, vad);
         // 顺手保存录音到音频库（不阻塞）
-        saveRecording(wav, engine, r.text).catch((e) =>
+        saveRecording(wav, engine, r.text, { source: "asr" }).catch((e) =>
           console.error("保存录音失败:", e)
         );
         setText(r.text);

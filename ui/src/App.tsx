@@ -48,6 +48,8 @@ export interface PanelProps {
   models: ModelInfo[];
   refresh: () => Promise<void>;
   status: ServiceStatus;
+  /** 面板间跳转（如朗读面板「在音频库中查看」） */
+  goPanel?: (id: PanelId) => void;
 }
 
 function App() {
@@ -105,7 +107,13 @@ function App() {
     }
   };
 
-  const common: PanelProps = { health, models, refresh: refreshHealth, status };
+  const common: PanelProps = {
+    health,
+    models,
+    refresh: refreshHealth,
+    status,
+    goPanel: setPanel,
+  };
 
   const renderPanel = () => {
     switch (panel) {

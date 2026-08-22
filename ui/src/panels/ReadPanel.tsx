@@ -3,7 +3,17 @@ import type { PanelProps } from "../App";
 import { Icon } from "@iconify/react";
 import { speakStream } from "../api";
 import { createFramePlayer, type FramePlayer, stopAudio } from "../audio";
-import { teeCollect, mergeWavFrames, saveTts } from "../audioStore";
+import {
+  teeCollect,
+  mergeWavFrames,
+  saveTts,
+  listAudio,
+  deleteAudio,
+  type AudioRecord,
+} from "../audioStore";
+import { fmtTime, fmtDur, truncate } from "../format";
+import { useAudioPlayback } from "../useAudioPlayback";
+import { showToast } from "../toast";
 import { listVoices, type CloneVoice } from "../voiceStore";
 import { Panel, Button, Select, Spinner, EngineBadge } from "../components/ui";
 
@@ -34,7 +44,15 @@ export default function ReadPanel(props: PanelProps) {
   const [state, setState] = useState<Speaking>("idle");
   const [error, setError] = useState("");
   const [fileName, setFileName] = useState("");
+  const [history, setHistory] = useState<AudioRecord[]>([]);
   const playerRef = useRef<FramePlayer | null>(null);
+  // 朗读中断控制：停止时 abort 底层流，服务端不再继续合成
+  const speakAbortRef = useRef<AbortController | null>(null);
+  const speakStoppedRef = useRef(false);
+  // 历史条目播放（与音频库同款单实例逻辑）
+  const { playingId, togglePlay, stopPlay } = useAudioPlayback((m) =>
+    setError(m)
+  );
 
   const kokoroReady = props.health?.tts.kokoro === "ready";
   const qwen3Ready = props.health?.tts.qwen3 === "reachable";
@@ -48,6 +66,17 @@ export default function ReadPanel(props: PanelProps) {
         if (vs.length) setCloneVoiceId(vs[0].id);
       })
       .catch(() => {});
+  }, []);
+
+  // 载入最近朗读历史（音频库 kind=tts，最近 20 条），离开面板时停止播放
+  useEffect(() => {
+    listAudio()
+      .then((all) =>
+        setHistory(all.filter((r) => r.kind === "tts").slice(0, 20))
+      )
+      .catch((e) => console.error("载入朗读历史失败:", e));
+    return () => stopPlay();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const loadFile = async (file: File) => {
@@ -64,38 +93,82 @@ export default function ReadPanel(props: PanelProps) {
     setError("");
     stopAudio();
     setState("speaking");
+    speakStoppedRef.current = false;
     const player = createFramePlayer((i) => console.log("播放第", i + 1, "句"));
     playerRef.current = player;
+    const ac = new AbortController();
+    speakAbortRef.current = ac;
     try {
-      const stream = await speakStream({
-        text,
-        engine,
-        sid,
-        speed,
-        voice: engine === "clone" ? cloneVoiceId : voice,
-        language,
-      });
+      const stream = await speakStream(
+        {
+          text,
+          engine,
+          sid,
+          speed,
+          voice: engine === "clone" ? cloneVoiceId : voice,
+          language,
+        },
+        ac.signal
+      );
       const { playStream, collected } = teeCollect(stream);
+      // 落盘与播放解耦：流读完（含被中断）即保存，不再等播放完成
+      collected
+        .then(async (frames) => {
+          if (!frames.length) return;
+          const rec = await saveTts(mergeWavFrames(frames), engine, text, {
+            source: "read",
+            voice:
+              engine === "clone"
+                ? cloneVoiceId
+                : engine === "qwen3"
+                ? voice
+                : undefined,
+            sid: engine === "kokoro" ? sid : undefined,
+            speed: engine === "kokoro" ? speed : undefined,
+            language: engine === "qwen3" ? language : undefined,
+            interrupted: speakStoppedRef.current || undefined,
+          }).catch((e) => console.error("保存朗读失败:", e));
+          if (rec) {
+            setHistory((h) => [rec, ...h].slice(0, 20));
+            showToast(
+              speakStoppedRef.current
+                ? "已保存已生成部分（已截断）"
+                : "已存入朗读历史"
+            );
+          }
+        })
+        .catch((e) => console.error("收集朗读帧失败:", e));
       await player.start(playStream);
       setState("done");
-      // 播放完成后，把帧流合并为单个 WAV 存进音频库（不阻塞）
-      collected
-        .then((frames) => {
-          if (frames.length)
-            return saveTts(mergeWavFrames(frames), engine, text);
-        })
-        .catch((e) => console.error("保存朗读失败:", e));
     } catch (e) {
-      setError(String(e));
-      setState("idle");
+      // 主动停止不算错误
+      if (!speakStoppedRef.current) {
+        setError(String(e));
+        setState("idle");
+      }
     }
   };
 
   const stop = () => {
+    // 先标记停止，再中断流、停播放器；已生成的句子会以「已截断」入库
+    speakStoppedRef.current = true;
+    speakAbortRef.current?.abort();
+    speakAbortRef.current = null;
     playerRef.current?.stop();
     playerRef.current = null;
     stopAudio();
     setState("idle");
+  };
+
+  const removeHistory = async (rec: AudioRecord) => {
+    if (!window.confirm("删除这条朗读记录？")) return;
+    if (playingId === rec.id) stopPlay();
+    try {
+      await deleteAudio(rec.id);
+      setHistory((h) => h.filter((x) => x.id !== rec.id));
+    } catch (e) {
+      setError(String(e));
+    }
   };
 
   return (
@@ -215,6 +288,63 @@ export default function ReadPanel(props: PanelProps) {
         <EngineBadge label="Kokoro" ready={kokoroReady} />
         <EngineBadge label="Qwen3" ready={qwen3Ready} />
         <EngineBadge label="克隆音色" ready={cloneReady} />
+      </div>
+
+      <div className="read-history">
+        <div className="read-history-head">
+          <span className="install-head">朗读历史（最近 {history.length} 条）</span>
+          <Button variant="ghost" onClick={() => props.goPanel?.("audio")}>
+            <Icon icon="lucide:music" width={16} height={16} /> 在音频库中查看
+          </Button>
+        </div>
+        {history.length === 0 ? (
+          <div className="empty">
+            还没有朗读记录。点击上方「朗读」，完成后自动存到这里和音频库。
+          </div>
+        ) : (
+          <div className="audio-list">
+            {history.map((rec) => (
+              <div key={rec.id} className="audio-row">
+                <div className="audio-info">
+                  <div className="audio-title">
+                    <span className="src-badge src-read">朗读</span>
+                    {rec.interrupted && (
+                      <span className="src-badge src-cut">已截断</span>
+                    )}
+                    {rec.text ? truncate(rec.text) : "（无文本）"}
+                  </div>
+                  <div className="model-meta">
+                    <span>{fmtTime(rec.created_at)}</span>
+                    {fmtDur(rec.duration_sec) && (
+                      <span>{fmtDur(rec.duration_sec)}</span>
+                    )}
+                    <span className="model-cat">{rec.engine || "auto"}</span>
+                  </div>
+                </div>
+                <div className="audio-actions">
+                  <Button
+                    variant="ghost"
+                    onClick={() => togglePlay(rec).catch((e) => setError(String(e)))}
+                    disabled={playingId !== null && playingId !== rec.id}
+                  >
+                    {playingId === rec.id ? (
+                      <>
+                        <Icon icon="lucide:square" width={16} height={16} /> 停止
+                      </>
+                    ) : (
+                      <>
+                        <Icon icon="lucide:play" width={16} height={16} /> 播放
+                      </>
+                    )}
+                  </Button>
+                  <Button variant="danger" onClick={() => removeHistory(rec)}>
+                    <Icon icon="lucide:trash-2" width={16} height={16} />
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {error && (

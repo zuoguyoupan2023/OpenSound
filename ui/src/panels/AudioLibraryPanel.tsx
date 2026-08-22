@@ -1,45 +1,32 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { PanelProps } from "../App";
 import { Icon } from "@iconify/react";
 import {
   listAudio,
   deleteAudio,
-  audioAssetUrl,
   getAudioDir,
   exportAudio,
   setCloneSample,
+  sourceLabel,
+  sourceClass,
   type AudioRecord,
 } from "../audioStore";
+import { fmtTime, fmtDur, truncate, voiceDesc } from "../format";
+import { useAudioPlayback } from "../useAudioPlayback";
 import { Panel, Button, Spinner } from "../components/ui";
 
 type Tab = "recording" | "tts";
-
-function fmtTime(ms: number): string {
-  const d = new Date(ms);
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(
-    d.getHours()
-  )}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
-}
-
-function fmtDur(sec: number): string {
-  if (!sec || sec < 0) return "";
-  if (sec < 60) return `${sec.toFixed(1)}s`;
-  return `${Math.floor(sec / 60)}m${Math.round(sec % 60)}s`;
-}
-
-function truncate(s: string, n = 40): string {
-  return s.length > n ? s.slice(0, n) + "…" : s;
-}
 
 export default function AudioLibraryPanel(_props: PanelProps) {
   const [tab, setTab] = useState<Tab>("recording");
   const [items, setItems] = useState<AudioRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [dir, setDir] = useState("");
-  const [playingId, setPlayingId] = useState<string | null>(null);
   const [error, setError] = useState("");
-  const elRef = useRef<HTMLAudioElement | null>(null);
+  // 单实例播放：同一时刻只播一条（与朗读面板历史区块共用）
+  const { playingId, togglePlay, stopPlay } = useAudioPlayback((m) =>
+    setError(m)
+  );
 
   const refresh = useCallback(async () => {
     try {
@@ -60,38 +47,13 @@ export default function AudioLibraryPanel(_props: PanelProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const stopPlay = () => {
-    if (elRef.current) {
-      elRef.current.pause();
-      elRef.current = null;
-    }
-    setPlayingId(null);
-  };
-
   const play = async (rec: AudioRecord) => {
-    if (playingId === rec.id) {
-      stopPlay();
-      return;
-    }
-    stopPlay();
     try {
-      const src = await audioAssetUrl(rec);
-      const el = new Audio(src);
-      elRef.current = el;
-      setPlayingId(rec.id);
-      el.onended = () => {
-        elRef.current = null;
-        setPlayingId(null);
-      };
-      el.onerror = () => {
-        elRef.current = null;
-        setPlayingId(null);
-        setError("播放失败（文件可能已删除）");
-      };
-      await el.play();
+      await togglePlay(rec);
     } catch (e) {
-      setPlayingId(null);
-      setError(String(e));
+      setError(
+        e instanceof Error && e.message ? e.message : "播放失败（文件可能已删除）"
+      );
     }
   };
 
@@ -188,6 +150,15 @@ export default function AudioLibraryPanel(_props: PanelProps) {
             <div key={rec.id} className="audio-row">
               <div className="audio-info">
                 <div className="audio-title">
+                  <span
+                    className={`src-badge ${sourceClass(rec)}`}
+                    title={`来源：${sourceLabel(rec)}`}
+                  >
+                    {sourceLabel(rec)}
+                  </span>
+                  {rec.interrupted && (
+                    <span className="src-badge src-cut">已截断</span>
+                  )}
                   {rec.text ? truncate(rec.text) : "（无文本）"}
                 </div>
                 <div className="model-meta">
@@ -196,6 +167,7 @@ export default function AudioLibraryPanel(_props: PanelProps) {
                     <span>{fmtDur(rec.duration_sec)}</span>
                   )}
                   <span className="model-cat">{rec.engine || "auto"}</span>
+                  {voiceDesc(rec) && <span>{voiceDesc(rec)}</span>}
                 </div>
               </div>
               <div className="audio-actions">

@@ -112,7 +112,7 @@ export default function VoicePanel(_props: PanelProps) {
     setImportedInfo(null);
     try {
       const { blob } = await audioFileTo16kWav(file);
-      const rec = await saveRecording(blob, "import", "");
+      const rec = await saveRecording(blob, "import", "", { source: "voice" });
       setSampleId(rec.id);
       setName("我的-" + (file.name.replace(/\.[^.]+$/, "") || "导入").slice(0, 6));
       setSamples(await listSampleCandidates());
