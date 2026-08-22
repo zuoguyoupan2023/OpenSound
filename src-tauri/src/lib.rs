@@ -1,8 +1,9 @@
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -169,17 +170,36 @@ fn start_service(app: &tauri::AppHandle, state: &Arc<AppState>) -> Result<(), St
     };
     let entry = dir.join("start-all.js");
 
+    // 子进程日志落盘（此前 Stdio::null() 会丢弃全部输出，子服务崩溃时无从排查）
+    let log_path = match app.path().app_log_dir() {
+        Ok(d) => d.join("asr-server.log"),
+        Err(e) => return Err(format!("无法定位日志目录: {e}")),
+    };
+    if let Some(parent) = log_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let open_log = || {
+        fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .map_err(|e| format!("无法打开日志文件 {}: {e}", log_path.display()))
+    };
+    let mut header = open_log()?;
+    let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let _ = writeln!(header, "\n[tabu-local] === 启动 asr-server (unix_ts={ts}) ===");
+
     let child = Command::new(&node)
         .arg(&entry)
         .current_dir(&dir)
         .env("ASR_ENGINE", "auto")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::from(open_log()?))
+        .stderr(Stdio::from(open_log()?))
         .spawn()
         .map_err(|e| format!("启动服务失败: {e}"))?;
 
     *state.child.lock().unwrap() = Some(child);
-    println!("[tabu-local] 已启动 asr-server (node={node})");
+    println!("[tabu-local] 已启动 asr-server (node={node}, log={})", log_path.display());
     Ok(())
 }
 

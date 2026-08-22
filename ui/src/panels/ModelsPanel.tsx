@@ -34,6 +34,11 @@ export default function ModelsPanel(props: PanelProps) {
     llm: "对话 LLM",
   };
 
+  // 服务型条目：installed = 后端服务是否可达（不是磁盘文件是否下载）。
+  // 其中 cosyvoice-clone 有真实安装器（补源码/检查模型），其余两个随后台服务自动启动。
+  const SERVICE_ENGINES = new Set(["qwen3", "sensevoice-original", "cosyvoice-clone"]);
+  const INSTALLABLE_SERVICE_ENGINES = new Set(["cosyvoice-clone"]);
+
   return (
     <Panel
       title="模型管理"
@@ -57,7 +62,11 @@ export default function ModelsPanel(props: PanelProps) {
             </div>
             <div className="model-action">
               {m.installed ? (
-                <span className="badge ok">已安装</span>
+                <span className="badge ok">
+                  {SERVICE_ENGINES.has(m.engine) ? "运行中" : "已安装"}
+                </span>
+              ) : SERVICE_ENGINES.has(m.engine) && !INSTALLABLE_SERVICE_ENGINES.has(m.engine) ? (
+                <span className="badge off">未运行 · 随后台服务自动启动</span>
               ) : (
                 <Button
                   onClick={() => install(m.engine)}
@@ -65,6 +74,8 @@ export default function ModelsPanel(props: PanelProps) {
                 >
                   {installing === m.engine ? (
                     <Spinner />
+                  ) : SERVICE_ENGINES.has(m.engine) ? (
+                    "检测/修复"
                   ) : (
                     "安装"
                   )}

@@ -955,6 +955,42 @@ const INSTALLERS = {
   ),
   qwen3: (ctx) => ctx.nd({ type: 'done', message: 'Qwen3-TTS 无独立下载脚本：模型在首次启动 qwen3 服务（npm run start-qwen3）时自动下载。' }),
   whisper: (ctx) => ctx.nd({ type: 'done', message: 'Whisper 无独立下载脚本：首次识别时由 transformers.js 自动下载。' }),
+  // CosyVoice3 克隆：双依赖检查——① 9GB 模型（005 手动预下载，缺失时不自动下，避免误触大流量）；
+  // ② CosyVoice 源码仓库（cosyvoice 包 + Matcha-TTS 子模块，运行时 import 必需），缺失则自动浅克隆补齐。
+  // 完成后若 8003 未监听，需托盘「重启服务」拉起（模型加载约数分钟）。
+  'cosyvoice-clone': async (ctx) => {
+    const modelDir = path.join(__dirname, 'models', 'cosyvoice', 'Fun-CosyVoice3-0.5B');
+    const srcDir = path.join(__dirname, 'CosyVoice');
+    const keyFiles = ['llm.pt', 'flow.pt', 'hift.pt', 'speech_tokenizer_v3.onnx', 'campplus.onnx'];
+    const missing = keyFiles.filter((f) => !existsSync(path.join(modelDir, f)));
+    if (missing.length) {
+      ctx.nd({ type: 'log', message: `模型文件缺失: ${missing.join(', ')}` });
+      ctx.nd({ type: 'log', message: `9GB 模型请按 005-cosyvoice模型下载.md 手动预下载到: ${modelDir}` });
+      throw new Error('CosyVoice 模型不完整（不自动下载大模型，见上方说明）');
+    }
+    ctx.nd({ type: 'log', message: '模型文件完整 ✓' });
+
+    if (!existsSync(path.join(srcDir, 'cosyvoice', 'cli', 'cosyvoice.py'))) {
+      ctx.nd({ type: 'log', message: 'CosyVoice 源码缺失 → git clone（浅克隆 + 子模块，几十 MB）…' });
+      await new Promise((resolve, reject) => {
+        const p = spawn('git', ['clone', '--depth', '1', '--recursive', '--shallow-submodules',
+          'https://github.com/FunAudioLLM/CosyVoice.git', srcDir],
+          { cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'] });
+        const onData = (chunk) => String(chunk).split('\n').filter(Boolean)
+          .forEach((line) => ctx.nd({ type: 'log', message: line }));
+        p.stdout.on('data', onData);
+        p.stderr.on('data', onData);
+        p.on('error', (e) => reject(new Error('无法启动 git：' + e.message)));
+        p.on('exit', (code) => code === 0
+          ? resolve()
+          : reject(new Error(`git clone 失败（退出码 ${code}）；可手动执行: git clone --depth 1 --recursive https://github.com/FunAudioLLM/CosyVoice.git ${srcDir}`)));
+      });
+      ctx.nd({ type: 'log', message: '源码克隆完成 ✓' });
+    } else {
+      ctx.nd({ type: 'log', message: 'CosyVoice 源码已存在 ✓' });
+    }
+    ctx.nd({ type: 'done', message: '克隆依赖就绪。若「运行中」徽标未变绿：托盘 → 重启服务，等几分钟模型加载完成。' });
+  },
 };
 
 // 同一时间只允许一个安装任务（避免并发下载互相干扰）

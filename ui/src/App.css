@@ -626,6 +626,11 @@ textarea:focus,
   color: var(--ok);
 }
 
+.badge.off {
+  background: rgba(148, 163, 184, 0.15);
+  color: var(--muted);
+}
+
 .install-log {
   margin-top: 16px;
   background: var(--bg-2);

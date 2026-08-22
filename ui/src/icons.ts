@@ -5,5 +5,9 @@ import { LUCIDE_ICONS } from "./iconsData";
 
 addCollection({
   prefix: "lucide",
+  // lucide 图标画在 24x24 网格上；提取脚本只保留了 body，必须在此补回宽高，
+  // 否则 @iconify/react 会按默认 16x16 视口裁剪，只显示图标左上角。
+  width: 24,
+  height: 24,
   icons: LUCIDE_ICONS as Parameters<typeof addCollection>[0]["icons"],
 });
