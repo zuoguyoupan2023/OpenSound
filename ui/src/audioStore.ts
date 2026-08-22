@@ -199,6 +199,8 @@ export async function collectFrames(
 }
 
 // 把多段完整 WAV 拼接为单个 16kHz 单声道 WAV（去掉每段自身 44 字节头）
+// 注意：头部字段全部用绝对偏移写入。此前版本用游标 o 连写字符串，
+// 导致 RIFF 尺寸字段被覆盖、块名整体前移 4 字节，生成的文件无法播放。
 export function mergeWavFrames(frames: Uint8Array[]): Blob {
   const datas = frames.filter((f) => f.length > 44).map((f) => f.subarray(44));
   let dataSize = 0;
@@ -206,22 +208,21 @@ export function mergeWavFrames(frames: Uint8Array[]): Blob {
 
   const out = new Uint8Array(44 + dataSize);
   const dv = new DataView(out.buffer);
-  let o = 0;
-  const ws = (s: string) => {
-    for (let i = 0; i < s.length; i++) out[o++] = s.charCodeAt(i);
+  const ws = (off: number, s: string) => {
+    for (let i = 0; i < s.length; i++) out[off + i] = s.charCodeAt(i);
   };
-  ws("RIFF");
+  ws(0, "RIFF");
   dv.setUint32(4, 36 + dataSize, true);
-  ws("WAVE");
-  ws("fmt ");
-  dv.setUint32(16, 16, true);
-  dv.setUint16(20, 1, true);
-  dv.setUint16(22, 1, true);
-  dv.setUint32(24, 16000, true);
-  dv.setUint32(28, 32000, true);
-  dv.setUint16(32, 2, true);
-  dv.setUint16(34, 16, true);
-  ws("data");
+  ws(8, "WAVE");
+  ws(12, "fmt ");
+  dv.setUint32(16, 16, true); // fmt 块大小
+  dv.setUint16(20, 1, true); // PCM
+  dv.setUint16(22, 1, true); // 单声道
+  dv.setUint32(24, 16000, true); // 采样率
+  dv.setUint32(28, 32000, true); // 字节率
+  dv.setUint16(32, 2, true); // 块对齐
+  dv.setUint16(34, 16, true); // 位深
+  ws(36, "data");
   dv.setUint32(40, dataSize, true);
 
   let off = 44;

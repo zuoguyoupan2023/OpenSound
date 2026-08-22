@@ -196,12 +196,54 @@ pub fn audio_delete(app: tauri::AppHandle, id: String) -> Result<(), String> {
     Ok(())
 }
 
+/// 修复旧版 mergeWavFrames 写坏的 WAV 头（幂等）。
+/// 坏头特征：偏移 4..8 是 "WAVE" 且 8..12 是 "fmt "（正常文件偏移 4..8 是 RIFF 尺寸字段）。
+/// 帧流合并产物固定为 16kHz/单声道/16-bit，可确定性重建头部。
+fn repair_wav_header_if_broken(path: &Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = fs::OpenOptions::new().read(true).write(true).open(path) else {
+        return false;
+    };
+    let mut head = [0u8; 44];
+    if f.read_exact(&mut head).is_err() {
+        return false;
+    }
+    if &head[4..8] != b"WAVE" || &head[8..12] != b"fmt " {
+        return false; // 头正常，不动
+    }
+    let Ok(meta) = f.metadata() else { return false };
+    if meta.len() <= 44 {
+        return false;
+    }
+    let data_size = (meta.len() - 44) as u32;
+    head[4..8].copy_from_slice(&(36 + data_size).to_le_bytes());
+    head[8..12].copy_from_slice(b"WAVE");
+    head[12..16].copy_from_slice(b"fmt ");
+    head[16..20].copy_from_slice(&16u32.to_le_bytes());
+    head[20..22].copy_from_slice(&1u16.to_le_bytes());
+    head[22..24].copy_from_slice(&1u16.to_le_bytes());
+    head[24..28].copy_from_slice(&16000u32.to_le_bytes());
+    head[28..32].copy_from_slice(&32000u32.to_le_bytes());
+    head[32..34].copy_from_slice(&2u16.to_le_bytes());
+    head[34..36].copy_from_slice(&16u16.to_le_bytes());
+    head[36..40].copy_from_slice(b"data");
+    head[40..44].copy_from_slice(&data_size.to_le_bytes());
+    if f.seek(SeekFrom::Start(0)).is_err() {
+        return false;
+    }
+    f.write_all(&head).is_ok()
+}
+
 /// 返回音频库根目录绝对路径（用于 asset URL 与"打开位置"）
 #[tauri::command]
 pub fn audio_get_dir(app: tauri::AppHandle) -> Result<String, String> {
     let dir = audio_dir(&app)?;
     fs::create_dir_all(recordings_dir(&dir)).map_err(|e| e.to_string())?;
     fs::create_dir_all(tts_dir(&dir)).map_err(|e| e.to_string())?;
+    // 顺手修复历史坏头文件（幂等：正常头直接跳过），让旧朗读记录恢复可播放
+    for rec in read_index(&dir).items {
+        repair_wav_header_if_broken(&dir.join(&rec.file));
+    }
     Ok(dir.to_string_lossy().into_owned())
 }
 
