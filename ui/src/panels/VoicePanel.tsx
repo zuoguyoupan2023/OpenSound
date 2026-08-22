@@ -29,6 +29,17 @@ function truncate(s: string, n = 40): string {
   return s.length > n ? s.slice(0, n) + "…" : s;
 }
 
+// 克隆服务（8003）未就绪时给出可行动的提示，替代吓人的 "fetch failed"。
+// 典型场景：刚启动 App，克隆引擎正在加载 9GB 模型 + 生成音色试听缓存（约 1–2 分钟），
+// 加载完成前端口不监听，所有请求都会报"克隆服务不可用：fetch failed"。
+function friendlyError(e: unknown): string {
+  const msg = String(e);
+  if (/克隆服务不可用|fetch failed/i.test(msg)) {
+    return "克隆引擎未就绪：刚启动 App 约需 1–2 分钟自动加载（模型较大），稍后点「刷新」重试即可；若长时间未就绪，请托盘 → 重启服务。";
+  }
+  return msg;
+}
+
 export default function VoicePanel(_props: PanelProps) {
   const [voices, setVoices] = useState<CloneVoice[]>([]);
   const [samples, setSamples] = useState<AudioRecord[]>([]);
@@ -54,12 +65,12 @@ export default function VoicePanel(_props: PanelProps) {
     try {
       setVoices(await listVoices());
     } catch (e) {
-      setError(String(e));
+      setError(friendlyError(e));
     }
     try {
       setSamples(await listSampleCandidates());
     } catch (e) {
-      setError(String(e));
+      setError(friendlyError(e));
     }
   }, []);
 
@@ -139,7 +150,7 @@ export default function VoicePanel(_props: PanelProps) {
       setShowCreate(false);
       setGenProgress(null);
     } catch (e) {
-      setError(String(e));
+      setError(friendlyError(e));
       setGenProgress(null);
     }
   };
@@ -187,7 +198,7 @@ export default function VoicePanel(_props: PanelProps) {
       await player.start(stream);
       setPlayingId(null);
     } catch (e) {
-      setError(String(e));
+      setError(friendlyError(e));
       setPlayingId(null);
     }
   };
@@ -199,7 +210,7 @@ export default function VoicePanel(_props: PanelProps) {
         await renameVoice(v.id, next.trim());
         setVoices(await listVoices());
       } catch (e) {
-        setError(String(e));
+        setError(friendlyError(e));
       }
     }
   };
@@ -211,7 +222,7 @@ export default function VoicePanel(_props: PanelProps) {
       await deleteVoice(v.id);
       setVoices(await listVoices());
     } catch (e) {
-      setError(String(e));
+      setError(friendlyError(e));
     }
   };
 
