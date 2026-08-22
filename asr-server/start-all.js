@@ -8,7 +8,15 @@
 //   HF_ENDPOINT=...          qwen3 模型下载/校验源（默认 hf-mirror.com 国内镜像）
 //   HF_HUB_OFFLINE=1         强制离线（qwen3 模型已缓存时，可彻底避免联网）
 //   ASR_ENGINE=sensevoice|whisper   只针对 asr-server 的默认识别模型（传给 asr-server.js）
+//
+// 【S1 统一落盘】所有模型/缓存收敛到 <asr-server>/models/ 子树（002-plan §S1）：
+//   HF_HOME=<models>/hf            python 系（huggingface_hub）→ <models>/hf/hub/
+//   TRANSFORMERS_CACHE(JS)         transformers.js 已在 asr-server.js 写死 <models>/hf（共存不冲突）
+//   MODELSCOPE_CACHE=<models>/modelscope
+//   NUMBA_CACHE_DIR / MPLCONFIGDIR → <server>/data/cache/{numba,mpl}（不再用 /tmp）
+//   以上均可被用户同名环境变量覆盖；启动时打印实际生效路径。
 import { spawn, execSync } from 'node:child_process';
+import { existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -16,8 +24,39 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PY = path.join(__dirname, '.venv-qwen3', 'bin', 'python3');
 // CosyVoice3 克隆服务用 .venv-cosyvoice（复用系统 torch + 本地 CosyVoice 源码）
 const PY_COSYVOICE = path.join(__dirname, '.venv-cosyvoice', 'bin', 'python3');
-// SenseVoice 原始版（funasr）用系统 python（/opt/homebrew/bin/python3 已装 funasr/torch/modelscope）
-const PY_SYS = (process.env.PY_SYS || '/opt/homebrew/bin/python3');
+
+// ---------- S1：系统 python 探测序列（替代 /opt/homebrew 绝对路径硬编码） ----------
+function detectSysPython() {
+  if (process.env.PY_SYS) return process.env.PY_SYS;
+  const candidates = [];
+  try { candidates.push(execSync('which python3', { encoding: 'utf8' }).trim()); } catch {}
+  // 常见安装位置兜底（Apple Silicon homebrew / Intel homebrew / 系统）
+  candidates.push('/opt/homebrew/bin/python3', '/usr/local/bin/python3', '/usr/bin/python3');
+  for (const c of candidates) {
+    if (c && existsSync(c)) return c;
+  }
+  return null;
+}
+const PY_SYS = detectSysPython();
+
+// ---------- S1：统一模型/缓存目录 ----------
+const MODELS_DIR = path.join(__dirname, 'models');
+for (const d of [
+  MODELS_DIR,
+  path.join(MODELS_DIR, 'hf'),             // python hub 缓存根（实际落在 hf/hub/）
+  path.join(MODELS_DIR, 'modelscope'),
+  path.join(__dirname, 'data', 'cache', 'numba'),
+  path.join(__dirname, 'data', 'cache', 'mpl'),
+]) {
+  try { mkdirSync(d, { recursive: true }); } catch {}
+}
+// 注入到所有子进程的受管路径（用户显式设置的同名变量优先，尊重高级用法）
+const MANAGED_ENV = {
+  HF_HOME: process.env.HF_HOME || path.join(MODELS_DIR, 'hf'),
+  MODELSCOPE_CACHE: process.env.MODELSCOPE_CACHE || path.join(MODELS_DIR, 'modelscope'),
+  NUMBA_CACHE_DIR: process.env.NUMBA_CACHE_DIR || path.join(__dirname, 'data', 'cache', 'numba'),
+  MPLCONFIGDIR: process.env.MPLCONFIGDIR || path.join(__dirname, 'data', 'cache', 'mpl'),
+};
 const ASR_URL = (process.env.ASR_SERVER_URL || 'http://127.0.0.1:9528').replace(/\/+$/, '');
 const QWEN3_URL = (process.env.QWEN3_TTS_URL || 'http://127.0.0.1:8001').replace(/\/+$/, '');
 const SENSE_ORIGINAL_URL = (process.env.SENSEVOICE_ORIGINAL_URL || 'http://127.0.0.1:8002').replace(/\/+$/, '');
@@ -32,10 +71,17 @@ const SKIP_SENSE_ORIGINAL = ['1', 'true', 'yes'].includes(String(process.env.TAB
 const EXPECTED_VERSION = '2.2.0';
 
 function run(cmd, args, name, env = {}) {
-  const p = spawn(cmd, args, { stdio: 'inherit', cwd: __dirname, env: { ...process.env, ...env } });
+  const p = spawn(cmd, args, { stdio: 'inherit', cwd: __dirname, env: { ...process.env, ...MANAGED_ENV, ...env } });
   p.on('exit', (code) => console.log(`[start-all] ${name} 退出 (code=${code})`));
   return p;
 }
+
+// S1：启动时打印实际生效的模型/缓存路径（可见即验收）
+console.log('[start-all] 统一落盘（002-plan S1）：');
+console.log(`[start-all]   models/          = ${MODELS_DIR}`);
+console.log(`[start-all]   HF_HOME          = ${MANAGED_ENV.HF_HOME}（python hub 缓存 → 其下 hub/）`);
+console.log(`[start-all]   MODELSCOPE_CACHE = ${MANAGED_ENV.MODELSCOPE_CACHE}`);
+console.log(`[start-all]   NUMBA/MPL 缓存   = ${MANAGED_ENV.NUMBA_CACHE_DIR} | ${MANAGED_ENV.MPLCONFIGDIR}`);
 
 async function up(url) {
   try {
@@ -111,10 +157,16 @@ if (SKIP_QWEN3) {
 
 if (SKIP_SENSE_ORIGINAL) {
   console.log('[start-all] TABU_SKIP_SENSEVOICE_ORIGINAL=1，跳过 SenseVoice 原始版(funasr)');
+} else if (!PY_SYS) {
+  // S1：探测不到系统 python3 → 给出明确指引并跳过该服务（不拖垮整体启动）
+  console.error('[start-all] ✗ 未找到可用的 python3（SenseVoice 原始版需要）。解决任一即可：');
+  console.error('    brew install python@3.13   或   xcode-select --install');
+  console.error('    或指定路径：PY_SYS=/path/to/python3 npm run all');
+  console.error('[start-all] 已跳过 sensevoice-original，其余服务不受影响。');
 } else if (svOriginalUp) {
   console.log(`[start-all] sensevoice-original 已在运行（${SENSE_ORIGINAL_URL}），跳过`);
 } else {
-  console.log('[start-all] 启动 sensevoice-original（funasr 原始版，加载 ~900MB 模型，较慢）…');
+  console.log(`[start-all] 启动 sensevoice-original（funasr 原始版，python=${PY_SYS}，加载 ~900MB 模型，较慢）…`);
   run(PY_SYS, ['sensevoice-server.py', '--port', '8002'], 'sensevoice-original');
   started++;
 }
@@ -125,10 +177,8 @@ if (SKIP_COSYVOICE) {
   console.log(`[start-all] cosyvoice 已在运行（${COSYVOICE_URL}），跳过`);
 } else {
   console.log('[start-all] 启动 cosyvoice-tts-server（加载 ~9GB 模型，首次较慢）…');
-  run(PY_COSYVOICE, ['cosyvoice-tts-server.py', '--port', '8003'], 'cosyvoice-tts', {
-    NUMBA_CACHE_DIR: process.env.NUMBA_CACHE_DIR || '/tmp/numba_cache',
-    MPLCONFIGDIR: process.env.MPLCONFIGDIR || '/tmp/mpl',
-  });
+  // NUMBA/MPL 缓存目录已由 MANAGED_ENV 统一注入（S1：不再落 /tmp）
+  run(PY_COSYVOICE, ['cosyvoice-tts-server.py', '--port', '8003'], 'cosyvoice-tts');
   started++;
 }
 
