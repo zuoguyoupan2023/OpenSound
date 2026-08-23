@@ -309,14 +309,17 @@ export async function voiceChat(
   };
 }
 
-// ---------- 模型安装（NDJSON 进度流） ----------
+// ---------- 模型安装（NDJSON 进度流；S3：支持镜像切换与取消） ----------
 export async function installModel(
   engine: string,
-  onProgress: (p: InstallProgress) => void
+  onProgress: (p: InstallProgress) => void,
+  opts?: { mirror?: string; signal?: AbortSignal }
 ): Promise<void> {
+  const q = new URLSearchParams({ engine });
+  if (opts?.mirror) q.set("mirror", opts.mirror);
   const res = await fetch(
-    `${getBaseUrl()}/install-model?engine=${encodeURIComponent(engine)}`,
-    authHeaders({ method: "POST" })
+    `${getBaseUrl()}/install-model?${q.toString()}`,
+    authHeaders({ method: "POST", signal: opts?.signal })
   );
   if (!res.ok || !res.body) {
     let msg = `HTTP ${res.status}`;
@@ -348,4 +351,14 @@ export async function installModel(
       }
     }
   }
+}
+
+// 取消当前下载（服务端杀 curl，.part 保留供续传）
+export async function cancelInstall(): Promise<void> {
+  await jfetch("/install-cancel", { method: "POST" });
+}
+
+// 磁盘剩余空间
+export async function getDisk(): Promise<{ availBytes: number | null }> {
+  return jfetch<{ availBytes: number | null }>("/disk");
 }

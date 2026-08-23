@@ -631,6 +631,144 @@ textarea:focus,
   color: var(--muted);
 }
 
+/* ===== S3：模型管理状态卡 ===== */
+.badge.info {
+  background: rgba(59, 130, 246, 0.15);
+  color: var(--accent);
+}
+
+.badge.warn {
+  background: rgba(245, 158, 11, 0.16);
+  color: #f59e0b;
+}
+
+.badge.fail {
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--fail);
+}
+
+.badge.lic {
+  background: rgba(148, 163, 184, 0.14);
+  color: var(--muted);
+  font-size: 11px;
+  padding: 1px 7px;
+  margin-left: 8px;
+  vertical-align: 1px;
+}
+
+.model-row.busy {
+  outline: 1px solid rgba(59, 130, 246, 0.35);
+}
+
+.model-state {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 6px;
+  font-size: 12px;
+}
+
+.model-state.st-ok { color: var(--ok); }
+.model-state.st-info { color: var(--accent); }
+.model-state.st-warn { color: #f59e0b; }
+.model-state.st-fail { color: var(--fail); }
+
+.state-hint {
+  color: var(--muted);
+  margin-left: 6px;
+}
+
+.missing-list {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.missing-list.runtime {
+  color: var(--muted);
+}
+
+.missing-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.missing-item code {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  background: var(--bg-2);
+  padding: 1px 6px;
+  border-radius: 5px;
+}
+
+.missing-item em {
+  font-style: normal;
+  color: var(--muted);
+}
+
+.missing-item.hint {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.dl-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.dl-bar {
+  flex: 1;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--bg-2);
+  overflow: hidden;
+  max-width: 320px;
+}
+
+.dl-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), #22c55e);
+  transition: width 0.4s ease;
+}
+
+.dl-txt {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  font-family: ui-monospace, monospace;
+}
+
+.mirror-sel {
+  background: var(--bg-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 5px 8px;
+  font-size: 12px;
+}
+
+.disk-line {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.disk-line em {
+  font-style: normal;
+  color: #f59e0b;
+  margin-left: 8px;
+}
+
 .install-log {
   margin-top: 16px;
   background: var(--bg-2);

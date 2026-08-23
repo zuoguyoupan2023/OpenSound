@@ -889,7 +889,14 @@ async function collectModels() {
       serviceUp: d.serviceUp,
       missingFiles: d.missingFiles,
       missingRuntime: d.missingRuntime,
-      totalMissingBytes: d.totalMissingBytes
+      totalMissingBytes: d.totalMissingBytes,
+      // S3：安装方式与可选镜像名（UI 据此渲染镜像切换下拉）
+      install: mf.install ? {
+        kind: mf.install.kind,
+        mirrors: mf.install.kind === 'url-multi'
+          ? (mf.install.files?.[0]?.mirrors || []).map((x) => x.name)
+          : []
+      } : null
     });
   }
   // 兜底：MODEL_ITEMS 里没有对应 manifest 的条目按旧格式输出（防漏）
@@ -1026,25 +1033,50 @@ function runDownload(cmd, args) {
   });
 }
 
-// S2 通用单文件多镜像下载器（manifest install.kind=url-multi 专用）：
+// 当前活动下载进程（S3：供 /install-cancel 终止；.part 保留可续传）
+const ACTIVE_DOWNLOAD = { proc: null, cancelled: false };
+
+// S2/S3 通用单文件多镜像下载器（manifest install.kind=url-multi 专用）：
 // .part 临时文件 → 完成后原子 rename；curl -C - 断点续传；
-// --speed-limit/--speed-time：速度低于阈值持续一段时间视为失败 → 自动换下一个镜像源。
-// 注：原 runLlmDownload 有 fs.renameSync 未定义的潜在 bug（本机权重齐全从未触发），此处一并根治。
-function downloadOneFile(fileSpec, ctx) {
+// --speed-limit/--speed-time：速度低于阈值持续一段时间视为失败 → 自动换下一个镜像源；
+// opts.mirror：把指定镜像排到最前（UI 镜像切换）；
+// 进度：每 800ms 读 .part 实际大小，发 NDJSON {type:'progress', received, total}。
+function downloadOneFile(fileSpec, ctx, opts = {}) {
   const target = path.join(__dirname, fileSpec.file);
   mkdirSync(path.dirname(target), { recursive: true });
   return new Promise((resolve, reject) => {
+    const mirrors = [...(fileSpec.mirrors || [])];
+    if (opts.mirror) {
+      const mi = mirrors.findIndex((m) => m.name === opts.mirror);
+      if (mi > 0) mirrors.unshift(...mirrors.splice(mi, 1));
+      else if (mi === -1) ctx.nd({ type: 'log', message: `⚠️ 镜像 ${opts.mirror} 不在清单中，按默认顺序下载` });
+    }
+    const part = target + '.part';
+    const total = fileSpec.bytes || 0;
+    let finished = false;
+    const timer = setInterval(() => {
+      if (finished) return;
+      try {
+        const s = statSync(part).size;
+        ctx.nd({ type: 'progress', file: path.basename(fileSpec.file), received: s, total });
+      } catch {}
+    }, 800);
+    const finish = (fn, arg) => { finished = true; clearInterval(timer); ACTIVE_DOWNLOAD.proc = null; fn(arg); };
     let i = 0;
     const tryMirror = () => {
-      if (i >= (fileSpec.mirrors || []).length) {
-        return reject(new Error(`所有镜像均失败：${fileSpec.file}（已保留 .part，可重试续传）`));
+      if (ACTIVE_DOWNLOAD.cancelled) {
+        ACTIVE_DOWNLOAD.cancelled = false;
+        return finish(reject, new Error('已取消（保留 .part，可重新安装续传）'));
       }
-      const m = fileSpec.mirrors[i++];
-      ctx.nd({ type: 'log', message: `下载 ${path.basename(fileSpec.file)} ← ${m.name} …` });
-      const part = target + '.part';
+      if (i >= mirrors.length) {
+        return finish(reject, new Error(`所有镜像均失败：${fileSpec.file}（已保留 .part，可重试续传）`));
+      }
+      const m = mirrors[i++];
+      ctx.nd({ type: 'log', message: `下载 ${path.basename(fileSpec.file)} ← ${m.name}${opts.mirror === m.name ? '（指定）' : ''} …` });
       const p = spawn('curl', ['-L', '-C', '-', '--connect-timeout', '15', '--max-time', '14400',
         '--speed-limit', '20480', '--speed-time', '90', // <20KB/s 持续 90s 判失败 → 换源
         '-o', part, m.url], { cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'] });
+      ACTIVE_DOWNLOAD.proc = p;
       let buf = '';
       const onData = (chunk) => {
         buf += chunk.toString();
@@ -1057,12 +1089,16 @@ function downloadOneFile(fileSpec, ctx) {
       };
       p.stdout.on('data', onData);
       p.stderr.on('data', onData);
-      p.on('error', (e) => { try { p.kill(); } catch {} reject(new Error('无法启动 curl：' + e.message)); });
+      p.on('error', (e) => { try { p.kill(); } catch {} finish(reject, new Error('无法启动 curl：' + e.message)); });
       p.on('exit', (code) => {
         if (buf.trim()) ctx.nd({ type: 'log', message: buf.trim() });
+        if (ACTIVE_DOWNLOAD.cancelled) {
+          ACTIVE_DOWNLOAD.cancelled = false;
+          return finish(reject, new Error('已取消（保留 .part，可重新安装续传）'));
+        }
         if (code === 0) {
-          try { renameSync(part, target); } catch (e) { return reject(new Error('改名失败：' + e.message)); }
-          return resolve(target);
+          try { renameSync(part, target); } catch (e) { return finish(reject, new Error('改名失败：' + e.message)); }
+          return finish(resolve, target);
         }
         // 失败保留 .part 供断点续传，自动换下一个镜像
         ctx.nd({ type: 'log', message: `镜像 ${m.name} 失败（exit=${code}），尝试下一镜像…` });
@@ -1073,16 +1109,16 @@ function downloadOneFile(fileSpec, ctx) {
   });
 }
 
-// manifest install.kind=url-multi 的安装器工厂
+// manifest install.kind=url-multi 的安装器工厂（opts.mirror 由 /install-model?mirror= 透传）
 function manifestUrlMultiInstaller(mf) {
-  return async (ctx) => {
+  return async (ctx, opts = {}) => {
     for (const f of mf.install.files || []) {
       const target = path.join(__dirname, f.file);
       if (existsSync(target)) {
         ctx.nd({ type: 'log', message: `已存在，跳过：${f.file}` });
         continue;
       }
-      await downloadOneFile(f, ctx);
+      await downloadOneFile(f, ctx, opts);
       if (f.bytes) {
         const s = statSync(target).size;
         if (s !== f.bytes) ctx.nd({ type: 'log', message: `⚠️ 大小不符（期望 ${f.bytes} / 实际 ${s}），建议删除后重新安装` });
@@ -1394,9 +1430,29 @@ const server = http.createServer(async (req, res) => {
     return send(200, { models: await collectModels() });
   }
 
-  // 模型安装：POST /install-model?engine=<name> → NDJSON 流式进度（每行 { type:'log'|'done'|'error', message }）
+  // 取消当前下载（S3）：杀掉活动 curl，.part 保留供续传
+  if (req.method === 'POST' && url.pathname === '/install-cancel') {
+    if (ACTIVE_DOWNLOAD.proc) {
+      try { ACTIVE_DOWNLOAD.proc.kill('SIGTERM'); } catch {}
+      return send(200, { ok: true, message: '已发送取消信号' });
+    }
+    return send(200, { ok: false, message: '当前没有进行中的下载' });
+  }
+
+  // 磁盘剩余空间（S3：模型管理面板展示）
+  if (req.method === 'GET' && url.pathname === '/disk') {
+    try {
+      const out = execSync(`df -k "${__dirname}"`).toString().trim().split('\n');
+      const cols = out[out.length - 1].split(/\s+/);
+      const availBytes = Number(cols[3]) * 1024;
+      return send(200, { availBytes });
+    } catch { return send(200, { availBytes: null }); }
+  }
+
+  // 模型安装：POST /install-model?engine=<name>[&mirror=<name>] → NDJSON 流式进度（每行 { type:'log'|'done'|'error', message }）
   if (req.method === 'POST' && url.pathname === '/install-model') {
     const engine = (url.searchParams.get('engine') || '').toLowerCase();
+    const mirror = url.searchParams.get('mirror') || undefined;
     const installer = INSTALLERS[engine];
     if (!installer) return send(400, { error: '未知模型: ' + engine + '（支持 ' + Object.keys(INSTALLERS).join(' / ') + '）' });
     if (installLock.active) return send(409, { error: '已有安装任务进行中，请稍后再试' });
@@ -1405,7 +1461,7 @@ const server = http.createServer(async (req, res) => {
     res.flushHeaders();
     const ctx = { nd: (obj) => { try { res.write(JSON.stringify(obj) + '\n'); } catch (e) {} } };
     try {
-      await installer(ctx);
+      await installer(ctx, { mirror });
       // LLM 模型下载完成后清空加载缓存，下次对话无需重启即可直接加载新模型
       if (LLM_MODELS[engine]) llmInvalidate();
     } catch (e) {
