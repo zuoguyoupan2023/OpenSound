@@ -4,6 +4,8 @@ models/
 .venv-qwen3/
 npm-debug.log*
 
+asr-server/data/cache/
+
 # ===== Rust / Tauri 构建产物 =====
 src-tauri/target/
 src-tauri/gen/
