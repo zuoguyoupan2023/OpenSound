@@ -89,6 +89,14 @@ function App() {
     };
   }, []);
 
+  // 兜底轮询（030 规划）：service-status 事件只在 asr/qwen3 变化时触发，
+  // funasr(8002)/cosyvoice(8003) 等延迟启动的服务不会通知前端 → UI 停在旧快照（识别面板原始版恒为 x 的根因）。
+  // 每 15s 兜底刷新一次，确保任何服务就绪最终反映到 UI。
+  useEffect(() => {
+    const timer = setInterval(refreshHealth, 15000);
+    return () => clearInterval(timer);
+  }, []);
+
   const doStart = async () => {
     try {
       await invoke("start_service_cmd");

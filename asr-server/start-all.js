@@ -24,6 +24,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PY = path.join(__dirname, '.venv-qwen3', 'bin', 'python3');
 // CosyVoice3 克隆服务用 .venv-cosyvoice（复用系统 torch + 本地 CosyVoice 源码）
 const PY_COSYVOICE = path.join(__dirname, '.venv-cosyvoice', 'bin', 'python3');
+// SenseVoice 原始版（funasr）用 .venv-funasr（S6：与 qwen3/cosyvoice 同款受管 venv；
+// 建议 --system-site-packages 复用系统 torch/funasr；缺失时见下方自举指引）
+const PY_FUNASR = path.join(__dirname, '.venv-funasr', 'bin', 'python3');
 
 // ---------- S1：系统 python 探测序列（替代 /opt/homebrew 绝对路径硬编码） ----------
 function detectSysPython() {
@@ -159,18 +162,22 @@ if (SKIP_QWEN3) {
 
 if (SKIP_SENSE_ORIGINAL) {
   console.log('[start-all] TABU_SKIP_SENSEVOICE_ORIGINAL=1，跳过 SenseVoice 原始版(funasr)');
-} else if (!PY_SYS) {
-  // S1：探测不到系统 python3 → 给出明确指引并跳过该服务（不拖垮整体启动）
-  console.error('[start-all] ✗ 未找到可用的 python3（SenseVoice 原始版需要）。解决任一即可：');
-  console.error('    brew install python@3.13   或   xcode-select --install');
-  console.error('    或指定路径：PY_SYS=/path/to/python3 npm run all');
-  console.error('[start-all] 已跳过 sensevoice-original，其余服务不受影响。');
 } else if (svOriginalUp) {
   console.log(`[start-all] sensevoice-original 已在运行（${SENSE_ORIGINAL_URL}），跳过`);
 } else {
-  console.log(`[start-all] 启动 sensevoice-original（funasr 原始版，python=${PY_SYS}，加载 ~900MB 模型，较慢）…`);
-  run(PY_SYS, ['sensevoice-server.py', '--port', '8002'], 'sensevoice-original');
-  started++;
+  // S6：优先受管 venv .venv-funasr（与 qwen3/cosyvoice 同模式，复用系统 funasr/torch，零下载）；
+  // 用户显式指定 PY_SYS 视为高级覆盖；都没有 → 给出一条可复制的自举命令，不自动联网安装。
+  const funasrPy = existsSync(PY_FUNASR) ? PY_FUNASR : (process.env.PY_SYS || null);
+  if (funasrPy) {
+    console.log(`[start-all] 启动 sensevoice-original（funasr 原始版，python=${funasrPy}，加载 ~900MB 模型，较慢）…`);
+    run(funasrPy, ['sensevoice-server.py', '--port', '8002'], 'sensevoice-original');
+    started++;
+  } else {
+    console.error('[start-all] ✗ 未找到 SenseVoice 原始版的 Python 环境（.venv-funasr 缺失且未指定 PY_SYS）。启用方式：');
+    console.error('    python3 -m venv --system-site-packages .venv-funasr && .venv-funasr/bin/pip install funasr');
+    console.error('    （该 venv 复用系统 torch/funasr，通常无需下载；装完重启 app 即启用）');
+    console.error('[start-all] 已跳过 sensevoice-original，其余服务不受影响。');
+  }
 }
 
 if (SKIP_COSYVOICE) {

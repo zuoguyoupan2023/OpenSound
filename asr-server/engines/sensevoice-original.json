@@ -14,7 +14,7 @@
     { "type": "dir", "path": "models/punc-cn-en", "minFiles": 6, "note": "标点辅助；⚠️ 权重文件构成待查（.mdl 指针按需拉取），S2 验收项" }
   ],
   "runtime": [
-    { "kind": "bin", "name": "python3", "minVersion": "3.10", "label": "系统 python3（S4 将改为受管 venv .venv-funasr）" }
+    { "kind": "path", "path": ".venv-funasr/bin/python3", "label": "受管 venv：.venv-funasr（S6 已落地；复用系统 funasr/torch，--system-site-packages；缺失见 start-all.js 自举指引）" }
   ],
   "install": {
     "kind": "hint",
