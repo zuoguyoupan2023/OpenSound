@@ -46,9 +46,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 # 指向本地 CosyVoice 源码（cosyvoice 包 + third_party/Matcha-TTS 子模块）
+# S4 vendoring：优先 vendor/cosyvoice（随包分发的裁剪子集，锁定 commit 见 VENDOR_COMMIT）；
+# 不存在时回退旧位置 CosyVoice/（installer 的 clone 兜底也写入 vendor，此处仅为历史目录兼容）。
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, 'CosyVoice'))
-sys.path.insert(0, os.path.join(_HERE, 'CosyVoice', 'third_party', 'Matcha-TTS'))
+_CV_ROOT = os.path.join(_HERE, 'vendor', 'cosyvoice')
+if not os.path.exists(os.path.join(_CV_ROOT, 'cosyvoice', 'cli', 'cosyvoice.py')):
+    _CV_ROOT = os.path.join(_HERE, 'CosyVoice')
+sys.path.insert(0, _CV_ROOT)
+sys.path.insert(0, os.path.join(_CV_ROOT, 'third_party', 'Matcha-TTS'))
 
 GEN_LOCK = threading.RLock()   # 串行化 MPS 推理；流式请求整段持锁
 MODEL = None

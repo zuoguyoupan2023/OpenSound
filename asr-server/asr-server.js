@@ -26,7 +26,7 @@ const MODEL_SIZE = process.env.ASR_MODEL_SIZE || 'base'; // tiny | base | small 
 const ASR_ENGINE = (process.env.ASR_ENGINE || 'auto').toLowerCase(); // auto | sensevoice | whisper —— 选择默认识别模型
 // asr-server 架构版本：2.x = 含 sensevoice-original + VAD + 标点。
 // 供 start-all.js 探测时判断 9528 上是否旧进程（旧代码无此字段/不同版本 → 视为残留，终止后重启）。
-const SERVER_VERSION = '2.3.0'; // 2.3.0 = S2：engines/*.json 清单 + /models 就绪明细 + 多镜像通用下载器
+const SERVER_VERSION = '2.4.0'; // 2.3.0 = S2：engines/*.json 清单 + /models 就绪明细 + 多镜像通用下载器
 const WHISPER_MODEL = `onnx-community/whisper-${MODEL_SIZE}`;
 
 // 模型缓存目录
@@ -1144,20 +1144,29 @@ const INSTALLERS = {
   // CosyVoice3 克隆：双依赖检查——① 9GB 模型（005 手动预下载，缺失时不自动下，避免误触大流量）；
   // ② CosyVoice 源码仓库（cosyvoice 包 + Matcha-TTS 子模块，运行时 import 必需），缺失则自动浅克隆补齐。
   // 完成后若 8003 未监听，需托盘「重启服务」拉起（模型加载约数分钟）。
-  'cosyvoice-clone': async (ctx) => {
+  // S4：CosyVoice3 克隆 —— 全自举链（vendor 优先 → clone 兜底 → venv 自建 → 模型校验）
+  // ①② 源码：vendor/cosyvoice（随包分发的裁剪子集，见 VENDOR_COMMIT）；缺失则浅克隆进 vendor（兜底）
+  // ③ venv：.venv-cosyvoice/bin/python3 缺失 → 自动 python3 -m venv + pip install -r requirements-cosyvoice.lock
+  // ④ 模型：必需权重逐项校验（S4 源码甄别：llm.pt/flow.pt/hift.pt/speech_tokenizer_v3.onnx/campplus.onnx/yaml，
+  //    llm.rl.pt/.batch.onnx/fp32.onnx 为非必需，不校验不下载）
+  'cosyvoice-clone': async (ctx, opts = {}) => {
     const modelDir = path.join(__dirname, 'models', 'cosyvoice', 'Fun-CosyVoice3-0.5B');
-    const srcDir = path.join(__dirname, 'CosyVoice');
-    const keyFiles = ['llm.pt', 'flow.pt', 'hift.pt', 'speech_tokenizer_v3.onnx', 'campplus.onnx'];
+    const vendorDir = path.join(__dirname, 'vendor', 'cosyvoice');
+    const srcDir = vendorDir;
+    const keyFiles = ['llm.pt', 'flow.pt', 'hift.pt', 'speech_tokenizer_v3.onnx', 'campplus.onnx', 'cosyvoice3.yaml'];
     const missing = keyFiles.filter((f) => !existsSync(path.join(modelDir, f)));
     if (missing.length) {
       ctx.nd({ type: 'log', message: `模型文件缺失: ${missing.join(', ')}` });
-      ctx.nd({ type: 'log', message: `9GB 模型请按 005-cosyvoice模型下载.md 手动预下载到: ${modelDir}` });
-      throw new Error('CosyVoice 模型不完整（不自动下载大模型，见上方说明）');
+      ctx.nd({ type: 'log', message: `权重请从 HF/魔搭下载到: ${modelDir}（必需 ${keyFiles.length} 个文件约 4.4GB；llm.rl.pt 等非必需勿下）` });
+      throw new Error('CosyVoice 模型不完整（大模型不自动下载，见上方下载指引）');
     }
-    ctx.nd({ type: 'log', message: '模型文件完整 ✓' });
+    ctx.nd({ type: 'log', message: '模型文件完整 ✓（必需项 4.4GB）' });
 
+    // ① 源码：vendor 优先
     if (!existsSync(path.join(srcDir, 'cosyvoice', 'cli', 'cosyvoice.py'))) {
-      ctx.nd({ type: 'log', message: 'CosyVoice 源码缺失 → git clone（浅克隆 + 子模块，几十 MB）…' });
+      // ② 兜底：浅克隆进 vendor（含 Matcha-TTS 子模块）
+      ctx.nd({ type: 'log', message: 'vendor 源码缺失 → git clone（浅克隆 + 子模块）进 vendor/cosyvoice …' });
+      mkdirSync(path.dirname(srcDir), { recursive: true });
       await new Promise((resolve, reject) => {
         const p = spawn('git', ['clone', '--depth', '1', '--recursive', '--shallow-submodules',
           'https://github.com/FunAudioLLM/CosyVoice.git', srcDir],
@@ -1171,11 +1180,49 @@ const INSTALLERS = {
           ? resolve()
           : reject(new Error(`git clone 失败（退出码 ${code}）；可手动执行: git clone --depth 1 --recursive https://github.com/FunAudioLLM/CosyVoice.git ${srcDir}`)));
       });
-      ctx.nd({ type: 'log', message: '源码克隆完成 ✓' });
+      try { execSync('git -C ' + vendorDir + ' rev-parse HEAD > ' + path.join(vendorDir, 'VENDOR_COMMIT') + ' 2>/dev/null'); } catch {}
+      // 克隆的是整仓，顺手修剪到运行时最小集（与随包 vendoring 一致）
+      try {
+        const rmAbs = ['.git', 'third_party/Matcha-TTS/.git', 'third_party/Matcha-TTS/synthesis.ipynb', 'third_party/Matcha-TTS/scripts', 'third_party/Matcha-TTS/data'];
+        for (const r of rmAbs) execSync(`rm -rf "${path.join(vendorDir, r)}"`);
+      } catch {}
+      ctx.nd({ type: 'log', message: '源码就绪 ✓（vendored，见 VENDOR_COMMIT）' });
     } else {
-      ctx.nd({ type: 'log', message: 'CosyVoice 源码已存在 ✓' });
+      ctx.nd({ type: 'log', message: 'CosyVoice 源码已存在（vendor/cosyvoice）✓' });
     }
-    ctx.nd({ type: 'done', message: '克隆依赖就绪。若「运行中」徽标未变绿：托盘 → 重启服务，等几分钟模型加载完成。' });
+
+    // ③ venv 自建：缺失才装（含 torch，首次可能几分钟）
+    const venvPy = path.join(__dirname, '.venv-cosyvoice', 'bin', 'python3');
+    if (!existsSync(venvPy)) {
+      ctx.nd({ type: 'log', message: '.venv-cosyvoice 缺失 → 创建并安装锁定依赖（首次约几分钟）…' });
+      let sysPy = process.env.PY_SYS;
+      if (!sysPy) { try { sysPy = execSync('which python3', { encoding: 'utf8' }).trim(); } catch {} }
+      if (!sysPy) throw new Error('未找到系统 python3（创建 venv 需要）');
+      ctx.nd({ type: 'log', message: `python3 = ${sysPy}` });
+      await new Promise((resolve, reject) => {
+        const p = spawn(sysPy, ['-m', 'venv', path.join(__dirname, '.venv-cosyvoice')], { cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'] });
+        const onData = (chunk) => String(chunk).split('\n').filter(Boolean)
+          .forEach((line) => ctx.nd({ type: 'log', message: line }));
+        p.stdout.on('data', onData); p.stderr.on('data', onData);
+        p.on('error', (e) => reject(new Error('无法启动 python3 -m venv：' + e.message)));
+        p.on('exit', (code) => code === 0 ? resolve() : reject(new Error(`venv 创建失败（退出码 ${code}）`)));
+      });
+      ctx.nd({ type: 'log', message: 'venv 创建完成，pip 安装依赖…' });
+      await new Promise((resolve, reject) => {
+        const p = spawn(path.join(__dirname, '.venv-cosyvoice', 'bin', 'pip'), ['install', '-r', path.join(__dirname, 'requirements-cosyvoice.lock')],
+          { cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'] });
+        const onData = (chunk) => String(chunk).split('\n').filter(Boolean)
+          .forEach((line) => ctx.nd({ type: 'log', message: line }));
+        p.stdout.on('data', onData); p.stderr.on('data', onData);
+        p.on('error', (e) => reject(new Error('无法启动 pip：' + e.message)));
+        p.on('exit', (code) => code === 0 ? resolve() : reject(new Error(`pip install 失败（退出码 ${code}），查看上方日志`)));
+      });
+      ctx.nd({ type: 'log', message: '依赖安装完成 ✓' });
+    } else {
+      ctx.nd({ type: 'log', message: '.venv-cosyvoice 已存在 ✓' });
+    }
+
+    ctx.nd({ type: 'done', message: '克隆依赖就绪。若「运行中」徽标未变绿：托盘 → 重启服务，等模型加载完成（首次约 1-2 分钟）。' });
   },
 };
 
