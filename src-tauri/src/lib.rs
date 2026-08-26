@@ -236,6 +236,32 @@ fn server_dir(app: &tauri::AppHandle, state: &Arc<AppState>) -> Option<PathBuf> 
     None
 }
 
+// ---------- 安全：生成入站鉴权 token（128bit hex） ----------
+// 首选 /dev/urandom 定长读取（macOS/Linux）；打开失败（如 Windows）退回 纳秒时钟⊕pid 的 SplitMix64 折叠。
+fn gen_token() -> String {
+    fn hex(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{:02x}", x)).collect()
+    }
+    let mut buf = [0u8; 16];
+    let ok = std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut buf))
+        .is_ok();
+    if ok {
+        return hex(&buf);
+    }
+    let t = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let mut x = t ^ (std::process::id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let mut out = String::new();
+    for _ in 0..4 {
+        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        out.push_str(&hex(&x.to_le_bytes()));
+    }
+    out
+}
+
 // ---------- 拉起 / 停止服务 ----------
 fn start_service(app: &tauri::AppHandle, state: &Arc<AppState>) -> Result<(), String> {
     // 先停旧的
@@ -250,6 +276,17 @@ fn start_service(app: &tauri::AppHandle, state: &Arc<AppState>) -> Result<(), St
         guard.clone().ok_or("未找到 node 可执行文件")?
     };
     let entry = dir.join("start-all.js");
+
+    // 安全加固②：入站鉴权 token —— config.json ui.token 为空时自动生成一次并持久化；
+    // 同一 token 经 get_ui_settings 交给前端（api.ts jfetch 自动带 Bearer），并以 TABU_TOKEN 注入子进程校验。
+    let token = {
+        let mut cfg = load_config(app);
+        if cfg.ui.token.is_empty() {
+            cfg.ui.token = gen_token();
+            save_config(app, &cfg)?;
+        }
+        cfg.ui.token
+    };
 
     // 子进程日志落盘（此前 Stdio::null() 会丢弃全部输出，子服务崩溃时无从排查）
     let log_path = match app.path().app_log_dir() {
@@ -274,6 +311,7 @@ fn start_service(app: &tauri::AppHandle, state: &Arc<AppState>) -> Result<(), St
         .arg(&entry)
         .current_dir(&dir)
         .env("ASR_ENGINE", "auto")
+        .env("TABU_TOKEN", &token)
         .stdout(Stdio::from(open_log()?))
         .stderr(Stdio::from(open_log()?))
         .spawn()

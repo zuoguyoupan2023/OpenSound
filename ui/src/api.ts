@@ -1,5 +1,5 @@
 import type { HealthInfo, ModelInfo, InstallProgress, DeviceProfile } from "./types";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 
 // 后端基地址（Tabu-Local 服务，端口约定 9528，与 Tabu-AI 一致）
 // 设置统一存放在 config.json 的 ui 节（Rust 侧），启动时载入内存缓存；
@@ -17,10 +17,10 @@ const DEFAULT_BASE_URL = "http://127.0.0.1:9528";
 let settingsCache: PersistedSettings | null = null;
 
 function inTauri(): boolean {
-  return (
-    typeof navigator !== "undefined" &&
-    navigator.userAgent.includes("Tauri")
-  );
+  // 必须用官方 isTauri()（检测 window.isTauri / __TAURI_INTERNALS__），
+  // 不能靠 userAgent 字符串：Tauri v2 默认 WebView UA 不含 "Tauri"，
+  // 会导致 token/settings 走错分支（S7 鉴权上线后所有请求 401 的根因）。
+  return isTauri();
 }
 
 function readLegacyLocalStorage(): PersistedSettings {

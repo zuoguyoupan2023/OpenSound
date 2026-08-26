@@ -27,7 +27,9 @@ const MODEL_SIZE = process.env.ASR_MODEL_SIZE || 'base'; // tiny | base | small 
 const ASR_ENGINE = (process.env.ASR_ENGINE || 'auto').toLowerCase(); // auto | sensevoice | whisper —— 选择默认识别模型
 // asr-server 架构版本：2.x = 含 sensevoice-original + VAD + 标点。
 // 供 start-all.js 探测时判断 9528 上是否旧进程（旧代码无此字段/不同版本 → 视为残留，终止后重启）。
-const SERVER_VERSION = '2.5.0'; // 2.4.0 = S4：cosyvoice-clone 全自举链；2.5.0 = S5：缺失权重自动下载（前端二次确认）
+const SERVER_VERSION = '2.6.0'; // 2.4.0 = S4：cosyvoice-clone 全自举链；2.5.0 = S5：缺失权重自动下载；2.6.0 = S7：安全加固（仅本机回环 + 入站鉴权）
+// 安全加固（S7）：入站鉴权 token —— Tauri 宿主注入；为空（手动 npm start 调试）时不校验
+const TABU_TOKEN = process.env.TABU_TOKEN || '';
 const WHISPER_MODEL = `onnx-community/whisper-${MODEL_SIZE}`;
 
 // 模型缓存目录
@@ -1307,6 +1309,19 @@ const server = http.createServer(async (req, res) => {
 
   const send = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); };
 
+  // ===== 安全加固：入站鉴权（S7）=====
+  // TABU_TOKEN 由 Tauri 宿主注入（config.json ui.token 自动生成，并经 get_ui_settings 同步给前端，
+  // 前端 api.ts jfetch 自动带 Authorization: Bearer）。为空（手动 npm start 调试）时不校验。
+  // /health 免检：宿主健康轮询不带凭据，且信息面仅版本/引擎状态。
+  if (TABU_TOKEN && req.method !== 'OPTIONS' && !(req.method === 'GET' && url.pathname === '/health')) {
+    const auth = req.headers['authorization'] || '';
+    const got = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+    if (got !== TABU_TOKEN) {
+      log('⚠️ 拒绝未授权请求: ' + req.method + ' ' + url.pathname + (auth ? '（token 不符）' : '（缺少 token）'));
+      return send(401, { error: 'unauthorized: 缺少或错误的 Bearer token' });
+    }
+  }
+
   if (req.method === 'GET' && url.pathname === '/health') {
     // TTS 状态：kokoro 就绪（含音色数）/ missing（模型未下载）/ not-installed（未装 sherpa-onnx-node）
     let sherpaNodeInstalled = true;
@@ -1660,4 +1675,4 @@ async function whisperTranscribe(pcm16) {
   return String(out && out.text || '').trim();
 }
 
-server.listen(PORT, () => log('TabU 本地语音服务已启动: http://127.0.0.1:' + PORT + '（/transcribe 识别，/speak 朗读）'));
+server.listen(PORT, '127.0.0.1', () => log('TabU 本地语音服务已启动: http://127.0.0.1:' + PORT + '（仅本机回环；/transcribe 识别，/speak 朗读）'));
