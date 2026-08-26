@@ -5,9 +5,19 @@ import {
   getPersistedSettings,
   updateSettings,
   getBaseUrl,
+  type PowerMode,
+  type EcoBig,
 } from "../api";
 import { showToast } from "../toast";
 import { Panel, Button, Spinner } from "../components/ui";
+
+// 030 阶段一：节能模式下可启用的大模型（单开；none=最小集）
+const ECO_BIG_OPTS: { value: EcoBig; label: string; mem: string; wait: string }[] = [
+  { value: "none", label: "都不启用（仅最小集：SenseVoice 量化 + Kokoro + 0.5B 对话）", mem: "0", wait: "—" },
+  { value: "qwen3", label: "Qwen3 TTS（高音质朗读）", mem: "2–4GB", wait: "数十秒" },
+  { value: "cosyvoice", label: "CosyVoice 克隆（克隆音色朗读）", mem: "4–6GB", wait: "1–2 分钟" },
+  { value: "sensevoice-original", label: "SenseVoice 原始版（高精度识别）", mem: "1.5–2.5GB", wait: "20–60s" },
+];
 
 export default function SettingsPanel(props: PanelProps) {
   const [baseUrl, setBaseUrl] = useState(getBaseUrl());
@@ -20,6 +30,11 @@ export default function SettingsPanel(props: PanelProps) {
   const [pathMsg, setPathMsg] = useState("");
   // 数据目录（存储规范：音频库/对话历史/config.json 都在这里）
   const [dataDir, setDataDir] = useState("");
+  // 030 阶段一：资源模式（节能/全能 + 节能下启用的大模型）
+  const [powerMode, setPowerMode] = useState<PowerMode>("full");
+  const [ecoBig, setEcoBig] = useState<EcoBig>("none");
+  const [applyingMode, setApplyingMode] = useState(false);
+  const [modeMsg, setModeMsg] = useState("");
 
   // 自动保存控制：载入完成后才启用；与上次已保存快照相同则跳过
   const loadedRef = useRef(false);
@@ -37,6 +52,8 @@ export default function SettingsPanel(props: PanelProps) {
     setToken(initial[1]);
     setDeepseekKey(initial[2]);
     setZhipuKey(initial[3]);
+    setPowerMode(s.powerMode || "full");
+    setEcoBig(s.ecoBig || "none");
     savedSnapshotRef.current = JSON.stringify(initial);
     loadedRef.current = true;
     (async () => {
@@ -107,6 +124,28 @@ export default function SettingsPanel(props: PanelProps) {
     }
   };
 
+  // 030 阶段一：应用资源模式并重启服务（关闭/启用的模型下次启动生效）
+  const applyPowerMode = async () => {
+    setApplyingMode(true);
+    setModeMsg("");
+    try {
+      await updateSettings({ powerMode, ecoBig });
+      await invoke("start_service_cmd");
+      setModeMsg(
+        powerMode === "eco"
+          ? `已保存并重启服务（节能模式：${
+              ecoBig === "none" ? "仅最小集" : "额外启用 " + (ECO_BIG_OPTS.find((o) => o.value === ecoBig)?.label || ecoBig)
+            }）`
+          : "已保存并重启服务（全能模式：全部模型拉起）"
+      );
+      setTimeout(() => props.refresh(), 800);
+    } catch (e) {
+      setModeMsg("失败: " + e);
+    } finally {
+      setApplyingMode(false);
+    }
+  };
+
   return (
     <Panel
       title="设置"
@@ -117,6 +156,77 @@ export default function SettingsPanel(props: PanelProps) {
         </Button>
       }
     >
+      <div className="settings-block">
+        <div className="settings-item">
+          <label className="settings-label">服务资源模式（030 规划）</label>
+          <div className="mode-radio-row">
+            <label className="mode-radio">
+              <input
+                type="radio"
+                name="powerMode"
+                checked={powerMode === "full"}
+                onChange={() => setPowerMode("full")}
+              />
+              <span>
+                <b>全能模式</b>
+                <em>全部模型常驻，随时可用；约占 12–16GB 内存</em>
+              </span>
+            </label>
+            <label className="mode-radio">
+              <input
+                type="radio"
+                name="powerMode"
+                checked={powerMode === "eco"}
+                onChange={() => setPowerMode("eco")}
+              />
+              <span>
+                <b>节能模式</b>
+                <em>只保留最小集（SenseVoice 量化 + Kokoro 朗读 + 0.5B 对话），大模型按需单开；省 10GB+，切换需等待冷启动</em>
+              </span>
+            </label>
+          </div>
+
+          {powerMode === "eco" && (
+            <>
+              <p className="settings-hint">
+                节能模式下额外启用一个大模型（其余保持关闭，避免多模型同时常驻）：
+              </p>
+              <div className="mode-radio-row">
+                {ECO_BIG_OPTS.map((o) => (
+                  <label key={o.value} className="mode-radio">
+                    <input
+                      type="radio"
+                      name="ecoBig"
+                      checked={ecoBig === o.value}
+                      onChange={() => setEcoBig(o.value)}
+                    />
+                    <span>
+                      <b>{o.label}</b>
+                      <em>常驻 {o.mem} · 冷启动 {o.wait}</em>
+                    </span>
+                  </label>
+                ))}
+              </div>
+              {ecoBig !== "cosyvoice" && (
+                <p className="settings-hint warn">
+                  ⚠️ 节能模式下未启用克隆服务：使用<b>克隆音色朗读必须运行 CosyVoice</b>，请在上方选择「CosyVoice 克隆」并应用。
+                </p>
+              )}
+            </>
+          )}
+
+          <div style={{ marginTop: 10 }}>
+            <Button onClick={applyPowerMode} disabled={applyingMode}>
+              {applyingMode ? <Spinner /> : "应用并重启服务"}
+            </Button>
+            {modeMsg && <span className="settings-msg" style={{ marginLeft: 10 }}>{modeMsg}</span>}
+          </div>
+          <p className="settings-hint">
+            选择会在下次服务启动时生效（记录并持久化，重启 app 后沿用）。切换大模型需等待冷启动（见各选项标注）。
+          </p>
+        </div>
+      </div>
+
       <div className="settings-block">
         <div className="settings-item">
           <label className="settings-label">服务地址</label>

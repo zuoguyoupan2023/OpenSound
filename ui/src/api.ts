@@ -4,11 +4,17 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 // 后端基地址（Tabu-Local 服务，端口约定 9528，与 Tabu-AI 一致）
 // 设置统一存放在 config.json 的 ui 节（Rust 侧），启动时载入内存缓存；
 // 旧版本存 WebView localStorage(tabu_settings)，首次启动自动迁入并清除（011 §5.6 存储规范）
+// 030 阶段一：服务资源模式（powerMode=全能/节能；ecoBig=节能下启用的大模型，单开）
+export type PowerMode = "full" | "eco";
+export type EcoBig = "none" | "qwen3" | "cosyvoice" | "sensevoice-original";
+
 interface PersistedSettings {
   baseUrl?: string;
   token?: string;
   deepseekKey?: string;
   zhipuKey?: string;
+  powerMode?: PowerMode;
+  ecoBig?: EcoBig;
 }
 
 const LS_KEY = "tabu_settings";
@@ -47,12 +53,16 @@ export async function initSettings(): Promise<void> {
       token: string;
       deepseek_key: string;
       zhipu_key: string;
+      power_mode: string;
+      eco_big: string;
     }>("get_ui_settings");
     let s: PersistedSettings = {
       baseUrl: ui.base_url || "",
       token: ui.token || "",
       deepseekKey: ui.deepseek_key || "",
       zhipuKey: ui.zhipu_key || "",
+      powerMode: ui.power_mode === "eco" ? "eco" : "full",
+      ecoBig: (ui.eco_big as EcoBig) || "none",
     };
     const legacy = readLegacyLocalStorage();
     const emptyInConfig =
@@ -122,6 +132,8 @@ export async function updateSettings(
     token: partial.token,
     deepseekKey: partial.deepseekKey,
     zhipuKey: partial.zhipuKey,
+    powerMode: partial.powerMode,
+    ecoBig: partial.ecoBig,
   });
 }
 

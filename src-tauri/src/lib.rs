@@ -96,6 +96,13 @@ struct UiSettings {
     deepseek_key: String,
     #[serde(default)]
     zhipu_key: String,
+    // 030 阶段一：服务资源模式
+    // power_mode = "full"（全能，全部拉起）| "eco"（节能，只留最小集 + eco_big）
+    // eco_big    = "none" | "qwen3" | "cosyvoice" | "sensevoice-original"（节能下启用的大模型，单开）
+    #[serde(default)]
+    power_mode: String,
+    #[serde(default)]
+    eco_big: String,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
@@ -155,12 +162,16 @@ fn set_ui_settings(
     token: Option<String>,
     deepseek_key: Option<String>,
     zhipu_key: Option<String>,
+    power_mode: Option<String>,
+    eco_big: Option<String>,
 ) -> Result<(), String> {
     let mut cfg = load_config(&app);
     if let Some(v) = base_url { cfg.ui.base_url = v; }
     if let Some(v) = token { cfg.ui.token = v; }
     if let Some(v) = deepseek_key { cfg.ui.deepseek_key = v; }
     if let Some(v) = zhipu_key { cfg.ui.zhipu_key = v; }
+    if let Some(v) = power_mode { cfg.ui.power_mode = v; }
+    if let Some(v) = eco_big { cfg.ui.eco_big = v; }
     save_config(&app, &cfg)
 }
 
@@ -279,13 +290,22 @@ fn start_service(app: &tauri::AppHandle, state: &Arc<AppState>) -> Result<(), St
 
     // 安全加固②：入站鉴权 token —— config.json ui.token 为空时自动生成一次并持久化；
     // 同一 token 经 get_ui_settings 交给前端（api.ts jfetch 自动带 Bearer），并以 TABU_TOKEN 注入子进程校验。
-    let token = {
+    // 030 阶段一：资源模式 → TABU_SKIP_*（节能=默认关全部大模型服务，只留 9528 最小集：
+    //   sherpa SenseVoice ASR + kokoro TTS + llm-0.5b 对话；eco_big=节能下用户启用的大模型，单开；全能=全开）
+    let (token, skip_qwen3, skip_cosy, skip_sense_orig) = {
         let mut cfg = load_config(app);
         if cfg.ui.token.is_empty() {
             cfg.ui.token = gen_token();
             save_config(app, &cfg)?;
         }
-        cfg.ui.token
+        let skip = match (cfg.ui.power_mode.as_str(), cfg.ui.eco_big.as_str()) {
+            ("eco", "qwen3") => (false, true, true),
+            ("eco", "cosyvoice") => (true, false, true),
+            ("eco", "sensevoice-original") => (true, true, false),
+            ("eco", _) => (true, true, true), // 节能默认：大模型全关，只留最小集
+            _ => (false, false, false),       // 全能默认：全部拉起
+        };
+        (cfg.ui.token, skip.0, skip.1, skip.2)
     };
 
     // 子进程日志落盘（此前 Stdio::null() 会丢弃全部输出，子服务崩溃时无从排查）
@@ -312,6 +332,9 @@ fn start_service(app: &tauri::AppHandle, state: &Arc<AppState>) -> Result<(), St
         .current_dir(&dir)
         .env("ASR_ENGINE", "auto")
         .env("TABU_TOKEN", &token)
+        .env("TABU_SKIP_QWEN3", if skip_qwen3 { "1" } else { "" })
+        .env("TABU_SKIP_COSYVOICE", if skip_cosy { "1" } else { "" })
+        .env("TABU_SKIP_SENSEVOICE_ORIGINAL", if skip_sense_orig { "1" } else { "" })
         .stdout(Stdio::from(open_log()?))
         .stderr(Stdio::from(open_log()?))
         .spawn()
