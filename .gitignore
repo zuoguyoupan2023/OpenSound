@@ -5,6 +5,7 @@ models/
 npm-debug.log*
 
 asr-server/data/cache/
+data/clone-voices/*/preview.wav
 
 # ===== Rust / Tauri 构建产物 =====
 src-tauri/target/
