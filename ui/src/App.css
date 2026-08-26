@@ -769,6 +769,102 @@ textarea:focus,
   margin-left: 8px;
 }
 
+/* ===== 000-device-vs-model §四：设备画像 × 模型匹配（4.3） ===== */
+.device-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--card);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.device-line b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.device-line em {
+  margin-left: auto;
+  font-style: normal;
+  color: var(--accent);
+}
+
+.entry-starter {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: rgba(59, 130, 246, 0.08);
+  border: 1px dashed rgba(59, 130, 246, 0.35);
+  font-size: 13px;
+}
+
+.entry-starter span {
+  color: var(--text);
+}
+
+.badge.fit-ok {
+  background: rgba(34, 197, 94, 0.15);
+  color: var(--ok);
+  cursor: default;
+}
+
+.badge.fit-slow {
+  background: rgba(245, 158, 11, 0.16);
+  color: #f59e0b;
+  cursor: pointer;
+}
+
+.badge.fit-no {
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--fail);
+  cursor: pointer;
+}
+
+.badge.fit-slow.open,
+.badge.fit-no.open {
+  outline: 1px solid currentColor;
+}
+
+.model-name .badge.fit-ok,
+.model-name .badge.fit-slow,
+.model-name .badge.fit-no {
+  margin-left: 8px;
+  vertical-align: 1px;
+  padding: 1px 7px;
+  font-size: 11px;
+}
+
+.fit-tip {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.fit-tip.slow {
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  color: #f59e0b;
+}
+
+.fit-tip.no {
+  background: rgba(239, 68, 68, 0.07);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  color: var(--fail);
+}
+
 .install-log {
   margin-top: 16px;
   background: var(--bg-2);

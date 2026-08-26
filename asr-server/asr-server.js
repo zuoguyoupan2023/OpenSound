@@ -19,6 +19,7 @@ import { execSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildDeviceProfile } from './device-profile.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = parsePort(process.argv);
@@ -927,6 +928,15 @@ function loadEngineManifests() {
 const ENGINE_MANIFESTS = loadEngineManifests();
 console.log(`[manifests] 已加载 ${ENGINE_MANIFESTS.length} 份引擎清单（engines/*.json）`);
 
+// 000-device-vs-model.md §四：设备画像（4.1）——启动时探测一次并缓存；失败不阻塞服务（路由返回 503）
+let DEVICE_PROFILE = null;
+try {
+  DEVICE_PROFILE = await buildDeviceProfile(ENGINE_MANIFESTS);
+  console.log(`[device-profile] ${DEVICE_PROFILE.os} · accel=${DEVICE_PROFILE.accel} · ram=${DEVICE_PROFILE.ramGB}GB · tier=${DEVICE_PROFILE.tier} · 可装 ${DEVICE_PROFILE.canInstall.length}/${ENGINE_MANIFESTS.length}`);
+} catch (e) {
+  console.error('[device-profile] 设备探测失败（/device-profile 将返回 503）:', e.message);
+}
+
 // 最小 glob：仅支持「目录/*」一段通配（够 whisper 场景）
 function globExists(pattern) {
   const abs = path.join(__dirname, pattern);
@@ -1544,6 +1554,12 @@ const server = http.createServer(async (req, res) => {
       const availBytes = Number(cols[3]) * 1024;
       return send(200, { availBytes });
     } catch { return send(200, { availBytes: null }); }
+  }
+
+  // 设备画像：GET /device-profile → 设备画像 + 模型匹配（000-device-vs-model.md §四，启动探测一次并缓存）
+  if (req.method === 'GET' && url.pathname === '/device-profile') {
+    if (!DEVICE_PROFILE) return send(503, { error: '设备探测失败（见服务端日志）' });
+    return send(200, DEVICE_PROFILE);
   }
 
   // 模型安装：POST /install-model?engine=<name>[&mirror=<name>] → NDJSON 流式进度（每行 { type:'log'|'done'|'error', message }）

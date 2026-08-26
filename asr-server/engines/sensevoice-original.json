@@ -4,6 +4,7 @@
   "label": "SenseVoice 原始版（funasr · 高精度）",
   "sizeHint": "~900MB + VAD/标点辅助包",
   "license": "Apache-2.0（ModelSense SenseVoiceSmall）",
+  "profile": { "diskGB": 0.9, "memNeedGB": 1.5, "accel": "any", "tierRequired": "entry" },
   "checks": [
     { "type": "file", "path": "models/sensevoice-original/model.pt", "bytes": 936291369 },
     { "type": "file", "path": "models/sensevoice-original/config.yaml" },

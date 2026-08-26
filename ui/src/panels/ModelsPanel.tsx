@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { PanelProps } from "../App";
 import { Icon } from "@iconify/react";
-import { cancelInstall, getDisk, installModel } from "../api";
-import type { InstallProgress, ModelInfo } from "../types";
+import { cancelInstall, getDisk, getDeviceProfile, installModel } from "../api";
+import type { DeviceProfile, EngineFit, InstallProgress, ModelInfo } from "../types";
 import { Panel, Button, Spinner } from "../components/ui";
 
 // ---------- 工具 ----------
@@ -24,6 +24,21 @@ const catLabel: Record<string, string> = {
   llm: "对话 LLM",
 };
 
+// ---------- 设备画像（000-device-vs-model.md §四 / 4.3 验收） ----------
+const TIER_LABEL: Record<string, string> = {
+  entry: "入门档",
+  standard: "标准档",
+  high: "高配档",
+  flagship: "旗舰档",
+};
+const ACCEL_LABEL: Record<string, string> = {
+  metal: "Metal",
+  cuda: "CUDA",
+  cpu: "CPU",
+};
+// 入门档默认推荐的轻量组合（000-device-vs-model.md 4.3-③：SenseVoice + Kokoro + 轻量 LLM）
+const STARTER_ENGINES = ["sensevoice", "kokoro", "llm-0.5b"];
+
 // 五态 → 徽标文案与样式类
 const STATE_META: Record<string, { label: string; cls: string; icon: string }> = {
   running: { label: "运行中", cls: "ok", icon: "lucide:circle-check" },
@@ -41,10 +56,15 @@ export default function ModelsPanel(props: PanelProps) {
   // 每引擎选择的镜像（engine → mirror 名）
   const [mirrorPick, setMirrorPick] = useState<Record<string, string>>({});
   const [diskAvail, setDiskAvail] = useState<number | null>(null);
+  // 设备画像（4.1）：服务启动探测缓存；拉取失败（如服务未升级）→ null，UI 优雅降级不显示徽标
+  const [device, setDevice] = useState<DeviceProfile | null>(null);
+  // 展开「缺口 / 慢速说明」的引擎 id（🚫/⚙️ 点击切换）
+  const [fitOpen, setFitOpen] = useState<string | null>(null);
   const logRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     getDisk().then((d) => setDiskAvail(d.availBytes)).catch(() => {});
+    getDeviceProfile().then(setDevice).catch(() => setDevice(null));
   }, []);
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
@@ -114,6 +134,75 @@ export default function ModelsPanel(props: PanelProps) {
     return s === "partial-files" || s === "missing-runtime" || s === "incomplete";
   };
 
+  // ---------- 设备匹配（4.3 验收①②）：✅ 可安装 / ⚙️ 可装但慢 / 🚫 设备不满足 ----------
+  const fitOf = (m: ModelInfo): EngineFit | null => device?.fits[m.engine] ?? null;
+
+  const renderFitBadge = (m: ModelInfo) => {
+    const fit = fitOf(m);
+    if (!fit) return null;
+    if (!fit.can) {
+      return (
+        <span
+          className={`badge fit-no ${fitOpen === m.engine ? "open" : ""}`}
+          title="点击查看设备缺口"
+          onClick={() => setFitOpen(fitOpen === m.engine ? null : m.engine)}
+        >
+          <Icon icon="lucide:circle-x" width={11} height={11} /> 设备不满足
+        </span>
+      );
+    }
+    if (fit.isSlow) {
+      return (
+        <span
+          className={`badge fit-slow ${fitOpen === m.engine ? "open" : ""}`}
+          title={fit.slowNote || "本机可安装，但在当前加速器上速度较慢"}
+          onClick={() => setFitOpen(fitOpen === m.engine ? null : m.engine)}
+        >
+          <Icon icon="lucide:gauge" width={11} height={11} /> 可装 · 慢速
+        </span>
+      );
+    }
+    return (
+      <span className="badge fit-ok" title="本机满足该模型的磁盘 / 内存 / 加速要求">
+        <Icon icon="lucide:circle-check" width={11} height={11} /> 可安装
+      </span>
+    );
+  };
+
+  // 🚫 缺口明细 / ⚙️ 慢速说明（点击徽标展开）
+  const renderFitTip = (m: ModelInfo) => {
+    if (fitOpen !== m.engine) return null;
+    const fit = fitOf(m);
+    if (!fit) return null;
+    const tips = fit.can
+      ? fit.slowNote
+        ? [fit.slowNote]
+        : []
+      : fit.blocks.map((b) => b.message);
+    if (tips.length === 0) return null;
+    return (
+      <div className={`fit-tip ${fit.can ? "slow" : "no"}`}>
+        <Icon icon={fit.can ? "lucide:gauge" : "lucide:triangle-alert"} width={13} height={13} />
+        <div>
+          {tips.map((t, i) => (
+            <div key={i}>{t}</div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  // 入门档默认推荐：未装齐的轻量组合（4.3 验收③）
+  const starterMissing =
+    device?.tier === "entry"
+      ? props.models.filter((m) => STARTER_ENGINES.includes(m.engine) && needFix(m))
+      : [];
+  const installStarter = async () => {
+    for (const m of starterMissing) {
+      await install(m); // install 内部串行执行，失败进日志不中断后续
+    }
+  };
+
   return (
     <Panel
       title="模型管理"
@@ -124,6 +213,39 @@ export default function ModelsPanel(props: PanelProps) {
         </Button>
       }
     >
+      {/* 设备摘要条：打开即知道本机档位与可装数量（LM Studio 式零配置体验） */}
+      {device && (
+        <div className="device-line">
+          <Icon icon="lucide:laptop" width={13} height={13} />
+          本机：<b>{TIER_LABEL[device.tier] || device.tier}</b>
+          <span>· {ACCEL_LABEL[device.accel] || device.accel} 加速</span>
+          <span>· 内存 {device.ramGB}GB</span>
+          {device.gpu.vramGB ? <span>· 显存 {device.gpu.vramGB}GB</span> : null}
+          <span>· 磁盘可用 {device.diskFreeGB != null ? `${device.diskFreeGB}GB` : "未知"}</span>
+          <em>可装 {device.canInstall.length}/{props.models.length}</em>
+        </div>
+      )}
+
+      {/* 入门档默认推荐轻量组合，一键装齐即用（000-device-vs-model.md 4.3-③） */}
+      {starterMissing.length > 0 && (
+        <div className="entry-starter">
+          <Icon icon="lucide:sparkles" width={15} height={15} />
+          <span>
+            检测到<b>入门档</b>设备，推荐先装齐轻量组合（
+            {starterMissing.map((m) => m.label.split("（")[0]).join(" + ")}）：
+          </span>
+          <Button onClick={installStarter} disabled={!!installing}>
+            {installing ? (
+              <Spinner />
+            ) : (
+              <>
+                <Icon icon="lucide:download" width={14} height={14} /> 一键装齐
+              </>
+            )}
+          </Button>
+        </div>
+      )}
+
       <div className="models-list">
         {props.models.map((m) => {
           const st = STATE_META[stateOf(m)] || STATE_META.ready;
@@ -139,6 +261,8 @@ export default function ModelsPanel(props: PanelProps) {
                       {m.license.split("/")[0].trim()}
                     </span>
                   )}
+                  {/* 设备匹配徽标（4.3 验收①）：✅ 可安装 / ⚙️ 可装但慢 / 🚫 设备不满足 */}
+                  {renderFitBadge(m)}
                 </div>
                 <div className="model-meta">
                   <span className="model-cat">{catLabel[m.category] || m.category}</span>
@@ -183,6 +307,9 @@ export default function ModelsPanel(props: PanelProps) {
                     <div className="missing-item hint">环境项由安装器/引导自动创建或克隆兜底</div>
                   </div>
                 )}
+
+                {/* 设备缺口明细 / 慢速说明（4.3 验收②：🚫 点击显示，而不是隐藏） */}
+                {renderFitTip(m)}
 
                 {/* 下载进度条 */}
                 {busyHere && pct && pct.total > 0 && (

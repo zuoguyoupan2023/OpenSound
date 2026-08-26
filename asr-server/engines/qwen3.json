@@ -4,6 +4,7 @@
   "label": "Qwen3-TTS 0.6B（MPS · 流式）",
   "sizeHint": "~2.3GB（python hub 缓存）",
   "license": "Apache-2.0",
+  "profile": { "diskGB": 2.3, "memNeedGB": null, "accel": "any", "tierRequired": "standard", "slowNote": { "cpu": "CPU 上较慢，建议 GPU/MPS 加速（000 §3.2 文档口径）" } },
   "checks": [
     { "type": "dir", "path": "models/hf/hub/models--Qwen--Qwen3-TTS-12Hz-0.6B-CustomVoice", "minFiles": 10,
       "note": "python hub 缓存结构（blobs+snapshots），S1 起落位 models/hf/hub/" }

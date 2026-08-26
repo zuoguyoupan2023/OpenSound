@@ -4,6 +4,7 @@
   "label": "Qwen3-8B Q4_K_M（推荐 · 对话更强）",
   "sizeHint": "~4.7GB",
   "license": "Apache-2.0",
+  "profile": { "diskGB": 5.03, "memNeedGB": 12, "accel": "any", "tierRequired": "standard" },
   "checks": [
     { "type": "file", "path": "models/llm/Qwen3-8B-Q4_K_M.gguf", "bytes": 5027783488 }
   ],

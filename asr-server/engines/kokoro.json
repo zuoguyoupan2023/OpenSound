@@ -4,6 +4,7 @@
   "label": "Kokoro（中英混合 · 53 音色）",
   "sizeHint": "~383MB",
   "license": "Apache-2.0",
+  "profile": { "diskGB": 0.38, "memNeedGB": null, "accel": "any", "tierRequired": "entry" },
   "checks": [
     { "type": "file", "path": "models/tts/kokoro-multi-lang-v1_0/model.onnx", "bytes": 325630829 },
     { "type": "file", "path": "models/tts/kokoro-multi-lang-v1_0/tokens.txt", "bytes": 687 },

@@ -4,6 +4,7 @@
   "label": "SenseVoice（中文/粤/日/韩最优）",
   "sizeHint": "~228MB",
   "license": "Apache-2.0",
+  "profile": { "diskGB": 0.24, "memNeedGB": 0.5, "accel": "any", "tierRequired": "entry" },
   "checks": [
     { "type": "file", "path": "models/sensevoice/model.int8.onnx", "bytes": 239233841 },
     { "type": "file", "path": "models/sensevoice/tokens.txt", "bytes": 315894 }

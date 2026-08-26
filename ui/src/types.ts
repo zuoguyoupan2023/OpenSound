@@ -77,6 +77,46 @@ export interface InstallProgress {
   total?: number;
 }
 
+// ---------- /device-profile（000-device-vs-model.md §四：设备画像 → 模型过滤） ----------
+// 一个引擎的匹配结果（fits[engine]）：can=可安装；isSlow=可装但慢（⚙️ 黄色徽标，slowNote 标注预期速度）
+export interface EngineFit {
+  can: boolean;
+  isSlow: boolean;
+  slowNote: string | null;
+  blocks: DeviceBlock[]; // 🚫 缺口明细（4.3 验收②：点击显示）
+  diskGB: number | null;
+  diskNeed: number | null; // diskGB × 1.2（安装+解压余量）
+  memNeedGB: number | null;
+  accel: string;
+  tierRequired: string;
+}
+
+export interface DeviceBlock {
+  kind: "disk" | "mem" | "accel" | "tier";
+  need: number | null;
+  have: number | null;
+  message: string; // "还差 5.8GB 磁盘（需 10.8GB）" / "建议 16GB 内存机型"
+}
+
+export interface DeviceCannotInstall {
+  engine: string;
+  reason: string;
+  tierRequired: string | null;
+}
+
+export interface DeviceProfile {
+  os: string; // darwin-arm64
+  accel: "metal" | "cuda" | "cpu";
+  ramGB: number;
+  gpu: { vendor: string | null; vramGB: number | null };
+  diskFreeGB: number | null;
+  tier: "entry" | "standard" | "high" | "flagship";
+  canInstall: string[];
+  cannotInstall: DeviceCannotInstall[];
+  fits: Record<string, EngineFit>;
+  probedAt: string; // 服务启动时探测的缓存时间戳
+}
+
 export type PanelId =
   | "home"
   | "read"

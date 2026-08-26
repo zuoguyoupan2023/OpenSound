@@ -4,6 +4,7 @@
   "label": "Qwen2.5-0.5B-Instruct（默认 · 兜底）",
   "sizeHint": "~469MB",
   "license": "Apache-2.0 / Qwen 研究许可（GGUF 转换）",
+  "profile": { "diskGB": 0.49, "memNeedGB": 4, "accel": "any", "tierRequired": "entry" },
   "checks": [
     { "type": "file", "path": "models/llm/qwen2.5-0.5b-instruct-q4_k_m.gguf", "bytes": 491400032 }
   ],

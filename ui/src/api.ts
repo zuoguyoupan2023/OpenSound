@@ -1,4 +1,4 @@
-import type { HealthInfo, ModelInfo, InstallProgress } from "./types";
+import type { HealthInfo, ModelInfo, InstallProgress, DeviceProfile } from "./types";
 import { invoke } from "@tauri-apps/api/core";
 
 // 后端基地址（Tabu-Local 服务，端口约定 9528，与 Tabu-AI 一致）
@@ -157,6 +157,11 @@ export async function getHealth(): Promise<HealthInfo> {
 export async function getModels(): Promise<ModelInfo[]> {
   const r = await jfetch<{ models: ModelInfo[] }>("/models");
   return r.models;
+}
+
+// 设备画像（000-device-vs-model.md §四：4.1 接口，服务启动时探测一次并缓存）
+export async function getDeviceProfile(): Promise<DeviceProfile> {
+  return jfetch<DeviceProfile>("/device-profile");
 }
 
 // ---------- 识别 ASR ----------

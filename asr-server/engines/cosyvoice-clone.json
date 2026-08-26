@@ -4,6 +4,7 @@
   "label": "CosyVoice3 语音克隆（0.5B · MPS）",
   "sizeHint": "~4.4GB 必需（全量目录 ~9GB，非必需文件见 optionalFiles）",
   "license": "Apache-2.0",
+  "profile": { "diskGB": 9, "memNeedGB": 4, "accel": "any", "tierRequired": "standard", "slowNote": { "metal": "Mac 上克隆约 1:1 语速（RTF 0.5–1.5，慢速可用，001 §7.1）", "cpu": "CPU 上速度不可期，建议 N 卡或 Apple Silicon（000 §3.3）" } },
   "checks": [
     { "type": "file", "path": "models/cosyvoice/Fun-CosyVoice3-0.5B/llm.pt", "bytes": 2024669519 },
     { "type": "file", "path": "models/cosyvoice/Fun-CosyVoice3-0.5B/flow.pt", "bytes": 1329116148 },

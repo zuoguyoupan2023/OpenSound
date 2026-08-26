@@ -8,7 +8,8 @@
     "@huggingface/transformers": "^4.2.0",
     "node-llama-cpp": "^3.19.1",
     "sherpa-onnx-darwin-arm64": "^1.13.4",
-    "sherpa-onnx-node": "^1.13.4"
+    "sherpa-onnx-node": "^1.13.4",
+    "systeminformation": "^5.33.4"
   },
   "optionalDependencies": {
     "sherpa-onnx": "^1.13.4"

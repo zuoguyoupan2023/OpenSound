@@ -4,6 +4,7 @@
   "label": "Whisper base（多语兜底）",
   "sizeHint": "~150MB（q8，随 MODEL_SIZE 档位变化）",
   "license": "MIT（OpenAI Whisper，onnx-community 转换版）",
+  "profile": { "diskGB": 0.5, "memNeedGB": null, "accel": "any", "tierRequired": "entry" },
   "checks": [
     { "type": "glob", "pattern": "models/hf/onnx-community/whisper-*" }
   ],
