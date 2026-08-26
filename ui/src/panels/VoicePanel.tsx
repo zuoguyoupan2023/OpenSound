@@ -13,7 +13,7 @@ import {
 } from "../voiceStore";
 import type { AudioRecord } from "../audioStore";
 import { saveRecording } from "../audioStore";
-import { speakStream, transcribe } from "../api";
+import { speakStream, transcribe, getPersistedSettings } from "../api";
 import { createFramePlayer, stopAudio, type FramePlayer } from "../audio";
 import { Panel, Button, Spinner } from "../components/ui";
 
@@ -40,7 +40,7 @@ function friendlyError(e: unknown): string {
   return msg;
 }
 
-export default function VoicePanel(_props: PanelProps) {
+export default function VoicePanel(props: PanelProps) {
   const [voices, setVoices] = useState<CloneVoice[]>([]);
   const [samples, setSamples] = useState<AudioRecord[]>([]);
   const [showCreate, setShowCreate] = useState(false);
@@ -228,6 +228,11 @@ export default function VoicePanel(_props: PanelProps) {
 
   const selectedSample = samples.find((s) => s.id === sampleId);
 
+  // 030：节能模式下克隆引擎未启用时给出明确提示（克隆音色朗读必须切换克隆模型）
+  const settings = getPersistedSettings();
+  const ecoNoClone = settings.powerMode === "eco" && settings.ecoBig !== "cosyvoice";
+  const cosyReady = props.health?.tts.cosyvoice === "reachable";
+
   return (
     <Panel
       title="音色管理"
@@ -238,6 +243,41 @@ export default function VoicePanel(_props: PanelProps) {
         </Button>
       }
     >
+      {ecoNoClone && (
+        <div className="eco-clone-tip">
+          <Icon icon="lucide:leaf" width={15} height={15} />
+          <div>
+            <b>节能模式下未启用克隆引擎：克隆并使用自定义音色需要切换到下列模型：</b>
+            <ul>
+              <li>
+                CosyVoice 克隆（Fun-CosyVoice3-0.5B · 常驻 4–6GB · 冷启动 1–2 分钟）
+              </li>
+            </ul>
+            请到
+            <button className="link-btn" onClick={() => props.goSettings?.("power-mode")}>
+              设置 → 服务资源模式
+            </button>
+            选择「CosyVoice 克隆」并应用。
+          </div>
+        </div>
+      )}
+
+      {/* 030：当前可用的克隆音色模型（引擎）状态 */}
+      <div className="clone-engine-line">
+        <Icon icon="lucide:server" width={13} height={13} />
+        克隆引擎：<b>CosyVoice3</b>（Fun-CosyVoice3-0.5B）
+        {cosyReady ? (
+          <span className="badge fit-ok" style={{ marginLeft: 8 }}>
+            <Icon icon="lucide:circle-check" width={11} height={11} /> 运行中
+          </span>
+        ) : (
+          <span className="badge fit-no" style={{ marginLeft: 8 }}>
+            <Icon icon="lucide:circle-x" width={11} height={11} /> 未就绪
+            {ecoNoClone ? "（节能模式未启用）" : "（服务加载中/未启动）"}
+          </span>
+        )}
+      </div>
+
       <div className="voice-banner">
         克隆音色由本地 CosyVoice3 引擎生成。新建时从音频库选一段已标记为「
         作样本」的录音，即可生成可复用的克隆音色。

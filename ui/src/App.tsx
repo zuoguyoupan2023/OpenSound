@@ -50,6 +50,10 @@ export interface PanelProps {
   status: ServiceStatus;
   /** 面板间跳转（如朗读面板「在音频库中查看」） */
   goPanel?: (id: PanelId) => void;
+  /** 跳到设置页并滚动定位到指定区块（030：资源模式区 "power-mode"） */
+  goSettings?: (anchor?: string) => void;
+  settingsAnchor?: string | null;
+  clearSettingsAnchor?: () => void;
 }
 
 function App() {
@@ -57,6 +61,8 @@ function App() {
   const [health, setHealth] = useState<HealthInfo | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [panel, setPanel] = useState<PanelId>("home");
+  // 030：跳到设置页时携带的定位锚点（如 "power-mode" 资源模式区）
+  const [settingsAnchor, setSettingsAnchor] = useState<string | null>(null);
 
   const refreshHealth = async () => {
     try {
@@ -121,6 +127,13 @@ function App() {
     refresh: refreshHealth,
     status,
     goPanel: setPanel,
+    goSettings: (anchor) => {
+      // 时间戳 tick：即使锚点相同，重复点击也强制触发 SettingsPanel 的定位 effect
+      setSettingsAnchor(`${Date.now()}:${anchor || ""}`);
+      setPanel("settings");
+    },
+    settingsAnchor,
+    clearSettingsAnchor: () => setSettingsAnchor(null),
   };
 
   const renderPanel = () => {

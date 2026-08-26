@@ -204,6 +204,10 @@ export default function ReadPanel(props: PanelProps) {
                   : [{ value: "", label: "（无克隆音色，请先到「音色管理」新建）" }]
               }
             />
+            {/* 030：选音色旁直达「音色管理」，管理克隆音色与克隆引擎 */}
+            <Button variant="ghost" onClick={() => props.goPanel?.("voices")}>
+              <Icon icon="lucide:mic-vocal" width={14} height={14} /> 克隆音色
+            </Button>
             {!cloneReady && <span className="muted">（克隆服务未就绪）</span>}
           </>
         )}

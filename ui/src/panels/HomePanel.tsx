@@ -1,10 +1,12 @@
 import { useRef, useState } from "react";
 import type { PanelProps } from "../App";
 import { Icon } from "@iconify/react";
-import { voiceChat } from "../api";
+import { voiceChat, updateSettings, getPersistedSettings, type PowerMode } from "../api";
 import { createRecorder, type Recorder, playWav, stopAudio } from "../audio";
 import { saveRecording, saveTts } from "../audioStore";
 import { Panel, Button, EngineBadge, Select, Spinner } from "../components/ui";
+import { showToast } from "../toast";
+import { invoke } from "@tauri-apps/api/core";
 
 type Stage = "idle" | "recording" | "processing" | "speaking" | "done";
 
@@ -21,6 +23,30 @@ export default function HomePanel(props: PanelProps) {
   } | null>(null);
   const [error, setError] = useState<string>("");
   const recRef = useRef<Recorder | null>(null);
+  // 030：工作台资源模式快捷开关（初始值从持久化设置读取）
+  const [powerMode, setPowerMode] = useState<PowerMode>(
+    () => getPersistedSettings().powerMode || "full"
+  );
+
+  // 030：切换节能/全能 → 持久化 + 重启服务生效
+  const switchPowerMode = async (m: PowerMode) => {
+    if (m === powerMode) return;
+    const ok = window.confirm(
+      m === "eco"
+        ? "切换到节能模式：关闭全部大模型（Qwen3 TTS / 克隆 / 原始版），仅保留最小集（识别 + Kokoro 朗读 + 0.5B 对话）。需要重启本地服务，继续？"
+        : "切换到全能模式：重新拉起全部模型（约占 12–16GB 内存）。需要重启本地服务，继续？"
+    );
+    if (!ok) return;
+    setPowerMode(m);
+    try {
+      await updateSettings({ powerMode: m });
+      await invoke("start_service_cmd");
+      showToast(`已切换到${m === "eco" ? "节能" : "全能"}模式，服务重启中…`);
+      setTimeout(() => props.refresh(), 800);
+    } catch (e) {
+      showToast("切换失败: " + e);
+    }
+  };
 
   const kokoroReady = props.health?.tts.kokoro === "ready";
   const qwen3Ready = props.health?.tts.qwen3 === "reachable";
@@ -81,11 +107,34 @@ export default function HomePanel(props: PanelProps) {
       title="语音工作台"
       subtitle="说 → 想 → 读，一键完成本地语音对话闭环"
       actions={
-        stage !== "idle" && (
-          <Button variant="danger" onClick={cancel}>
-            取消
-          </Button>
-        )
+        <>
+          <div className="power-switch" title="服务资源模式（030 规划）">
+            <button
+              className={`cap ${powerMode === "full" ? "on" : ""}`}
+              onClick={() => switchPowerMode("full")}
+            >
+              全能
+            </button>
+            <button
+              className={`cap ${powerMode === "eco" ? "on" : ""}`}
+              onClick={() => switchPowerMode("eco")}
+            >
+              节能
+            </button>
+            <button
+              className="cap-detail"
+              title="设置 → 服务资源模式"
+              onClick={() => props.goSettings?.("power-mode")}
+            >
+              <Icon icon="lucide:info" width={14} height={14} /> 详情
+            </button>
+          </div>
+          {stage !== "idle" && (
+            <Button variant="danger" onClick={cancel}>
+              取消
+            </Button>
+          )}
+        </>
       }
     >
       <div className="home-big">

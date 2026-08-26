@@ -36,6 +36,19 @@ export default function SettingsPanel(props: PanelProps) {
   const [applyingMode, setApplyingMode] = useState(false);
   const [modeMsg, setModeMsg] = useState("");
 
+  // 030：从工作台「详情」跳入时，滚动定位到资源模式区并短暂高亮
+  useEffect(() => {
+    const anchor = props.settingsAnchor?.split(":")[1];
+    if (anchor !== "power-mode") return;
+    const el = document.getElementById("power-mode-section");
+    el?.scrollIntoView({ behavior: "smooth", block: "start" });
+    el?.classList.add("anchor-flash");
+    const t = setTimeout(() => el?.classList.remove("anchor-flash"), 1800);
+    props.clearSettingsAnchor?.();
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.settingsAnchor]);
+
   // 自动保存控制：载入完成后才启用；与上次已保存快照相同则跳过
   const loadedRef = useRef(false);
   const savedSnapshotRef = useRef("");
@@ -156,7 +169,7 @@ export default function SettingsPanel(props: PanelProps) {
         </Button>
       }
     >
-      <div className="settings-block">
+      <div className="settings-block" id="power-mode-section">
         <div className="settings-item">
           <label className="settings-label">服务资源模式（030 规划）</label>
           <div className="mode-radio-row">
