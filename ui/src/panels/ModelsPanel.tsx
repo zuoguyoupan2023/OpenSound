@@ -50,28 +50,46 @@ export default function ModelsPanel(props: PanelProps) {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
   }, [progress.length]);
 
-  const install = async (m: ModelInfo) => {
+  const install = async (m: ModelInfo, confirmBigDownload = false) => {
     if (installing) return;
     setInstalling(m.engine);
     setProgress([]);
     setPct(null);
+    const onProgress = (p: InstallProgress) => {
+      if (p.type === "progress") {
+        setPct({ received: p.received || 0, total: p.total || 0 });
+      } else if (p.type === "log" && /已存在，跳过/.test(p.message || "")) {
+        /* 静默跳过行不进日志 */
+      } else {
+        setProgress((prev) => [...prev, p]);
+      }
+    };
     try {
-      await installModel(
-        m.engine,
-        (p) => {
-          if (p.type === "progress") {
-            setPct({ received: p.received || 0, total: p.total || 0 });
-          } else if (p.type === "log" && /已存在，跳过/.test(p.message || "")) {
-            /* 静默跳过行不进日志 */
-          } else {
-            setProgress((prev) => [...prev, p]);
-          }
-        },
-        { mirror: mirrorPick[m.engine] }
-      );
+      await installModel(m.engine, onProgress, { mirror: mirrorPick[m.engine], confirmBigDownload });
       await props.refresh();
     } catch (e) {
-      setProgress((prev) => [...prev, { type: "error", message: String(e) }]);
+      const msg = String(e);
+      // S5：后端要求大流量下载二次确认（目前仅 cosyvoice-clone 的缺失权重）
+      const mConfirm = /BIG_DOWNLOAD_CONFIRM:([\d.]+GB)/.exec(msg);
+      if (mConfirm && !confirmBigDownload) {
+        const ok = window.confirm(
+          `「${m.label}」缺失的模型权重需额外下载约 ${mConfirm[1]}（视网速可能耗时较长），\n确认开始自动下载？\n（取消则可按文档手动放置权重后重试）`
+        );
+        if (ok) {
+          setProgress((prev) => [
+            ...prev,
+            { type: "log", message: `已确认，开始下载（约 ${mConfirm[1]}）…` },
+          ]);
+          await install(m, true); // 二次确认后带 confirm=1 重试
+          return;
+        }
+        setProgress((prev) => [
+          ...prev,
+          { type: "log", message: "已取消大流量下载；可按 005 文档手动下载权重到 models/cosyvoice/ 后重试。" },
+        ]);
+      } else {
+        setProgress((prev) => [...prev, { type: "error", message: msg }]);
+      }
     } finally {
       setInstalling(null);
       setPct(null);

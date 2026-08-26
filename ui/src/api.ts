@@ -313,10 +313,11 @@ export async function voiceChat(
 export async function installModel(
   engine: string,
   onProgress: (p: InstallProgress) => void,
-  opts?: { mirror?: string; signal?: AbortSignal }
+  opts?: { mirror?: string; signal?: AbortSignal; confirmBigDownload?: boolean }
 ): Promise<void> {
   const q = new URLSearchParams({ engine });
   if (opts?.mirror) q.set("mirror", opts.mirror);
+  if (opts?.confirmBigDownload) q.set("confirm", "1"); // S5：大流量下载的二次确认回执
   const res = await fetch(
     `${getBaseUrl()}/install-model?${q.toString()}`,
     authHeaders({ method: "POST", signal: opts?.signal })

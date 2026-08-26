@@ -23,6 +23,6 @@
   ],
   "install": {
     "kind": "legacy",
-    "note": "S4 全自举链：源码 vendored / clone 兜底 / venv 自建 / 模型校验"
+    "note": "S4 全自举链：源码 vendored / clone 兜底 / venv 自建 / 模型校验；S5：缺失权重支持自动下载（hf-mirror→huggingface 多镜像 + .part 续传），需 UI 二次确认大流量（confirm=1）"
   }
 }

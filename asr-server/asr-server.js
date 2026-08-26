@@ -26,7 +26,7 @@ const MODEL_SIZE = process.env.ASR_MODEL_SIZE || 'base'; // tiny | base | small 
 const ASR_ENGINE = (process.env.ASR_ENGINE || 'auto').toLowerCase(); // auto | sensevoice | whisper —— 选择默认识别模型
 // asr-server 架构版本：2.x = 含 sensevoice-original + VAD + 标点。
 // 供 start-all.js 探测时判断 9528 上是否旧进程（旧代码无此字段/不同版本 → 视为残留，终止后重启）。
-const SERVER_VERSION = '2.4.0'; // 2.3.0 = S2：engines/*.json 清单 + /models 就绪明细 + 多镜像通用下载器
+const SERVER_VERSION = '2.5.0'; // 2.4.0 = S4：cosyvoice-clone 全自举链；2.5.0 = S5：缺失权重自动下载（前端二次确认）
 const WHISPER_MODEL = `onnx-community/whisper-${MODEL_SIZE}`;
 
 // 模型缓存目录
@@ -1131,6 +1131,38 @@ function manifestUrlMultiInstaller(mf) {
 
 mkdirSync(LLM_DIR, { recursive: true }); // 供 LLM 模型落盘
 
+// S5：CosyVoice3 必需权重的下载规格（bytes 与 engines/cosyvoice-clone.json 的 checks 保持一致）
+const CV_MODEL_SUBDIR = 'models/cosyvoice/Fun-CosyVoice3-0.5B';
+const CV_WEIGHTS = {
+  'llm.pt': { bytes: 2024669519 },
+  'flow.pt': { bytes: 1329116148 },
+  'hift.pt': { bytes: 83202622 },
+  'speech_tokenizer_v3.onnx': { bytes: 969451503 },
+  'campplus.onnx': { bytes: 28303423 },
+  'cosyvoice3.yaml': { bytes: 6934 },
+};
+const cvWeightSpec = (name) => ({
+  file: `${CV_MODEL_SUBDIR}/${name}`,
+  bytes: CV_WEIGHTS[name].bytes,
+  mirrors: [
+    { name: 'hf-mirror', url: `https://hf-mirror.com/FunAudioLLM/Fun-CosyVoice3-0.5B/resolve/main/${name}` },
+    { name: 'huggingface', url: `https://huggingface.co/FunAudioLLM/Fun-CosyVoice3-0.5B/resolve/main/${name}` },
+  ],
+});
+
+// ─────────────────────────────────────────────────────────────
+// 【新增模型接入约定 · 必读】（S5 起，本区域顶部常驻）
+// 未来在 INSTALLERS 里注册任何新模型/引擎时，都必须做到"开箱即用"：
+//   1. 用户点击「安装」→ 自动下载权重文件等全部必要文件，
+//      下载完成即启用对应服务，不允许再要求用户手动去外网找文件放置；
+//   2. 大流量（约 >1GB）必须走二次确认：安装器首调检测到大流量缺失时
+//      抛 BIG_DOWNLOAD_CONFIRM:<大小>:<文件清单> 标记，前端弹确认框，
+//      用户同意后带 confirm=1 重试才真正下载（参照下方 cosyvoice-clone 的 S5 实现）；
+//   3. 下载一律复用 downloadOneFile：多镜像自动换源 + .part 断点续传 + 可取消；
+//   4. 下载完成后逐文件做字节数校验，并把体积/内存需求同步登记到
+//      engines/<engine>.json 与文档 000-device-vs-model.md；
+//   5. 确有无法自动化的例外（体积超大/合规限制），须在 UI 明示原因并保留手动兜底指引。
+// ─────────────────────────────────────────────────────────────
 const INSTALLERS = {
   kokoro: runDownload(process.execPath, ['download-kokoro.js']),
   sensevoice: runDownload(process.execPath, ['asr-server-download.js']),
@@ -1149,6 +1181,9 @@ const INSTALLERS = {
   // ③ venv：.venv-cosyvoice/bin/python3 缺失 → 自动 python3 -m venv + pip install -r requirements-cosyvoice.lock
   // ④ 模型：必需权重逐项校验（S4 源码甄别：llm.pt/flow.pt/hift.pt/speech_tokenizer_v3.onnx/campplus.onnx/yaml，
   //    llm.rl.pt/.batch.onnx/fp32.onnx 为非必需，不校验不下载）
+  //    S5：缺失权重支持自动下载 —— 走 downloadOneFile 多镜像（hf-mirror→huggingface）+ .part 断点续传；
+  //        因属大流量（约 4.4GB），首次调用不带 opts.confirmBigDownload 时仅返回 BIG_DOWNLOAD_CONFIRM 标记，
+  //        由前端弹二次确认后带 confirm=1 重试才真正下载。
   'cosyvoice-clone': async (ctx, opts = {}) => {
     const modelDir = path.join(__dirname, 'models', 'cosyvoice', 'Fun-CosyVoice3-0.5B');
     const vendorDir = path.join(__dirname, 'vendor', 'cosyvoice');
@@ -1156,11 +1191,26 @@ const INSTALLERS = {
     const keyFiles = ['llm.pt', 'flow.pt', 'hift.pt', 'speech_tokenizer_v3.onnx', 'campplus.onnx', 'cosyvoice3.yaml'];
     const missing = keyFiles.filter((f) => !existsSync(path.join(modelDir, f)));
     if (missing.length) {
-      ctx.nd({ type: 'log', message: `模型文件缺失: ${missing.join(', ')}` });
-      ctx.nd({ type: 'log', message: `权重请从 HF/魔搭下载到: ${modelDir}（必需 ${keyFiles.length} 个文件约 4.4GB；llm.rl.pt 等非必需勿下）` });
-      throw new Error('CosyVoice 模型不完整（大模型不自动下载，见上方下载指引）');
+      const totalBytes = missing.reduce((s, f) => s + (CV_WEIGHTS[f]?.bytes || 0), 0);
+      const gb = (totalBytes / 1e9).toFixed(1);
+      // S5：未确认 → 抛标记给前端做二次确认（不在后端静默吞掉大流量）
+      if (!opts.confirmBigDownload) {
+        ctx.nd({ type: 'log', message: `检测到缺失必需权重 ${missing.length} 项（合计约 ${gb}GB）` });
+        ctx.nd({ type: 'log', message: `等待确认后自动下载；也可按 005 文档手动放置到: ${modelDir}` });
+        throw new Error(`BIG_DOWNLOAD_CONFIRM:${gb}GB:${missing.join(',')}`);
+      }
+      ctx.nd({ type: 'log', message: `已确认大流量下载（约 ${gb}GB），开始拉取缺失权重 ${missing.length} 项…` });
+      for (const f of missing) {
+        await downloadOneFile(cvWeightSpec(f), ctx, opts);
+        const got = statSync(path.join(modelDir, f)).size;
+        if (CV_WEIGHTS[f].bytes && got !== CV_WEIGHTS[f].bytes)
+          ctx.nd({ type: 'log', message: `⚠️ ${f} 大小不符（期望 ${CV_WEIGHTS[f].bytes} / 实际 ${got}），建议删除该文件后重新安装` });
+        else
+          ctx.nd({ type: 'log', message: `✓ ${f} 就位（字节数校验通过）` });
+      }
+    } else {
+      ctx.nd({ type: 'log', message: '模型文件完整 ✓（必需项 4.4GB）' });
     }
-    ctx.nd({ type: 'log', message: '模型文件完整 ✓（必需项 4.4GB）' });
 
     // ① 源码：vendor 优先
     if (!existsSync(path.join(srcDir, 'cosyvoice', 'cli', 'cosyvoice.py'))) {
@@ -1500,6 +1550,8 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'POST' && url.pathname === '/install-model') {
     const engine = (url.searchParams.get('engine') || '').toLowerCase();
     const mirror = url.searchParams.get('mirror') || undefined;
+    // S5：confirm=1 表示用户已在 UI 二次确认大流量下载（目前仅 cosyvoice-clone 使用）
+    const confirmBigDownload = ['1', 'true', 'yes'].includes((url.searchParams.get('confirm') || '').toLowerCase());
     const installer = INSTALLERS[engine];
     if (!installer) return send(400, { error: '未知模型: ' + engine + '（支持 ' + Object.keys(INSTALLERS).join(' / ') + '）' });
     if (installLock.active) return send(409, { error: '已有安装任务进行中，请稍后再试' });
@@ -1508,7 +1560,7 @@ const server = http.createServer(async (req, res) => {
     res.flushHeaders();
     const ctx = { nd: (obj) => { try { res.write(JSON.stringify(obj) + '\n'); } catch (e) {} } };
     try {
-      await installer(ctx, { mirror });
+      await installer(ctx, { mirror, confirmBigDownload });
       // LLM 模型下载完成后清空加载缓存，下次对话无需重启即可直接加载新模型
       if (LLM_MODELS[engine]) llmInvalidate();
     } catch (e) {
