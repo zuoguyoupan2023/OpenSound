@@ -1060,26 +1060,28 @@ pub fn run() {
             migrate_legacy_config(&handle);
             // 加载 asr-server 路径配置到 state
             *state.server_path.lock().unwrap() = load_config(&handle).server_path;
-            // 032 运行时预检：node / 服务依赖缺失时 App 内自动自举（进度事件驱动 UI 引导条），
-            // 已就绪则直接启动服务。
-            let need_bootstrap = {
+            // 032 运行时预检（P2 拍板：启动只检测、不自动安装）：
+            // 环境就绪（node + 依赖）→ 直接启动服务；不完整 → 不装任何东西，
+            // 等用户在 UI 引导条点「一键安装」才执行（install_runtime）。
+            let ready = {
                 let sys_node = find_node().is_some();
                 let deps = server_dir(&handle, &state).map(|d| deps_ready(&d)).unwrap_or(false);
-                !(sys_node && deps)
+                sys_node && deps
             };
-            if need_bootstrap {
-                let h2 = handle.clone();
-                eprintln!("[opensound] 运行环境不完整，自动执行 App 内自举…");
-                tauri::async_runtime::spawn(async move {
-                    if let Err(e) = install_runtime_plain(h2, state.clone()).await {
-                        eprintln!("[opensound] 运行时自举失败: {e}");
-                    }
-                });
-            } else {
+            if ready {
                 match start_service(&handle, &state) {
                     Ok(()) => {}
-                    Err(e) => eprintln!("[opensound] 启动服务失败: {e}"),
+                    Err(e) => {
+                        eprintln!("[opensound] 启动服务失败: {e}");
+                        let _ = handle.emit("runtime-progress", RuntimeProgress {
+                            step: "error".to_string(),
+                            message: format!("服务启动失败：{e}"),
+                            pct: None,
+                        });
+                    }
                 }
+            } else {
+                eprintln!("[opensound] 运行环境不完整（node/依赖缺一），等待用户在界面点击「一键安装」");
             }
             setup_tray(&handle)?;
 

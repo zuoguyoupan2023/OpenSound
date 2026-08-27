@@ -92,6 +92,12 @@ function run(cmd, args, name, env = {}) {
   const p = spawn(cmd, args, { stdio: 'inherit', cwd: __dirname, env: { ...process.env, ...MANAGED_ENV, ...env } });
   children.add(p);
   p.on('exit', (code) => { children.delete(p); console.log(`[start-all] ${name} 退出 (code=${code})`); });
+  // 032 Win 适配：可执行文件不存在（如 .venv-* 缺失）时 spawn 触发 error 而非 exit；
+  // 不监听会导致 uncaught exception 把 start-all（连带 9528）一起带崩。这里打印并跳过该服务。
+  p.on('error', (e) => {
+    children.delete(p);
+    console.error(`[start-all] ${name} 启动失败（${e.message}）——已跳过该服务，asr-server(9528) 不受影响`);
+  });
   return p;
 }
 
