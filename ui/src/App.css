@@ -1524,3 +1524,30 @@ textarea:focus,
   opacity: 1;
   transform: translateX(-50%) translateY(0);
 }
+
+/* ---------- 032 运行时自举引导条 ---------- */
+.runtime-banner { background: linear-gradient(135deg, #fff7e6, #fff); border: 1px solid #f0c36d; border-radius: 10px; padding: 12px 16px; margin-bottom: 14px; display: flex; flex-direction: column; gap: 10px; }
+.runtime-banner.busy { background: #f6f8fb; border-color: #b8c4d4; }
+.rb-main { display: flex; align-items: center; gap: 12px; }
+.rb-text { flex: 1; min-width: 0; }
+.rb-title { font-weight: 600; font-size: 14px; }
+.rb-sub { color: #8a6d3b; font-size: 12px; margin-top: 2px; }
+.rb-btn { display: inline-flex; align-items: center; gap: 6px; background: #d97706; color: #fff; border: none; border-radius: 8px; padding: 8px 16px; font-size: 13px; cursor: pointer; font-weight: 600; white-space: nowrap; }
+.rb-btn:hover { background: #b45309; }
+.rb-hint { color: #64748b; font-size: 12px; white-space: nowrap; }
+.rb-bar { height: 6px; background: #e5e7eb; border-radius: 3px; overflow: hidden; }
+.rb-fill { height: 100%; background: #d97706; transition: width 0.3s; }
+.rb-busy-icon { animation: rb-spin 1.2s linear infinite; }
+@keyframes rb-spin { to { transform: rotate(360deg); } }
+
+/* ---------- 032 设置页：环境与运行时区块 ---------- */
+.runtime-list { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.runtime-list li { font-size: 13px; color: #334155; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.runtime-list li.ok { color: #15803d; }
+.runtime-list li.bad { color: #b91c1c; font-weight: 600; }
+.runtime-list li.muted { color: #64748b; }
+.runtime-list li em { color: #475569; font-style: normal; }
+.runtime-list li code { background: #f1f5f9; border-radius: 4px; padding: 1px 6px; font-size: 12px; color: #0f172a; word-break: break-all; }
+.runtime-log { margin-top: 10px; background: #0f172a; color: #e2e8f0; border-radius: 8px; padding: 8px 12px; font-size: 12px; max-height: 140px; overflow-y: auto; font-family: "Cascadia Code", Consolas, monospace; }
+.runtime-log-line { padding: 1px 0; white-space: pre-wrap; word-break: break-all; }
+.runtime-log-line.err { color: #fca5a5; }

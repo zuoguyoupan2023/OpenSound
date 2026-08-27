@@ -1,5 +1,6 @@
 import type { HealthInfo, ModelInfo, InstallProgress, DeviceProfile } from "./types";
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 // 后端基地址（OpenSound 服务，端口约定 9528，与 Tabu-AI 一致）
 // 设置统一存放在 config.json 的 ui 节（Rust 侧），启动时载入内存缓存；
@@ -170,6 +171,26 @@ export async function getHealth(): Promise<HealthInfo> {
 export async function getModels(): Promise<ModelInfo[]> {
   const r = await jfetch<{ models: ModelInfo[] }>("/models");
   return r.models;
+}
+
+// ---------- P1 模型清单本地化（不依赖 9528 服务） ----------
+export interface CatalogModel {
+  category: string;
+  engine: string;
+  label: string;
+  size: string;
+  license: string;
+  install?: { kind: "script" | "url-multi" | "hint" | "legacy"; mirrors: string[] } | null;
+}
+
+// 本地读 asr-server/engines/*.json → 可下载清单（服务离线也能显示）
+export async function getModelsCatalog(): Promise<CatalogModel[]> {
+  return invoke<CatalogModel[]>("get_models_catalog");
+}
+
+// 本机磁盘剩余（本地探测，不依赖 9528）
+export async function getDiskLocal(): Promise<number> {
+  return invoke<number>("get_disk_local");
 }
 
 // 设备画像（000-device-vs-model.md §四：4.1 接口，服务启动时探测一次并缓存）
@@ -380,6 +401,43 @@ export async function cancelInstall(): Promise<void> {
 // 磁盘剩余空间
 export async function getDisk(): Promise<{ availBytes: number | null }> {
   return jfetch<{ availBytes: number | null }>("/disk");
+}
+
+// ---------- 032 运行时自举（App 内一键安装 node/依赖；字段随 Rust check_runtime 同步） ----------
+export interface RuntimeStatus {
+  node_ok: boolean;
+  node_path: string;
+  node_version: string;
+  runtime_node: string;
+  sys_node_found: boolean;
+  python_found: boolean;
+  python_version: string;
+  deps_ready: boolean;
+  data_dir: string;
+  server_dir: string;
+}
+
+// 安装步骤事件：{ step: node-download | deps | done | error, message, pct? }
+export interface RuntimeProgress {
+  step: string;
+  message: string;
+  pct?: number | null;
+}
+
+export async function checkRuntime(): Promise<RuntimeStatus> {
+  return invoke<RuntimeStatus>("check_runtime");
+}
+
+// 触发 App 内一键自举（node 缺失时自动下载便携版 + npm ci 装依赖 + 拉起服务）；
+// 进度通过 listenRuntimeProgress 事件流接收
+export async function installRuntime(): Promise<void> {
+  await invoke("install_runtime");
+}
+
+export async function listenRuntimeProgress(
+  cb: (p: RuntimeProgress) => void
+): Promise<UnlistenFn> {
+  return listen<RuntimeProgress>("runtime-progress", (e) => cb(e.payload));
 }
 
 // ---------- 启动中状态判定（030 资源模式：按模式+用户选择应启动，但服务尚未加载完成） ----------

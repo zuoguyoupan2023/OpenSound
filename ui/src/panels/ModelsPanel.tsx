@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { PanelProps } from "../App";
 import { Icon } from "@iconify/react";
-import { cancelInstall, getDisk, getDeviceProfile, installModel, getPersistedSettings } from "../api";
+import { cancelInstall, getDisk, getDiskLocal, getDeviceProfile, installModel, getPersistedSettings } from "../api";
 import type { DeviceProfile, EngineFit, InstallProgress, ModelInfo } from "../types";
 import { Panel, Button, Spinner } from "../components/ui";
 
@@ -39,13 +39,14 @@ const ACCEL_LABEL: Record<string, string> = {
 // 入门档默认推荐的轻量组合（000-device-vs-model.md 4.3-③：SenseVoice + Kokoro + 轻量 LLM）
 const STARTER_ENGINES = ["sensevoice", "kokoro", "llm-0.5b"];
 
-// 五态 → 徽标文案与样式类
+// 五态 → 徽标文案与样式类（P1：unknown = 服务未启动时的本地清单占位）
 const STATE_META: Record<string, { label: string; cls: string; icon: string }> = {
   running: { label: "运行中", cls: "ok", icon: "lucide:circle-check" },
   ready: { label: "就绪 · 未运行", cls: "info", icon: "lucide:circle-dot" },
   "partial-files": { label: "缺文件", cls: "warn", icon: "lucide:file-warning" },
   "missing-runtime": { label: "缺环境", cls: "warn", icon: "lucide:package-x" },
   incomplete: { label: "缺文件 + 缺环境", cls: "fail", icon: "lucide:triangle-alert" },
+  unknown: { label: "服务未启动", cls: "warn", icon: "lucide:circle-dot" },
 };
 
 export default function ModelsPanel(props: PanelProps) {
@@ -63,7 +64,14 @@ export default function ModelsPanel(props: PanelProps) {
   const logRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    getDisk().then((d) => setDiskAvail(d.availBytes)).catch(() => {});
+    // P1：磁盘剩余走本地探测（不依赖服务）；服务在线则永远有值，离线也能显示
+    getDiskLocal()
+      .then((b) => setDiskAvail(b))
+      .catch(() => {
+        getDisk()
+          .then((d) => setDiskAvail(d.availBytes))
+          .catch(() => {});
+      });
     getDeviceProfile().then(setDevice).catch(() => setDevice(null));
   }, []);
   useEffect(() => {
@@ -408,7 +416,11 @@ export default function ModelsPanel(props: PanelProps) {
                   </select>
                 )}
 
-                {!needFix(m) ? (
+                {stateOf(m) === "unknown" ? (
+                  <Button disabled title="请先启动本地服务（侧边栏「启动」或顶部引导条「一键安装」）">
+                    <Icon icon="lucide:power" width={14} height={14} /> 启动服务后安装
+                  </Button>
+                ) : !needFix(m) ? (
                   <span className={`badge ${st.cls}`}>
                     <Icon icon={st.icon} width={13} height={13} /> {st.label}
                   </span>

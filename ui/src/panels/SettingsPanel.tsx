@@ -275,6 +275,57 @@ export default function SettingsPanel(props: PanelProps) {
           {pathMsg && <p className="settings-msg">{pathMsg}</p>}
         </div>
 
+        <div className="settings-block">
+          <div className="settings-item">
+            <label className="settings-label">环境与运行时（032 · App 内一键自举）</label>
+            {props.runtime ? (
+              <ul className="runtime-list">
+                <li className={props.runtime.node_ok ? "ok" : "bad"}>
+                  {props.runtime.node_ok ? "✅ Node.js 就绪" : "❌ 缺少 Node.js"}
+                  {props.runtime.node_version && <em>（{props.runtime.node_version}）</em>}
+                  {props.runtime.node_path && <code>{props.runtime.node_path}</code>}
+                </li>
+                <li className={props.runtime.deps_ready ? "ok" : "bad"}>
+                  {props.runtime.deps_ready
+                    ? "✅ 服务端依赖已就绪"
+                    : "❌ 服务端依赖缺失（node_modules 未安装）"}
+                </li>
+                <li className={props.runtime.python_found ? "ok" : "muted"}>
+                  {props.runtime.python_found
+                    ? `✅ Python ${props.runtime.python_version}`
+                    : "ℹ️ 未检测到 Python（仅 python 系引擎需要，后续由 App 内自动安装）"}
+                </li>
+                <li>数据目录：<code>{props.runtime.data_dir || "未定位"}</code></li>
+                <li>服务目录：<code>{props.runtime.server_dir || "未定位"}</code></li>
+              </ul>
+            ) : (
+              <p className="settings-hint">运行环境检测中…</p>
+            )}
+
+            {props.runtimeLogs.length > 0 && (
+              <div className="runtime-log">
+                {props.runtimeLogs.slice(-3).map((l, i) => (
+                  <div key={i} className={`runtime-log-line ${l.step === "error" ? "err" : ""}`}>
+                    {l.message}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div style={{ marginTop: 10 }}>
+              <Button
+                onClick={props.onInstallRuntime}
+                disabled={props.runtimeInstalling || !!(props.runtime?.node_ok && props.runtime?.deps_ready)}
+              >
+                {props.runtimeInstalling ? <Spinner /> : "一键安装 / 修复运行环境"}
+              </Button>
+            </div>
+            <p className="settings-hint">
+              缺少 Node.js 或服务依赖时，点按钮即可由 App 自动下载便携版 Node 并安装依赖（无需手动装环境）；安装进度见主界面顶部引导条。
+            </p>
+          </div>
+        </div>
+
         <div className="settings-item">
           <label className="settings-label">DeepSeek API Key（可选）</label>
           <input

@@ -28,6 +28,17 @@ const ASR_ENGINE = (process.env.ASR_ENGINE || 'auto').toLowerCase(); // auto | s
 // asr-server 架构版本：2.x = 含 sensevoice-original + VAD + 标点。
 // 供 start-all.js 探测时判断 9528 上是否旧进程（旧代码无此字段/不同版本 → 视为残留，终止后重启）。
 const SERVER_VERSION = '2.6.0'; // 2.4.0 = S4：cosyvoice-clone 全自举链；2.5.0 = S5：缺失权重自动下载；2.6.0 = S7：安全加固（仅本机回环 + 入站鉴权）
+// 031 跨平台：Win venv 可执行在 Scripts/ 而非 bin/（engineReadiness 的 runtime 检查据此判定）
+const IS_WIN = process.platform === 'win32';
+// engines/*.json 的 runtime.path 为 unix 形态（.venv-x/bin/python3）时，Win 上改用 Scripts/python.exe 判定
+function runtimePathExists(p) {
+  if (existsSync(path.join(__dirname, p))) return true;
+  if (IS_WIN && /(^|[\\/])bin[\\/]python3$/.test(p)) {
+    const winP = p.replace(/[\\/]bin[\\/]python3$/, path.sep + ['Scripts', 'python.exe'].join(path.sep));
+    return existsSync(path.join(__dirname, winP));
+  }
+  return false;
+}
 // 安全加固（S7）：入站鉴权 token —— Tauri 宿主注入；为空（手动 npm start 调试）时不校验
 const OPENSOUND_TOKEN = process.env.OPENSOUND_TOKEN || '';
 const WHISPER_MODEL = `onnx-community/whisper-${MODEL_SIZE}`;
@@ -1002,9 +1013,9 @@ async function engineReadiness(mf) {
   }
   for (const r of mf.runtime || []) {
     if (r.kind === 'path') {
-      if (!existsSync(path.join(__dirname, r.path))) missingRuntime.push({ kind: '缺失', label: r.label || r.path });
+      if (!runtimePathExists(r.path)) missingRuntime.push({ kind: '缺失', label: r.label || r.path });
     } else if (r.kind === 'bin') {
-      try { execSync(`which ${r.name}`, { stdio: 'ignore' }); } catch { missingRuntime.push({ kind: '缺失', label: r.label || ('命令 ' + r.name) }); }
+      try { execSync(IS_WIN ? `where ${r.name}` : `which ${r.name}`, { stdio: 'ignore' }); } catch { missingRuntime.push({ kind: '缺失', label: r.label || ('命令 ' + r.name) }); }
     }
   }
   // 服务是否在跑：复用 MODEL_ITEMS 的探针（多数即 /health 健康检查）

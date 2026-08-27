@@ -4,7 +4,16 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { Icon } from "@iconify/react";
 import "./icons";
 import type { ServiceStatus, PanelId, HealthInfo, ModelInfo } from "./types";
-import { getHealth, getModels } from "./api";
+import {
+  getHealth,
+  getModels,
+  getModelsCatalog,
+  checkRuntime,
+  installRuntime,
+  listenRuntimeProgress,
+  type RuntimeStatus,
+  type RuntimeProgress,
+} from "./api";
 import HomePanel from "./panels/HomePanel";
 import ReadPanel from "./panels/ReadPanel";
 import AsrPanel from "./panels/AsrPanel";
@@ -48,6 +57,11 @@ export interface PanelProps {
   models: ModelInfo[];
   refresh: () => Promise<void>;
   status: ServiceStatus;
+  /** 032：运行时自检状态（node/依赖），设置页「环境与运行时」区块使用 */
+  runtime: RuntimeStatus | null;
+  runtimeInstalling: boolean;
+  runtimeLogs: RuntimeProgress[];
+  onInstallRuntime: () => void;
   /** 面板间跳转（如朗读面板「在音频库中查看」） */
   goPanel?: (id: PanelId) => void;
   /** 跳到设置页并滚动定位到指定区块（030：资源模式区 "power-mode"） */
@@ -63,15 +77,60 @@ function App() {
   const [panel, setPanel] = useState<PanelId>("home");
   // 030：跳到设置页时携带的定位锚点（如 "power-mode" 资源模式区）
   const [settingsAnchor, setSettingsAnchor] = useState<string | null>(null);
+  // 032：运行时自检（node / 服务依赖）+ 一键自举进度
+  const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
+  const [runtimeLogs, setRuntimeLogs] = useState<RuntimeProgress[]>([]);
+  const [runtimeInstalling, setRuntimeInstalling] = useState(false);
 
   const refreshHealth = async () => {
+    let dyn: ModelInfo[] = [];
     try {
       const [h, m] = await Promise.all([getHealth(), getModels()]);
       setHealth(h);
-      setModels(m);
+      dyn = m;
     } catch (e) {
-      console.error("refresh health 失败:", e);
+      // P1：服务离线不阻塞模型清单——模型列表改用本地静态目录（engines/*.json）
+      console.error("refresh health 失败（服务离线，使用本地清单）:", e);
       setHealth(null);
+    }
+    // P1：本地清单打底 + 服务在线时的动态状态合并；离线时模型仍完整显示，状态标"服务未启动"
+    try {
+      const cat = await getModelsCatalog();
+      const merged: ModelInfo[] = cat.map((c) => {
+        const d = dyn.find((x) => x.engine === c.engine);
+        if (d) {
+          return {
+            ...d,
+            category: c.category,
+            label: c.label,
+            size: c.size,
+            license: c.license,
+            install: d.install ?? c.install,
+          };
+        }
+        return {
+          category: c.category,
+          engine: c.engine,
+          label: c.label,
+          size: c.size,
+          license: c.license,
+          install: c.install,
+          installed: false,
+          state: "unknown",
+        };
+      });
+      setModels(merged);
+    } catch (e) {
+      console.error("get_models_catalog 失败（降级为服务数据）:", e);
+      setModels(dyn);
+    }
+  };
+
+  const refreshRuntime = async () => {
+    try {
+      setRuntime(await checkRuntime());
+    } catch (e) {
+      console.error("check_runtime 失败:", e);
     }
   };
 
@@ -89,11 +148,52 @@ function App() {
         console.error("get_service_status 失败:", err);
       }
       refreshHealth();
+      refreshRuntime();
     })();
     return () => {
       unlisten?.();
     };
   }, []);
+
+  // 032：运行时自举进度事件（node 下载 → npm ci → 服务拉起）
+  useEffect(() => {
+    let un: UnlistenFn | undefined;
+    (async () => {
+      un = await listenRuntimeProgress((p) => {
+        setRuntimeLogs((prev) => [...prev.slice(-50), p]);
+        if (p.step === "done") {
+          if (p.message === "完成") {
+            setRuntimeInstalling(false);
+            refreshHealth();
+            refreshRuntime();
+          }
+        } else if (p.step === "error") {
+          setRuntimeInstalling(false);
+        }
+      });
+    })();
+    return () => {
+      un?.();
+    };
+  }, []);
+
+  const doInstallRuntime = async () => {
+    setRuntimeInstalling(true);
+    setRuntimeLogs([]);
+    try {
+      await installRuntime();
+    } catch (e) {
+      setRuntimeLogs((prev) => [...prev, { step: "error", message: String(e) }]);
+    } finally {
+      setRuntimeInstalling(false);
+      refreshRuntime();
+    }
+  };
+
+  const runtimeNeedInstall = runtime && (!runtime.node_ok || !runtime.deps_ready);
+  const runtimeBusy = runtimeInstalling || runtimeLogs.some((l) => l.step === "node-download" || l.step === "deps");
+  const lastLog = runtimeLogs[runtimeLogs.length - 1];
+  const lastPct = lastLog && lastLog.pct != null ? lastLog.pct : null;
 
   // 兜底轮询（030 规划）：service-status 事件只在 asr/qwen3 变化时触发，
   // funasr(8002)/cosyvoice(8003) 等延迟启动的服务不会通知前端 → UI 停在旧快照（识别面板原始版恒为 x 的根因）。
@@ -126,6 +226,10 @@ function App() {
     models,
     refresh: refreshHealth,
     status,
+    runtime,
+    runtimeInstalling,
+    runtimeLogs,
+    onInstallRuntime: doInstallRuntime,
     goPanel: setPanel,
     goSettings: (anchor) => {
       // 时间戳 tick：即使锚点相同，重复点击也强制触发 SettingsPanel 的定位 effect
@@ -203,7 +307,44 @@ function App() {
           </div>
         </div>
       </aside>
-      <main className="main">{renderPanel()}</main>
+      <main className="main">
+        {(runtimeNeedInstall || runtimeBusy) && (
+          <div className={`runtime-banner ${runtimeBusy ? "busy" : ""}`}>
+            <div className="rb-main">
+              <Icon icon={runtimeBusy ? "lucide:loader-2" : "lucide:wrench"} width={16} height={16} className={runtimeBusy ? "rb-busy-icon" : ""} />
+              <div className="rb-text">
+                <div className="rb-title">
+                  {runtimeBusy
+                    ? lastLog?.message || "正在准备运行环境…"
+                    : runtime && !runtime.node_ok
+                      ? "缺少 Node.js 运行环境"
+                      : "服务端依赖未就绪"}
+                </div>
+                {!runtimeBusy && runtime && (
+                  <div className="rb-sub">
+                    {!runtime.node_ok
+                      ? "由 App 自动下载便携版 Node（免安装、不污染系统），点一下即可。"
+                      : "自动安装服务端依赖（npm ci，首次需数分钟，镜像国内可用）。"}
+                  </div>
+                )}
+              </div>
+              {!runtimeBusy ? (
+                <button className="rb-btn" onClick={doInstallRuntime}>
+                  <Icon icon="lucide:download" width={14} height={14} /> 一键安装
+                </button>
+              ) : (
+                <span className="rb-hint">正在安装…请勿关闭窗口</span>
+              )}
+            </div>
+            {runtimeBusy && lastPct != null && (
+              <div className="rb-bar">
+                <div className="rb-fill" style={{ width: `${Math.min(100, lastPct)}%` }} />
+              </div>
+            )}
+          </div>
+        )}
+        {renderPanel()}
+      </main>
     </div>
   );
 }

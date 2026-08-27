@@ -22,11 +22,27 @@ const ASR_URL: &str = "http://127.0.0.1:9528";
 const QWEN3_URL: &str = "http://127.0.0.1:8001";
 const SERVER_DIR: &str = "asr-server"; // 相对项目根
 
+// ---------- 运行时自举（032：App 内一键安装 node/依赖，普通用户免终端） ----------
+// 便携版 Node 版本：与官方 dist 一致（npmmirror 同步镜像），受管下载到 <app_data>/runtime/node
+const RUNTIME_NODE_VERSION: &str = "v24.19.0";
+const RUNTIME_NODE_MIN_MAJOR: u32 = 18; // 服务端所需最低主版本
+// node 便携包下载源（按序尝试；npmmirror 为中国镜像，与 nodejs.org 目录结构一致）
+const NODE_MIRRORS: [&str; 2] = [
+    "https://nodejs.org/dist",
+    "https://npmmirror.com/mirrors/node",
+];
+// npm registry（依赖安装用；用户可用 OPENSOUND_NPM_REGISTRY 覆盖）
+const NPM_REGISTRY_DEFAULT: &str = "https://registry.npmmirror.com";
+
 // ---------- 应用状态 ----------
 #[derive(Default)]
 struct AppState {
     child: Mutex<Option<Child>>,
     node_path: Mutex<Option<String>>,
+    /// App 自管理的便携版 node（下载解压后缓存；优先于系统 node 使用）
+    runtime_node: Mutex<Option<String>>,
+    /// 运行时自举进行中（防并发重复安装）
+    runtime_installing: Mutex<bool>,
     recorder: Recorder,
     realtime: Realtime,
     server_path: Mutex<Option<String>>, // 用户配置的 asr-server 目录
@@ -40,6 +56,122 @@ struct ServiceStatus {
     qwen3_url: String,
     child_alive: bool,
     node_path: String,
+}
+
+// ---------- 运行时自检结果（032：UI 引导条 / 设置页「环境与运行时」） ----------
+#[derive(Serialize, Clone, Default)]
+struct RuntimeStatus {
+    /// 有可用的 node（系统 PATH 或已下载的便携版）且版本达标
+    node_ok: bool,
+    /// 正在实际使用的 node 可执行文件路径
+    node_path: String,
+    /// node 版本号（如 v24.19.0）
+    node_version: String,
+    /// App 自管理的便携版 node 路径（未下载则为空）
+    runtime_node: String,
+    /// 系统 node 是否已就绪（PATH/常见位置）
+    sys_node_found: bool,
+    /// system python 是否可探测（仅信息展示；python 系引擎另由 uv 自举）
+    python_found: bool,
+    python_version: String,
+    /// asr-server 的 node_modules（关键包）是否就绪
+    deps_ready: bool,
+    /// 用户数据目录（模型/运行时/缓存将收敛于此，032）
+    data_dir: String,
+    /// 服务代码目录（start-all.js 所在）
+    server_dir: String,
+}
+
+// 单个安装步骤事件：{ step, message, pct? }；step ∈ node-download | deps | done | error
+#[derive(Serialize, Clone)]
+struct RuntimeProgress {
+    step: String,
+    message: String,
+    pct: Option<u32>,
+}
+
+// ---------- P1：模型清单本地化（engines/*.json 静态目录，不依赖 9528 服务） ----------
+#[derive(Serialize, Clone)]
+struct CatalogInstall {
+    kind: String,
+    mirrors: Vec<String>,
+}
+
+#[derive(Serialize, Clone)]
+struct CatalogModel {
+    category: String,
+    engine: String,
+    label: String,
+    size: String,
+    license: String,
+    install: Option<CatalogInstall>,
+}
+
+#[derive(serde::Deserialize)]
+struct EngineJson {
+    id: String,
+    #[serde(default)] category: String,
+    #[serde(default)] label: String,
+    #[serde(default)] size_hint: String,
+    #[serde(default)] license: String,
+    #[serde(default)] install: Option<EngineInstallJson>,
+}
+#[derive(serde::Deserialize)]
+struct EngineInstallJson {
+    #[serde(default)] kind: String,
+    #[serde(default)] files: Vec<EngineFileJson>,
+}
+#[derive(serde::Deserialize)]
+struct EngineFileJson {
+    #[serde(default)] mirrors: Vec<EngineMirrorJson>,
+}
+#[derive(serde::Deserialize)]
+struct EngineMirrorJson {
+    #[serde(default)] name: String,
+}
+
+// 读 asr-server/engines/*.json → 模型可下载清单（与后端 collectModels 的静态字段一致）
+#[tauri::command]
+fn get_models_catalog(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) -> Result<Vec<CatalogModel>, String> {
+    let dir = server_dir(&app, &state).ok_or("无法定位 asr-server 目录（请在设置中配置）")?;
+    let engines_dir = dir.join("engines");
+    let mut names: Vec<String> = fs::read_dir(&engines_dir).map_err(|e| format!("读取 engines 目录失败：{e}"))?
+        .filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    names.sort();
+    let mut out = Vec::new();
+    for name in names {
+        if !name.ends_with(".json") { continue; }
+        let raw = fs::read_to_string(engines_dir.join(&name)).map_err(|e| format!("读取 {name} 失败：{e}"))?;
+        let Ok(j) = serde_json::from_str::<EngineJson>(&raw) else { continue };
+        let install = j.install.map(|i| {
+            let kind = i.kind;
+            CatalogInstall {
+                kind: kind.clone(),
+                mirrors: if kind == "url-multi" {
+                    i.files.first().map(|f| f.mirrors.iter().map(|m| m.name.clone()).collect()).unwrap_or_default()
+                } else { Vec::new() },
+            }
+        });
+        out.push(CatalogModel {
+            category: j.category,
+            engine: j.id,
+            label: j.label,
+            size: j.size_hint,
+            license: j.license,
+            install,
+        });
+    }
+    if out.is_empty() {
+        return Err(format!("engines 目录为空或无法解析（{}），模型清单不可用", engines_dir.display()));
+    }
+    Ok(out)
+}
+
+// 本机磁盘剩余（字节）：本地文件系统直查，不依赖 9528（fs2 跨平台：win=GetDiskFreeSpaceEx / unix=statvfs）
+#[tauri::command]
+fn get_disk_local(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) -> Result<u64, String> {
+    let dir = server_dir(&app, &state).ok_or("无法定位 asr-server 目录")?;
+    fs2::available_space(&dir).map_err(|e| format!("磁盘探测失败：{e}"))
 }
 
 // ---------- 工具：找 node ----------
@@ -102,6 +234,307 @@ fn find_node() -> Option<String> {
         }
     }
     None
+}
+
+// ---------- 032 运行时自举：App 内一键安装 node / npm 依赖（普通用户免终端） ----------
+// Win 下 node/npm/tar/taskkill 是控制台程序：GUI App spawn 它们而不设 CREATE_NO_WINDOW 会弹黑色命令窗口。
+// 统一用 quiet() 包裹所有子进程 Command（Windows 静默；Unix 原样）。
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+fn quiet(mut c: Command) -> Command {
+    #[cfg(windows)]
+    c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    c
+}
+
+fn emit_progress(app: &tauri::AppHandle, step: &str, message: &str, pct: Option<u32>) {
+    let _ = app.emit("runtime-progress", RuntimeProgress { step: step.to_string(), message: message.to_string(), pct });
+}
+
+fn node_version(node_exe: &str) -> Option<String> {
+    let out = quiet(Command::new(node_exe)).arg("-v").output().ok()?;
+    if !out.status.success() { return None; }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() { None } else { Some(s) }
+}
+
+fn node_major_ok(ver: &str) -> bool {
+    // "v24.19.0" → 24
+    let v = ver.trim_start_matches('v');
+    let major = v.split('.').next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+    major >= RUNTIME_NODE_MIN_MAJOR
+}
+
+// asr-server 的 node_modules 关键包是否就绪（sherpa-onnx-node = SenseVoice/Kokoro 原生栈）
+fn deps_ready(server_dir: &std::path::Path) -> bool {
+    let nm = server_dir.join("node_modules");
+    if !nm.is_dir() { return false; }
+    for pkg in ["sherpa-onnx-node", "node-llama-cpp", "@huggingface", "systeminformation"] {
+        if !nm.join(pkg).is_dir() { return false; }
+    }
+    true
+}
+
+fn npm_cli_js(node_exe: &str) -> std::path::PathBuf {
+    // node 同目录 node_modules/npm/bin/npm-cli.js（系统 node 与便携版 node 布局一致）
+    let base = PathBuf::from(node_exe).parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
+    base.join("node_modules").join("npm").join("bin").join("npm-cli.js")
+}
+
+// 解压目录里找 node-v*/ 下的 node 可执行文件
+fn find_node_under(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let entries = fs::read_dir(dir).ok()?;
+    for e in entries.flatten() {
+        let p = e.path();
+        if !p.is_dir() { continue; }
+        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if !name.starts_with("node-v") { continue; }
+        let cand = if std::env::consts::OS == "windows" { p.join("node.exe") } else { p.join("bin").join("node") };
+        if cand.is_file() { return Some(cand); }
+    }
+    None
+}
+
+// 流式下载文件（reqwest），进度经 runtime-progress 事件上报
+async fn download_file(url: &str, dest: &std::path::Path, app: &tauri::AppHandle) -> Result<(), String> {
+    let resp = reqwest::Client::new().get(url).send().await.map_err(|e| format!("下载失败 {}：{e}", url))?;
+    if !resp.status().is_success() { return Err(format!("下载失败 {}：HTTP {}", url, resp.status())); }
+    let total = resp.content_length().unwrap_or(0);
+    let mut stream = resp.bytes_stream();
+    let mut received: u64 = 0;
+    use futures_util::StreamExt;
+    use tokio::io::AsyncWriteExt;
+    let mut f = tokio::fs::File::create(dest).await.map_err(|e| format!("无法创建下载文件 {}：{e}", dest.display()))?;
+    while let Some(chunk) = stream.next().await {
+        let c = chunk.map_err(|e| format!("下载中断：{e}"))?;
+        received += c.len() as u64;
+        f.write_all(&c).await.map_err(|e| format!("写入失败：{e}"))?;
+        let pct = if total > 0 { Some(((received * 100) / total) as u32) } else { None };
+        emit_progress(app, "node-download", &format!("下载 node 运行环境 {}/{}", received, total), pct);
+    }
+    f.flush().await.map_err(|e| format!("写入失败：{e}"))?;
+    Ok(())
+}
+
+// 解压 zip/tar.gz（Windows 自带 tar.exe 支持 zip；macOS/Linux 系统 tar）
+fn unzip_archive(zip: &std::path::Path, dest_dir: &std::path::Path) -> Result<(), String> {
+    fs::create_dir_all(dest_dir).map_err(|e| e.to_string())?;
+    let st = quiet(Command::new("tar")).arg("-xf").arg(zip).arg("-C").arg(dest_dir).status().map_err(|e| format!("解压失败（需要系统 tar）：{e}"))?;
+    if !st.success() { return Err(format!("解压失败：tar 退出码 {}", st.code().unwrap_or(-1))); }
+    Ok(())
+}
+
+// 确保有可用的 node：受管便携版 → 系统 node（版本达标）→ 下载便携版
+async fn ensure_node(app: &tauri::AppHandle, state: &Arc<AppState>) -> Result<String, String> {
+    // 1) App 已下载的便携版优先（版本可控）
+    if let Some(p) = state.runtime_node.lock().unwrap().clone() {
+        if std::path::PathBuf::from(&p).is_file() {
+            return Ok(p);
+        }
+    }
+    // 2) 系统 node 版本达标 → 直接用
+    if let Some(p) = find_node() {
+        if let Some(v) = node_version(&p) {
+            if node_major_ok(&v) {
+                return Ok(p);
+            }
+            emit_progress(app, "node-download", &format!("系统 node 版本过低（{v}），改用 App 内置便携版…"), None);
+        }
+    }
+    // 3) 下载便携版到 <app_data>/runtime/node
+    let data_dir = app.path().app_data_dir().map_err(|e| format!("无法定位应用数据目录：{e}"))?;
+    let node_dir = data_dir.join("runtime").join("node");
+    fs::create_dir_all(&node_dir).map_err(|e| format!("无法创建运行时目录：{e}"))?;
+    let zip_name = if std::env::consts::OS == "windows" {
+        format!("node-{}-win-x64.zip", RUNTIME_NODE_VERSION)
+    } else {
+        format!("node-{}-darwin-arm64.tar.gz", RUNTIME_NODE_VERSION)
+    };
+    let zip_path = node_dir.join(&zip_name);
+    let mut last_err = String::new();
+    for base in NODE_MIRRORS {
+        let url = format!("{base}/{RUNTIME_NODE_VERSION}/{zip_name}");
+        emit_progress(app, "node-download", &format!("从 {base} 下载…"), None);
+        match download_file(&url, &zip_path, app).await {
+            Ok(()) => { last_err.clear(); break; }
+            Err(e) => {
+                last_err = format!("{e}");
+                emit_progress(app, "node-download", &last_err, None);
+                emit_progress(app, "node-download", "切换镜像…", None);
+            }
+        }
+    }
+    if !last_err.is_empty() { return Err(last_err); }
+    emit_progress(app, "node-download", "解压…", None);
+    unzip_archive(&zip_path, &node_dir)?;
+    let found = find_node_under(&node_dir).ok_or("解压后未找到 node 可执行文件")?;
+    *state.runtime_node.lock().unwrap() = Some(found.to_string_lossy().into_owned());
+    emit_progress(app, "node-download", &format!("node 就绪：{}", found.display()), Some(100));
+    Ok(found.to_string_lossy().into_owned())
+}
+
+// 等待子进程退出（最多 timeout 秒；读线程已接管 stdout/stderr 消费，不会管道死锁）；
+// 超时强杀并按失败处理；返回是否成功退出。
+fn wait_with_timeout(c: &mut Child, secs: u64) -> Result<bool, String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        match c.try_wait() {
+            Ok(Some(st)) => return Ok(st.success()),
+            Ok(None) => {}
+            Err(e) => return Err(format!("等待子进程失败：{e}")),
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = c.kill();
+            let _ = c.wait();
+            return Ok(false);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(400));
+    }
+}
+
+// npm ci 安装 asr-server 依赖（strout/stderr 行转发为进度事件；npm≥11 拦截原生脚本时自动批准并 rebuild）
+fn ensure_npm_deps(app: &tauri::AppHandle, server_dir: &std::path::Path, node_exe: &str) -> Result<(), String> {
+    let cli = npm_cli_js(node_exe);
+    if !cli.is_file() { return Err(format!("未找到 npm（{}），无法安装依赖", cli.display())); }
+    let registry = std::env::var("OPENSOUND_NPM_REGISTRY").unwrap_or_else(|_| NPM_REGISTRY_DEFAULT.to_string());
+
+    let run_npm = |args: &[&str], timeout_secs: u64| -> Result<(), String> {
+        let mut child = quiet(Command::new(node_exe)).arg(&cli).args(args).current_dir(server_dir)
+            .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped())
+            .spawn().map_err(|e| format!("启动 npm 失败：{e}"))?;
+        use std::io::{BufRead, BufReader};
+        let out = child.stdout.take().unwrap(); // ChildStdout
+        let err = child.stderr.take().unwrap(); // ChildStderr
+        // 行转发（stdout/stderr 各起一个读线程，避免管道占满死锁）
+        {
+            let app2 = app.clone();
+            let stream = out; // ChildStdout
+            std::thread::spawn(move || {
+                for line in BufReader::new(stream).lines() {
+                    let Ok(l) = line else { break };
+                    let l = l.trim();
+                    if l.is_empty() { continue; }
+                    emit_progress(&app2, "deps", &l, None);
+                }
+            });
+        }
+        {
+            let app2 = app.clone();
+            let stream = err; // ChildStderr
+            std::thread::spawn(move || {
+                for line in BufReader::new(stream).lines() {
+                    let Ok(l) = line else { break };
+                    let l = l.trim();
+                    if l.is_empty() { continue; }
+                    eprintln!("[npm] {l}");
+                    emit_progress(&app2, "deps", &l, None);
+                }
+            });
+        }
+        let mut c = child;
+        let ok = wait_with_timeout(&mut c, timeout_secs)?;
+        if !ok { return Err(format!("npm 命令超时或失败，已终止（{} 秒）", timeout_secs)); }
+        Ok(())
+    };
+
+    emit_progress(app, "deps", "安装服务端依赖（npm ci，首次需数分钟）…", None);
+    run_npm(&["ci", "--registry", &registry, "--replace-registry-host=always", "--loglevel=notice"], 1200)?;
+    // npm ≥11 默认拦截未批准的 install 脚本（原生二进制下载），主动批准并触发；
+    // rebuild 会从 GitHub 下载 llama/onnxruntime 预编译二进制（国内网络可能极慢/失败）——
+    // 这两个仅 LLM 对话与 whisper 需要，失败不阻断：识别/朗读（sherpa 栈）不受影响，模型页会如实显示缺环境。
+    emit_progress(app, "deps", "批准并安装原生推理组件（llama / onnxruntime）…", None);
+    let _ = run_npm(&["install-scripts", "approve", "node-llama-cpp", "onnxruntime-node", "protobufjs", "sharp"], 180);
+    match run_npm(&["rebuild", "node-llama-cpp", "onnxruntime-node", "protobufjs", "sharp"], 480) {
+        Ok(()) => emit_progress(app, "deps", "原生推理组件就绪 ✓", None),
+        Err(e) => emit_progress(app, "deps", &format!("⚠️ 原生推理组件（LLM/whisper）下载失败可稍后重试：{e}"), None),
+    }
+    Ok(())
+}
+
+// 一键自举：确保 node → 安装依赖 → 拉起服务（command 入口）
+#[tauri::command]
+async fn install_runtime(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    install_runtime_plain(app, state.inner().clone()).await
+}
+
+// 普通异步入口（setup 自动自举 / command 共用；state 传 Arc 避免借用冲突）
+async fn install_runtime_plain(app: tauri::AppHandle, state: Arc<AppState>) -> Result<(), String> {
+    {
+        let mut g = state.runtime_installing.lock().unwrap();
+        if *g { return Err("运行环境安装正在进行中，请稍候…".to_string()); }
+        *g = true;
+    }
+    let result = install_runtime_inner(&app, &state).await;
+    *state.runtime_installing.lock().unwrap() = false;
+    result
+}
+
+async fn install_runtime_inner(app: &tauri::AppHandle, state: &Arc<AppState>) -> Result<(), String> {
+    emit_progress(app, "done", "开始检测运行环境…", None);
+    let dir = server_dir(app, state).ok_or("无法定位 asr-server 目录（请在设置中配置）")?;
+    let node = ensure_node(app, state).await?;
+    // 缓存的 node 也同时给 start_service 用（避免系统 node 缺失时服务起不来）
+    *state.node_path.lock().unwrap() = Some(node.clone());
+    if deps_ready(&dir) {
+        emit_progress(app, "deps", "服务端依赖已就绪，跳过安装", None);
+    } else {
+        emit_progress(app, "deps", "服务端依赖缺失，开始安装…", None);
+        let dir2 = dir.clone();
+        let app2 = app.clone();
+        let node2 = node.clone();
+        // npm ci 是长任务（网络），放到 blocking 线程避免阻塞 UI
+        tokio::task::spawn_blocking(move || ensure_npm_deps(&app2, &dir2, &node2))
+            .await
+            .map_err(|e| format!("安装任务异常：{e}"))??;
+    }
+    emit_progress(app, "done", "依赖就绪，启动服务…", None);
+    start_service(app, state)?;
+    emit_progress(app, "done", "完成", Some(100));
+    Ok(())
+}
+
+#[tauri::command]
+fn check_runtime(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) -> RuntimeStatus {
+    let sys_node = find_node();
+    let sys_node_found = sys_node.is_some();
+    let runtime_node = state.runtime_node.lock().unwrap().clone();
+    let mut node_path = String::new();
+    let mut node_version_str = String::new();
+    let mut node_ok = false;
+    for cand in [runtime_node.as_deref(), sys_node.as_deref()].into_iter().flatten() {
+        if let Some(v) = node_version(cand) {
+            node_path = cand.to_string();
+            node_version_str = v.clone();
+            node_ok = node_major_ok(&v);
+            break;
+        }
+    }
+    // python 仅作信息展示（python 系引擎的自举后续由 uv 完成）
+    let mut python_found = false;
+    let mut python_version = String::new();
+    for cmd in ["python", "python3"] {
+        if let Ok(out) = quiet(Command::new(cmd)).arg("--version").output() {
+            if out.status.success() {
+                let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !v.is_empty() { python_found = true; python_version = v; break; }
+            }
+        }
+    }
+    let data_dir = app.path().app_data_dir().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
+    let server_dir_str = server_dir(&app, &state).map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
+    let deps = server_dir(&app, &state).map(|d| deps_ready(&d)).unwrap_or(false);
+    RuntimeStatus {
+        node_ok,
+        node_path,
+        node_version: node_version_str,
+        runtime_node: runtime_node.unwrap_or_default(),
+        sys_node_found,
+        python_found,
+        python_version,
+        deps_ready: deps,
+        data_dir,
+        server_dir: server_dir_str,
+    }
 }
 
 // ---------- 配置读写（asr-server 路径持久化） ----------
@@ -393,7 +826,7 @@ fn start_service(app: &tauri::AppHandle, state: &Arc<AppState>) -> Result<(), St
     let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let _ = writeln!(header, "\n[opensound] === 启动 asr-server (unix_ts={ts}) ===");
 
-    let child = Command::new(&node)
+    let child = quiet(Command::new(&node))
         .arg(&entry)
         .current_dir(&dir)
         .env("ASR_ENGINE", "auto")
@@ -421,7 +854,7 @@ fn stop_service(state: &Arc<AppState>) {
         #[cfg(unix)]
         let _ = std::process::Command::new("kill").arg("-TERM").arg(pid.to_string()).status();
         #[cfg(windows)]
-        let _ = std::process::Command::new("taskkill")
+        let _ = quiet(std::process::Command::new("taskkill"))
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .status();
         // 等 start-all 清理完子进程（最多 5 秒），超时兜底强杀
@@ -627,10 +1060,26 @@ pub fn run() {
             migrate_legacy_config(&handle);
             // 加载 asr-server 路径配置到 state
             *state.server_path.lock().unwrap() = load_config(&handle).server_path;
-            // 启动服务（直接使用已捕获的 Arc，避免 setup 阶段 state 查询）
-            match start_service(&handle, &state) {
-                Ok(()) => {}
-                Err(e) => eprintln!("[opensound] 启动服务失败: {e}"),
+            // 032 运行时预检：node / 服务依赖缺失时 App 内自动自举（进度事件驱动 UI 引导条），
+            // 已就绪则直接启动服务。
+            let need_bootstrap = {
+                let sys_node = find_node().is_some();
+                let deps = server_dir(&handle, &state).map(|d| deps_ready(&d)).unwrap_or(false);
+                !(sys_node && deps)
+            };
+            if need_bootstrap {
+                let h2 = handle.clone();
+                eprintln!("[opensound] 运行环境不完整，自动执行 App 内自举…");
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = install_runtime_plain(h2, state.clone()).await {
+                        eprintln!("[opensound] 运行时自举失败: {e}");
+                    }
+                });
+            } else {
+                match start_service(&handle, &state) {
+                    Ok(()) => {}
+                    Err(e) => eprintln!("[opensound] 启动服务失败: {e}"),
+                }
             }
             setup_tray(&handle)?;
 
@@ -654,6 +1103,10 @@ pub fn run() {
             start_service_cmd,
             stop_service_cmd,
             quit_app,
+            check_runtime,
+            install_runtime,
+            get_models_catalog,
+            get_disk_local,
             recorder_start,
             recorder_stop,
             recorder_is_recording,

@@ -50,7 +50,8 @@ export type ModelState =
   | "ready"
   | "partial-files"
   | "missing-runtime"
-  | "incomplete";
+  | "incomplete"
+  | "unknown"; // P1：本地清单占位（服务未启动，无动态状态）
 
 export interface ModelInfo {
   category: string; // tts | asr | llm
