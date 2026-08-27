@@ -2,7 +2,7 @@
 // 用法：cd asr-server && npm run download-kokoro
 // 模型：kokoro-multi-lang-v1_0（Apache-2.0，中英混合，53 音色 sid 0-52，输出 24kHz）
 // 源：hf-mirror（国内可达，实测 ~3MB/s）逐文件并发下载；GitHub releases tar 作为完全兜底
-import { existsSync, mkdirSync, createWriteStream, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, createWriteStream, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -18,14 +18,40 @@ const HF_API = 'https://hf-mirror.com/api/models/' + HF_REPO;
 const HF_BASE = 'https://hf-mirror.com/' + HF_REPO + '/resolve/main';
 const GH_TAR = 'https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_0.tar.bz2';
 const REQUIRED = ['model.onnx', 'voices.bin', 'tokens.txt', 'espeak-ng-data', 'lexicon-us-en.txt', 'lexicon-zh.txt', 'date-zh.fst', 'number-zh.fst'];
-// 不需要的文件：README/LICENSE/.gitattributes；dict/ 是 jieba 词库（Kokoro 用 espeak-ng 音素，不需要）
-const SKIP = ['.gitattributes', 'LICENSE', 'README.md', 'phone-zh.fst'];
+// 032 修复：期望字节数（与 engines/kokoro.json checks 一致）——下载中断会留"存在但损坏"文件，
+// 只查存在会被跳过（导致 sherpa 加载崩溃）；校验后损坏文件删掉重下。
+const EXPECTED = { 'model.onnx': 325630829, 'voices.bin': 27678720, 'tokens.txt': 687, 'lexicon-zh.txt': 2364621, 'date-zh.fst': 59154 };
+function sizeOk(rel) {
+  const p = path.join(DIR, rel);
+  if (!existsSync(p)) return false;
+  const bytes = EXPECTED[path.basename(rel)];
+  if (bytes == null) return true; // 无期望字节的（子文件/目录）只查存在
+  try { return statSync(p).size === bytes; } catch { return false; }
+}
+// 032 修复：phone-zh.fst 与 dict/ 是就绪清单（engines/kokoro.json）明确要求的，必须下载；
+// 此前被 SKIP/过滤掉 → 永远"缺文件/缺目录"、永远点补齐 → 死循环。
+// 不需要的文件：仓库根 README/LICENSE/.gitattributes。
+const SKIP = ['.gitattributes', 'LICENSE', 'README.md'];
 
 mkdirSync(DIR, { recursive: true });
 
 function log(msg) { console.log('[' + new Date().toLocaleTimeString() + '] ' + msg); }
 
 async function downloadFile(rel, dest) {
+  // 032：已存在但大小不符 → 视为损坏，删掉重下（此前会跳过 → 永远修不好）
+  if (existsSync(dest)) {
+    const bytes = EXPECTED[path.basename(rel)];
+    if (bytes != null) {
+      try {
+        if (statSync(dest).size === bytes) { console.log('已存在且完整，跳过:', rel); return; }
+        console.log('⚠️ ' + path.basename(rel) + ' 大小不符（' + statSync(dest).size + '≠' + bytes + '），删除重下');
+        rmSync(dest, { force: true });
+      } catch { rmSync(dest, { force: true }); }
+    } else {
+      console.log('已存在，跳过:', rel);
+      return;
+    }
+  }
   const url = HF_BASE + '/' + rel.split('/').map(encodeURIComponent).join('/');
   // espeak-ng-data 含子目录（lang/ voices/!v/ 等），写入前先确保父目录存在
   mkdirSync(path.dirname(dest), { recursive: true });
@@ -55,7 +81,7 @@ async function fetchFileList() {
       const res = await fetch(HF_API, { signal: AbortSignal.timeout(30000) });
       if (!res.ok) throw new Error('HF API HTTP ' + res.status);
       const data = await res.json();
-      return (data.siblings || []).map(f => f.rfilename).filter(f => !SKIP.includes(f) && !f.startsWith('dict/'));
+      return (data.siblings || []).map(f => f.rfilename).filter(f => !SKIP.includes(f));
     } catch (e) {
       lastErr = e;
       await new Promise(r => setTimeout(r, attempt * 3000));
@@ -98,12 +124,12 @@ function done() {
   console.log('   npm start 后 POST /speak?engine=kokoro 即可本地朗读（默认音色 sid 18，中文可试 48-52）');
 }
 
-if (existsSync(path.join(DIR, 'model.onnx'))) { done(); process.exit(0); }
+if (REQUIRED.every(sizeOk)) { done(); process.exit(0); }
 
 // 主路径：hf-mirror 逐文件并发下载
 try {
   await downloadFromHfMirror();
-  const missing = REQUIRED.filter(f => !existsSync(path.join(DIR, f)));
+  const missing = REQUIRED.filter(f => !sizeOk(f));
   if (missing.length) throw new Error('缺少文件: ' + missing.join(', '));
   done();
   process.exit(0);
@@ -119,14 +145,14 @@ try {
   execSync(`curl -L --fail --connect-timeout 15 --max-time 3600 -C - -o "${TARBALL}" "${GH_TAR}"`, { stdio: 'inherit', maxBuffer: 1024 * 1024 * 10 });
   execSync(`tar xjf "${TARBALL}" -C "${path.dirname(DIR)}"`, { stdio: 'inherit' });
   rmSync(TARBALL, { force: true });
-  const missing = REQUIRED.filter(f => !existsSync(path.join(DIR, f)));
+  const missing = REQUIRED.filter(f => !sizeOk(f));
   if (missing.length) throw new Error('缺少文件: ' + missing.join(', '));
   done();
   process.exit(0);
 } catch (e) {
   // 保留已下载文件（不清空），缺失部分手动补
   rmSync(TARBALL, { force: true });
-  const missing = REQUIRED.filter(f => !existsSync(path.join(DIR, f)));
+  const missing = REQUIRED.filter(f => !sizeOk(f));
   console.error('所有下载源均失败。当前 ' + DIR + ' 中已有 ' + (REQUIRED.length - missing.length) + '/' + REQUIRED.length + ' 个关键文件。');
   console.error('可手动下载 tar 补全（GitHub 或 HuggingFace）：');
   console.error('  curl -L -o /tmp/kokoro.tar.bz2 "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_0.tar.bz2"');

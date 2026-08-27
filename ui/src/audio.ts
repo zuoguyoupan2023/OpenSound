@@ -202,6 +202,15 @@ export function stopAudio() {
   }
 }
 
+// 播放失败通知（WebView2 自动播放拦截等）：不再静默吞错，供 UI 提示用户
+let audioPlayErrorHandler: ((msg: string) => void) | null = null;
+export function setAudioPlayErrorHandler(h: ((msg: string) => void) | null) {
+  audioPlayErrorHandler = h;
+}
+function notifyPlayError(msg: string) {
+  try { audioPlayErrorHandler?.(msg); } catch { /* ignore */ }
+}
+
 // ---------- 帧流播放（/speak 返回：每帧 = 4字节大端长度 + 一段 WAV） ----------
 // 逐帧顺序播放；onFrameStart 每帧开始时回调（可选，用于 UI 提示"正在播放第 N 句"）
 export interface FramePlayer {
@@ -227,10 +236,12 @@ export function createFramePlayer(onFrameStart?: (index: number) => void): Frame
         resolve();
       };
       el.onerror = () => {
+        notifyPlayError("音频帧播放出错（格式或资源问题）");
         cleanup();
         resolve(); // 单帧失败不中断
       };
-      el.play().catch(() => {
+      el.play().catch((e) => {
+        notifyPlayError("音频播放被浏览器拦截，请点击页面任意位置后重试（" + String(e) + "）");
         cleanup();
         resolve();
       });

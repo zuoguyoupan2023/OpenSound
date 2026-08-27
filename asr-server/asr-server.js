@@ -82,8 +82,16 @@ const KOKORO = {
   // ⚠️ 必须是绝对路径：sherpa-onnx 从进程 cwd 解析 lexicon（而非模型目录）
   lexicon: path.join(KOKORO_DIR, 'lexicon-us-en.txt') + ',' + path.join(KOKORO_DIR, 'lexicon-zh.txt')
 };
+// 032 修复：字节级就绪校验——与 engines/kokoro.json 的 checks 一致。
+// 下载中断会留下"存在但损坏"的文件（曾导致 voices.bin 3.2MB/应 27MB 被加载 → sherpa 原生崩溃 → 整个 9528 掉线）；
+// 只看 existsSync 无法发现，这里必须校验大小，损坏文件按"缺文件"处理（模型页可一键补齐）。
+const KOKORO_EXPECT = { model: 325630829, voices: 27678720, tokens: 687 };
 function kokoroReady() {
-  return existsSync(KOKORO.model) && existsSync(KOKORO.voices) && existsSync(KOKORO.tokens) && existsSync(KOKORO.dataDir);
+  if (!existsSync(KOKORO.model) || !existsSync(KOKORO.voices) || !existsSync(KOKORO.tokens) || !existsSync(KOKORO.dataDir)) return false;
+  for (const [key, bytes] of Object.entries(KOKORO_EXPECT)) {
+    try { if (statSync(KOKORO[key]).size !== bytes) return false; } catch { return false; }
+  }
+  return true;
 }
 
 function parsePort(argv) {

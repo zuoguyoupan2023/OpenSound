@@ -2,7 +2,7 @@ import { useRef, useState, useEffect } from "react";
 import type { PanelProps } from "../App";
 import { Icon } from "@iconify/react";
 import { speakStream, computeStarting, getPersistedSettings, switchEcoBig, type EcoBig } from "../api";
-import { createFramePlayer, type FramePlayer, stopAudio } from "../audio";
+import { createFramePlayer, type FramePlayer, stopAudio, setAudioPlayErrorHandler } from "../audio";
 import {
   teeCollect,
   mergeWavFrames,
@@ -102,7 +102,12 @@ export default function ReadPanel(props: PanelProps) {
         setHistory(all.filter((r) => r.kind === "tts").slice(0, 20))
       )
       .catch((e) => console.error("载入朗读历史失败:", e));
-    return () => stopPlay();
+    // 播放失败（如 WebView 自动播放拦截）不再静默：直接显示在面板上
+    setAudioPlayErrorHandler((msg) => setError(msg));
+    return () => {
+      stopPlay();
+      setAudioPlayErrorHandler(null);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

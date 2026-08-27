@@ -1178,8 +1178,11 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // 031 生命周期：关闭窗口 = 退出 app 并停止全部服务（RunEvent::Exit → stop_service 杀服务树），
-            // 避免"关闭再打开秒绿/孤儿进程占端口"。需要常驻托盘的用户可改回 hide。
+            // 032 生命周期约定（拍板：关窗口=停服务，勿改）：
+            //   Windows：点击关闭窗口 = 退出 App 并停止全部服务（RunEvent::Exit → stop_service 杀服务树），
+            //   避免"关闭再打开秒绿/孤儿进程占端口"。
+            //   macOS：点红点只是最小化（App 仍在后台跑，服务不随之停止），只有 ⌘Q 完全退出才会走到这里。
+            //   因此本逻辑在 Windows 生效、macOS 常驻托盘用户由 ⌘Q 决定；差异无需跨平台分支。
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 window.app_handle().exit(0);
