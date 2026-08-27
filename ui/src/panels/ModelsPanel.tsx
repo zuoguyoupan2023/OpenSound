@@ -265,9 +265,12 @@ export default function ModelsPanel(props: PanelProps) {
               : true
             : true;
           const readyNoRun = stateOf(m) === "ready";
-          // 模式期望优先：节能未选的大模型，无论实际进程是否残留 running，一律显示「未启用」黄/红
-          const ecoDisabled = !!ecoBigKey && !bigShouldStart;
-          const launching = !ecoDisabled && readyNoRun && bigShouldStart;
+          const running = stateOf(m) === "running";
+          // 表里如一：显示真实状态；模式期望（节能未选）与真实状态不符时明确提示，不隐瞒
+          const ecoNotSelected = !!ecoBigKey && !bigShouldStart; // 节能模式下未选择的大模型
+          const ecoMismatch = ecoNotSelected && running; // 期望关闭但实际仍在运行（模式已改未重启）
+          const ecoIdle = ecoNotSelected && readyNoRun; // 期望关闭且实际确实没在跑
+          const launching = !ecoNotSelected && readyNoRun && bigShouldStart;
           return (
             <div key={m.engine} className={`model-row ${busyHere ? "busy" : ""}`}>
               <div className="model-info">
@@ -288,16 +291,18 @@ export default function ModelsPanel(props: PanelProps) {
                   <span className="model-size">{m.size}</span>
                 </div>
 
-                {/* 状态行：启动中 / 可用未启用(黄) / 设备不满足(红) / 常规五态 */}
+                {/* 状态行：真实状态优先；启动中 / 可用未启用(黄) / 期望关闭仍运行(黄提示) / 常规 */}
                 <div
                   className={`model-state ${
                     launching
                       ? "st-launch"
-                      : ecoDisabled
+                      : ecoIdle
                         ? fitOf(m)?.can
                           ? "st-avail-off"
                           : "st-fail"
-                        : `st-${st.cls}`
+                        : ecoMismatch
+                          ? "st-mismatch"
+                          : `st-${st.cls}`
                   }`}
                 >
                   {launching ? (
@@ -305,7 +310,7 @@ export default function ModelsPanel(props: PanelProps) {
                       <Spinner /> 启动中…
                       <span className="state-hint">模型加载中，冷启动需等待（如克隆约 1–2 分钟）</span>
                     </>
-                  ) : ecoDisabled ? (
+                  ) : ecoIdle ? (
                     fitOf(m)?.can ? (
                       <>
                         <Icon icon="lucide:check" width={13} height={13} /> 可用 · 未启用（节能模式）
@@ -317,6 +322,13 @@ export default function ModelsPanel(props: PanelProps) {
                         <span className="state-hint">节能模式未启用，且本机不满足该模型要求</span>
                       </>
                     )
+                  ) : ecoMismatch ? (
+                    <>
+                      <Icon icon={st.icon} width={13} height={13} /> {st.label}
+                      <span className="state-hint mismatch-hint">
+                        ⚠️ 节能模式已设置，此服务仍在运行（占用内存）——重启服务后关闭
+                      </span>
+                    </>
                   ) : (
                     <>
                       <Icon icon={st.icon} width={13} height={13} /> {st.label}

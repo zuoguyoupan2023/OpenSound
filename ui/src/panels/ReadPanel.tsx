@@ -298,13 +298,13 @@ export default function ReadPanel(props: PanelProps) {
           label="Qwen3"
           ready={qwen3Ready}
           starting={computeStarting(getPersistedSettings(), props.health).qwen3}
-          availableOff={computeStarting(getPersistedSettings(), props.health).ecoDisabled("qwen3")}
+          availableOff={!qwen3Ready && computeStarting(getPersistedSettings(), props.health).ecoDisabled("qwen3")}
         />
         <EngineBadge
           label="克隆音色"
           ready={cloneReady}
           starting={computeStarting(getPersistedSettings(), props.health).cosyvoice}
-          availableOff={computeStarting(getPersistedSettings(), props.health).ecoDisabled("cosyvoice")}
+          availableOff={!cloneReady && computeStarting(getPersistedSettings(), props.health).ecoDisabled("cosyvoice")}
         />
       </div>
 

@@ -290,6 +290,14 @@ textarea:focus,
   color: #f59e0b;
 }
 
+.model-state.st-mismatch {
+  color: var(--ok);
+}
+
+.model-state .mismatch-hint {
+  color: #f59e0b;
+}
+
 .model-state.st-fail {
   color: var(--fail);
 }

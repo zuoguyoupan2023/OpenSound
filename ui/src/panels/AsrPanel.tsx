@@ -150,7 +150,7 @@ export default function AsrPanel(props: PanelProps) {
           label="SenseVoice 原始版"
           ready={!!hasOrig}
           starting={computeStarting(getPersistedSettings(), props.health).sensevoiceOriginal}
-          availableOff={computeStarting(getPersistedSettings(), props.health).ecoDisabled("sensevoice-original")}
+          availableOff={!hasOrig && computeStarting(getPersistedSettings(), props.health).ecoDisabled("sensevoice-original")}
         />
         <EngineBadge label="Whisper" ready={true} />
       </div>
