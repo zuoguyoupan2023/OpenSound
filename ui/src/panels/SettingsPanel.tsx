@@ -17,6 +17,7 @@ const ECO_BIG_OPTS: { value: EcoBig; label: string; mem: string; wait: string }[
   { value: "qwen3", label: "Qwen3 TTS（高音质朗读）", mem: "2–4GB", wait: "数十秒" },
   { value: "cosyvoice", label: "CosyVoice 克隆（克隆音色朗读）", mem: "4–6GB", wait: "1–2 分钟" },
   { value: "sensevoice-original", label: "SenseVoice 原始版（高精度识别）", mem: "1.5–2.5GB", wait: "20–60s" },
+  { value: "llm-qwen3-8b", label: "Qwen3-8B 对话（更强对话能力）", mem: "6–8GB", wait: "5–10s" },
 ];
 
 export default function SettingsPanel(props: PanelProps) {

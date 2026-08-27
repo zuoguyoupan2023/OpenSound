@@ -1,10 +1,11 @@
 import { useRef, useState } from "react";
 import type { PanelProps } from "../App";
 import { Icon } from "@iconify/react";
-import { transcribe, computeStarting, getPersistedSettings } from "../api";
+import { transcribe, computeStarting, getPersistedSettings, switchEcoBig, type EcoBig } from "../api";
 import { createRecorder, type Recorder } from "../audio";
 import { saveRecording } from "../audioStore";
 import { Panel, Button, Select, Spinner, EngineBadge } from "../components/ui";
+import { showToast } from "../toast";
 
 type State = "idle" | "recording" | "processing" | "done";
 
@@ -23,6 +24,30 @@ export default function AsrPanel(props: PanelProps) {
   const hasOrig = props.models?.some(
     (m) => m.engine === "sensevoice-original" && m.installed
   );
+
+  // 030：节能模式未启用原始版 → 选项加「（点击切换并启用）」，选中即关旧启新
+  const ecoSettings = getPersistedSettings();
+  const ecoOrigOff = ecoSettings.powerMode === "eco" && ecoSettings.ecoBig !== "sensevoice-original";
+  const pickAsrEngine: (v: string) => Promise<void> = async (v) => {
+    if (v === "sensevoice-original" && ecoSettings.powerMode === "eco" && ecoSettings.ecoBig !== "sensevoice-original") {
+      if (
+        !window.confirm(
+          "节能模式未启用「SenseVoice 原始版」。切换将关闭当前启用的大模型并启动原始版（重启服务，冷启动约 20–60 秒），继续？"
+        )
+      )
+        return;
+      try {
+        await switchEcoBig("sensevoice-original" as EcoBig);
+        showToast("已切换启用「SenseVoice 原始版」，服务重启中…");
+        props.refresh();
+        setTimeout(() => props.refresh(), 1500);
+      } catch (e) {
+        setError("切换失败: " + e);
+        return;
+      }
+    }
+    setEngine(v);
+  };
 
   const toggle = async () => {
     setError("");
@@ -113,11 +138,14 @@ export default function AsrPanel(props: PanelProps) {
           识别引擎
           <Select
             value={engine}
-            onChange={setEngine}
+            onChange={pickAsrEngine}
             options={[
               { value: "auto", label: "自动（SenseVoice 优先）" },
               { value: "sensevoice", label: "SenseVoice 量化版（sherpa · 快）" },
-              { value: "sensevoice-original", label: "SenseVoice 原始版（funasr · 高精度）" },
+              {
+                value: "sensevoice-original",
+                label: `SenseVoice 原始版（funasr · 高精度）${ecoOrigOff ? "（点击切换并启用）" : ""}`,
+              },
               { value: "whisper", label: "Whisper" },
             ]}
           />

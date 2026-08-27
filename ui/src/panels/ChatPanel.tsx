@@ -1,7 +1,7 @@
 import { useRef, useState, useEffect } from "react";
 import type { PanelProps } from "../App";
 import { Icon } from "@iconify/react";
-import { chat, transcribe, speakStream, getCloudApiKey } from "../api";
+import { chat, transcribe, speakStream, getCloudApiKey, getPersistedSettings, switchEcoBig, type EcoBig } from "../api";
 import { createRecorder, type Recorder, createFramePlayer, stopAudio } from "../audio";
 import { saveRecording, teeCollect, mergeWavFrames, saveTts } from "../audioStore";
 import {
@@ -15,6 +15,7 @@ import {
 import { fmtTime, truncate } from "../format";
 import { listVoices, type CloneVoice } from "../voiceStore";
 import { Panel, Button, Select, Spinner, EngineBadge } from "../components/ui";
+import { showToast } from "../toast";
 
 interface Msg {
   role: "user" | "assistant";
@@ -51,6 +52,54 @@ export default function ChatPanel(props: PanelProps) {
   const [input, setInput] = useState("");
   const [engine, setEngine] = useState<string>("llama-cpp");
   const [llmModel, setLlmModel] = useState<string>("llm-qwen3-8b");
+
+  // 030：节能模式在模型选择处直接切换（未启用 → 关旧启新）
+  const ecoSettings = getPersistedSettings();
+  const eco8bOff = ecoSettings.powerMode === "eco" && ecoSettings.ecoBig !== "llm-qwen3-8b";
+  const ecoChatQwenOff = ecoSettings.powerMode === "eco" && ecoSettings.ecoBig !== "qwen3";
+  const ecoChatCloneOff = ecoSettings.powerMode === "eco" && ecoSettings.ecoBig !== "cosyvoice";
+  const pickLlmModel = async (v: string) => {
+    if (v === "llm-qwen3-8b" && eco8bOff) {
+      if (
+        !window.confirm(
+          "节能模式未启用「Qwen3-8B 对话」。切换将关闭当前启用的大模型并启用 8B（重启服务，冷启动约 5–10 秒），继续？"
+        )
+      )
+        return;
+      try {
+        await switchEcoBig("llm-qwen3-8b" as EcoBig);
+        showToast("已切换启用「Qwen3-8B」，服务重启中…");
+        props.refresh();
+        setTimeout(() => props.refresh(), 1500);
+      } catch (e) {
+        showToast("切换失败: " + e);
+        return;
+      }
+    }
+    setLlmModel(v);
+  };
+  const pickChatTts = async (v: "kokoro" | "qwen3" | "clone") => {
+    const ecoKey = v === "clone" ? "cosyvoice" : v === "qwen3" ? "qwen3" : null;
+    if (ecoKey && ecoSettings.powerMode === "eco" && ecoSettings.ecoBig !== ecoKey) {
+      const name = v === "clone" ? "CosyVoice 克隆" : "Qwen3 TTS";
+      if (
+        !window.confirm(
+          `节能模式未启用「${name}」。切换将关闭当前启用的大模型并启动「${name}」（重启服务，冷启动需等待），继续？`
+        )
+      )
+        return;
+      try {
+        await switchEcoBig(ecoKey as EcoBig);
+        showToast(`已切换启用「${name}」，服务重启中…`);
+        props.refresh();
+        setTimeout(() => props.refresh(), 1500);
+      } catch (e) {
+        showToast("切换失败: " + e);
+        return;
+      }
+    }
+    setTtsEngine(v);
+  };
   const [cloudModel, setCloudModel] = useState<string>("deepseek-v4-flash");
   const [ttsEngine, setTtsEngine] = useState<"kokoro" | "qwen3" | "clone">("kokoro");
   const [cloneVoices, setCloneVoices] = useState<CloneVoice[]>([]);
@@ -430,12 +479,14 @@ export default function ChatPanel(props: PanelProps) {
         {engine === "llama-cpp" && (
           <Select
             value={llmModel}
-            onChange={setLlmModel}
+            onChange={pickLlmModel}
             options={
               installedLlmModels.length
                 ? installedLlmModels.map((m) => ({
                     value: m.engine,
-                    label: `模型: ${m.label}`,
+                    label: `模型: ${m.label}${
+                      m.engine === "llm-qwen3-8b" && eco8bOff ? "（点击切换并启用）" : ""
+                    }`,
                   }))
                 : [{ value: "llm-qwen3-8b", label: "模型: Qwen3-8B（未下载）" }]
             }
@@ -450,11 +501,11 @@ export default function ChatPanel(props: PanelProps) {
         )}
         <Select
           value={ttsEngine}
-          onChange={setTtsEngine}
+          onChange={pickChatTts}
           options={[
             { value: "kokoro", label: "朗读: Kokoro" },
-            { value: "qwen3", label: "朗读: Qwen3" },
-            { value: "clone", label: "朗读: 克隆音色" },
+            { value: "qwen3", label: `朗读: Qwen3${ecoChatQwenOff ? "（点击切换并启用）" : ""}` },
+            { value: "clone", label: `朗读: 克隆音色${ecoChatCloneOff ? "（点击切换并启用）" : ""}` },
           ]}
         />
         {ttsEngine === "clone" && (

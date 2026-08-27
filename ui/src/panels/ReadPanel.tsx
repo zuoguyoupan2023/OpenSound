@@ -1,7 +1,7 @@
 import { useRef, useState, useEffect } from "react";
 import type { PanelProps } from "../App";
 import { Icon } from "@iconify/react";
-import { speakStream, computeStarting, getPersistedSettings } from "../api";
+import { speakStream, computeStarting, getPersistedSettings, switchEcoBig, type EcoBig } from "../api";
 import { createFramePlayer, type FramePlayer, stopAudio } from "../audio";
 import {
   teeCollect,
@@ -57,6 +57,33 @@ export default function ReadPanel(props: PanelProps) {
   const kokoroReady = props.health?.tts.kokoro === "ready";
   const qwen3Ready = props.health?.tts.qwen3 === "reachable";
   const cloneReady = props.health?.tts.cosyvoice === "reachable";
+
+  // 030：节能模式下未启用的大模型 → 选项加「（点击切换并启用）」，选中即关旧启新
+  const ecoSettings = getPersistedSettings();
+  const ecoQwenOff = ecoSettings.powerMode === "eco" && ecoSettings.ecoBig !== "qwen3";
+  const ecoCloneOff = ecoSettings.powerMode === "eco" && ecoSettings.ecoBig !== "cosyvoice";
+  const pickEngine: (v: string) => Promise<void> = async (v) => {
+    const ecoKey = v === "clone" ? "cosyvoice" : v === "qwen3" ? "qwen3" : null;
+    if (ecoKey && ecoSettings.powerMode === "eco" && ecoSettings.ecoBig !== ecoKey) {
+      const name = v === "clone" ? "CosyVoice 克隆" : "Qwen3 TTS";
+      if (
+        !window.confirm(
+          `节能模式未启用「${name}」。切换将关闭当前启用的大模型并启动「${name}」（重启服务，冷启动需等待），继续？`
+        )
+      )
+        return;
+      try {
+        await switchEcoBig(ecoKey as EcoBig);
+        showToast(`已切换启用「${name}」，服务重启中…`);
+        props.refresh();
+        setTimeout(() => props.refresh(), 1500);
+      } catch (e) {
+        showToast("切换失败: " + e);
+        return;
+      }
+    }
+    setEngine(v as typeof engine);
+  };
 
   // 加载克隆音色列表（供朗读引擎选用）
   useEffect(() => {
@@ -186,11 +213,17 @@ export default function ReadPanel(props: PanelProps) {
       <div className="toolbar">
         <Select
           value={engine}
-          onChange={setEngine}
+          onChange={pickEngine}
           options={[
             { value: "kokoro", label: "Kokoro（本地，53 音色）" },
-            { value: "qwen3", label: "Qwen3（低延迟）" },
-            { value: "clone", label: "克隆音色（CosyVoice）" },
+            {
+              value: "qwen3",
+              label: `Qwen3（低延迟）${ecoQwenOff ? "（点击切换并启用）" : ""}`,
+            },
+            {
+              value: "clone",
+              label: `克隆音色（CosyVoice）${ecoCloneOff ? "（点击切换并启用）" : ""}`,
+            },
           ]}
         />
         {engine === "clone" && (

@@ -326,6 +326,8 @@ fn start_service(app: &tauri::AppHandle, state: &Arc<AppState>) -> Result<(), St
             ("eco", "qwen3") => (false, true, true),
             ("eco", "cosyvoice") => (true, false, true),
             ("eco", "sensevoice-original") => (true, true, false),
+            // LLM 8B 在 9528 进程内（llama-cpp 按需加载），只需关闭三个 Python 大服务
+            ("eco", "llm-qwen3-8b") => (true, true, true),
             ("eco", _) => (true, true, true), // 节能默认：大模型全关，只留最小集
             _ => (false, false, false),       // 全能默认：全部拉起
         };

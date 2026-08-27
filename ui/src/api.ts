@@ -6,7 +6,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 // 旧版本存 WebView localStorage(tabu_settings)，首次启动自动迁入并清除（011 §5.6 存储规范）
 // 030 阶段一：服务资源模式（powerMode=全能/节能；ecoBig=节能下启用的大模型，单开）
 export type PowerMode = "full" | "eco";
-export type EcoBig = "none" | "qwen3" | "cosyvoice" | "sensevoice-original";
+export type EcoBig = "none" | "qwen3" | "cosyvoice" | "sensevoice-original" | "llm-qwen3-8b";
 
 interface PersistedSettings {
   baseUrl?: string;
@@ -410,6 +410,12 @@ export function computeStarting(
       shouldStart("sensevoice-original") &&
       !health?.models?.some((m) => m.engine === "sensevoice-original" && m.installed),
     shouldStart,
-    ecoDisabled: (s) => eco && (s === "qwen3" || s === "cosyvoice" || s === "sensevoice-original") && s !== big,
+    ecoDisabled: (s) => eco && (s === "qwen3" || s === "cosyvoice" || s === "sensevoice-original" || s === "llm-qwen3-8b") && s !== big,
   };
+}
+
+// 节能模式下从模型选择处切换大模型：更新 ecoBig → 重启服务（关闭旧模型、启动新模型）
+export async function switchEcoBig(key: EcoBig, powerMode: PowerMode = "eco"): Promise<void> {
+  await updateSettings({ powerMode, ecoBig: key });
+  await invoke("start_service_cmd");
 }
