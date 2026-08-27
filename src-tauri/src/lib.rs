@@ -44,6 +44,10 @@ struct ServiceStatus {
 
 // ---------- 工具：找 node ----------
 fn find_node() -> Option<String> {
+    // 031 跨平台：Win 用 node.exe / PATH 分号 / nvm-windows；Unix 用 node / 冒号 / nvm-homebrew
+    let is_win = std::env::consts::OS == "windows";
+    let exe = if is_win { "node.exe" } else { "node" };
+    let sep = if is_win { ';' } else { ':' };
     // 1) 环境变量显式指定
     if let Ok(p) = std::env::var("TABU_NODE_PATH") {
         if !p.is_empty() {
@@ -52,29 +56,49 @@ fn find_node() -> Option<String> {
     }
     // 2) PATH 中找（dev 时终端 PATH 有 node）
     if let Ok(path) = std::env::var("PATH") {
-        for dir in path.split(':') {
-            let cand = PathBuf::from(dir).join("node");
+        for dir in path.split(sep) {
+            let cand = PathBuf::from(dir).join(exe);
             if cand.is_file() {
                 return Some(cand.to_string_lossy().into_owned());
             }
         }
     }
-    // 3) nvm 常见位置
-    if let Ok(home) = std::env::var("HOME") {
-        let nvm = PathBuf::from(&home).join(".nvm/versions/node");
-        if let Ok(entries) = fs::read_dir(&nvm) {
-            for e in entries.flatten() {
-                let cand = e.path().join("bin/node");
-                if cand.is_file() {
-                    return Some(cand.to_string_lossy().into_owned());
+    // 3) nvm 常见位置（Unix: ~/.nvm/versions/node/<v>/bin/node；Win: %APPDATA%\nvm\<v>\node.exe）
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        if !is_win {
+            let nvm = PathBuf::from(&home).join(".nvm/versions/node");
+            if let Ok(entries) = fs::read_dir(&nvm) {
+                for e in entries.flatten() {
+                    let cand = e.path().join("bin/node");
+                    if cand.is_file() {
+                        return Some(cand.to_string_lossy().into_owned());
+                    }
+                }
+            }
+        } else {
+            let nvm = PathBuf::from(&home).join("AppData").join("Roaming").join("nvm");
+            if let Ok(entries) = fs::read_dir(&nvm) {
+                for e in entries.flatten() {
+                    let cand = e.path().join("node.exe");
+                    if cand.is_file() {
+                        return Some(cand.to_string_lossy().into_owned());
+                    }
                 }
             }
         }
     }
-    // 4) Homebrew 常见位置
-    for p in ["/opt/homebrew/bin/node", "/usr/local/bin/node"] {
-        if PathBuf::from(p).is_file() {
-            return Some(p.to_string());
+    // 4) 常见固定位置
+    if is_win {
+        for p in [r"C:\Program Files\nodejs\node.exe", r"C:\Program Files (x86)\nodejs\node.exe"] {
+            if PathBuf::from(p).is_file() {
+                return Some(p.to_string());
+            }
+        }
+    } else {
+        for p in ["/opt/homebrew/bin/node", "/usr/local/bin/node"] {
+            if PathBuf::from(p).is_file() {
+                return Some(p.to_string());
+            }
         }
     }
     None

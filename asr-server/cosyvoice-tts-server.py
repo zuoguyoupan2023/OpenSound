@@ -85,11 +85,21 @@ def normalize_reference(text):
     return text
 
 
+def auto_device():
+    """031 跨平台：自动检测 cuda → mps → cpu（Windows=N卡走 cuda，Mac 走 mps）。"""
+    import torch
+    if torch.cuda.is_available():
+        return 'cuda'
+    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        return 'mps'
+    return 'cpu'
+
+
 def load_model(model_dir, device):
     import torch
     from cosyvoice.cli.cosyvoice import AutoModel
-    if device not in ('mps', 'cpu'):
-        device = 'mps' if torch.backends.mps.is_available() else 'cpu'
+    if device not in ('cuda', 'mps', 'cpu'):
+        device = auto_device()
     print(f'[cosyvoice] 加载模型 {model_dir} (device={device})… 首次加载较慢')
     t0 = time.time()
     model = AutoModel(model_dir=model_dir)
@@ -337,7 +347,7 @@ if __name__ == '__main__':
     ap.add_argument('--port', type=int, default=8003)
     ap.add_argument('--model-dir', default=os.path.join(_HERE, 'models', 'cosyvoice', 'Fun-CosyVoice3-0.5B'))
     ap.add_argument('--voice-dir', default=os.path.join(_HERE, 'data', 'clone-voices'))
-    ap.add_argument('--device', default='mps', help='mps | cpu')
+    ap.add_argument('--device', default=None, help='cuda | mps | cpu（默认自动检测）')
     args = ap.parse_args()
 
     VOICE_DIR = args.voice_dir

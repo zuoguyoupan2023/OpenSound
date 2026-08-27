@@ -123,8 +123,9 @@ def load_model(model_name, device, hf_mirror):
         from qwen_tts import Qwen3TTSModel
     except ImportError:
         raise RuntimeError('缺少 qwen-tts：pip install -U qwen-tts')
-    if device not in ('mps', 'cpu'):
-        device = 'mps' if torch.backends.mps.is_available() else 'cpu'
+    if device not in ('cuda', 'mps', 'cpu'):
+        # 031 跨平台：自动检测 cuda → mps → cpu（Windows=N卡走 cuda，Mac 走 mps）
+        device = 'cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu')
     print(f'[qwen3-tts] 加载模型 {model_name} (device={device})… 首次会下载，较慢')
     model = Qwen3TTSModel.from_pretrained(model_name, device_map=device, dtype=torch.bfloat16)
     print('[qwen3-tts] 模型就绪')
@@ -264,7 +265,7 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == '__main__':
     ap = argparse.ArgumentParser(description='Qwen3-TTS 本地服务')
     ap.add_argument('--port', type=int, default=8001)
-    ap.add_argument('--device', default='mps', help='mps | cpu')
+    ap.add_argument('--device', default=None, help='cuda | mps | cpu（默认自动检测）')
     ap.add_argument('--model', default='Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice')
     ap.add_argument('--hf-mirror', action='store_true', help='使用 hf-mirror 下载模型')
     args = ap.parse_args()

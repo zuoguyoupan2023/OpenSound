@@ -16,7 +16,7 @@
 
 import http from 'node:http';
 import { execSync, spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, statfsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDeviceProfile } from './device-profile.js';
@@ -1253,16 +1253,24 @@ const INSTALLERS = {
       ctx.nd({ type: 'log', message: 'CosyVoice 源码已存在（vendor/cosyvoice）✓' });
     }
 
-    // ③ venv 自建：缺失才装（含 torch，首次可能几分钟）
-    const venvPy = path.join(__dirname, '.venv-cosyvoice', 'bin', 'python3');
+    // ③ venv 自建：缺失才装（含 torch，首次可能几分钟）；031 跨平台：Win 用 Scripts/python.exe
+    const IS_WIN = process.platform === 'win32';
+    const venvDir = path.join(__dirname, '.venv-cosyvoice');
+    const venvPy = IS_WIN
+      ? path.join(venvDir, 'Scripts', 'python.exe')
+      : path.join(venvDir, 'bin', 'python3');
     if (!existsSync(venvPy)) {
       ctx.nd({ type: 'log', message: '.venv-cosyvoice 缺失 → 创建并安装锁定依赖（首次约几分钟）…' });
       let sysPy = process.env.PY_SYS;
-      if (!sysPy) { try { sysPy = execSync('which python3', { encoding: 'utf8' }).trim(); } catch {} }
+      if (!sysPy) {
+        try {
+          sysPy = execSync(IS_WIN ? 'where python3' : 'which python3', { encoding: 'utf8' }).trim().split('\n')[0];
+        } catch {}
+      }
       if (!sysPy) throw new Error('未找到系统 python3（创建 venv 需要）');
       ctx.nd({ type: 'log', message: `python3 = ${sysPy}` });
       await new Promise((resolve, reject) => {
-        const p = spawn(sysPy, ['-m', 'venv', path.join(__dirname, '.venv-cosyvoice')], { cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'] });
+        const p = spawn(sysPy, ['-m', 'venv', venvDir], { cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'] });
         const onData = (chunk) => String(chunk).split('\n').filter(Boolean)
           .forEach((line) => ctx.nd({ type: 'log', message: line }));
         p.stdout.on('data', onData); p.stderr.on('data', onData);
@@ -1270,8 +1278,9 @@ const INSTALLERS = {
         p.on('exit', (code) => code === 0 ? resolve() : reject(new Error(`venv 创建失败（退出码 ${code}）`)));
       });
       ctx.nd({ type: 'log', message: 'venv 创建完成，pip 安装依赖…' });
+      const venvPip = IS_WIN ? path.join(venvDir, 'Scripts', 'pip.exe') : path.join(venvDir, 'bin', 'pip');
       await new Promise((resolve, reject) => {
-        const p = spawn(path.join(__dirname, '.venv-cosyvoice', 'bin', 'pip'), ['install', '-r', path.join(__dirname, 'requirements-cosyvoice.lock')],
+        const p = spawn(venvPip, ['install', '-r', path.join(__dirname, 'requirements-cosyvoice.lock')],
           { cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'] });
         const onData = (chunk) => String(chunk).split('\n').filter(Boolean)
           .forEach((line) => ctx.nd({ type: 'log', message: line }));
@@ -1561,12 +1570,11 @@ const server = http.createServer(async (req, res) => {
     return send(200, { ok: false, message: '当前没有进行中的下载' });
   }
 
-  // 磁盘剩余空间（S3：模型管理面板展示）
+  // 磁盘剩余空间（S3：模型管理面板展示；031 跨平台：statfsSync 替代 df -k，Win/mac 通用）
   if (req.method === 'GET' && url.pathname === '/disk') {
     try {
-      const out = execSync(`df -k "${__dirname}"`).toString().trim().split('\n');
-      const cols = out[out.length - 1].split(/\s+/);
-      const availBytes = Number(cols[3]) * 1024;
+      const st = statfsSync(__dirname);
+      const availBytes = Number(st.bavail) * Number(st.bsize);
       return send(200, { availBytes });
     } catch { return send(200, { availBytes: null }); }
   }

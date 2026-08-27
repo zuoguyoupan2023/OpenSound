@@ -2,7 +2,17 @@
 node_modules/
 models/
 .venv-qwen3/
+.venv-cosyvoice/
+.venv-funasr/
 npm-debug.log*
+
+# ===== vendor 源码仓库（体积大，安装时 git clone 拉取，不提交） =====
+asr-server/vendor/
+asr-server/models/indextts/
+
+# ===== uv 缓存（项目内缓存目录） =====
+.uv-cache/
+.uv-python/
 
 asr-server/data/cache/
 asr-server/data/clone-voices/

@@ -21,16 +21,31 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PY = path.join(__dirname, '.venv-qwen3', 'bin', 'python3');
+// 031 跨平台：venv 可执行文件路径（Win=Scripts/python.exe，Unix=bin/python3）
+const IS_WIN = process.platform === 'win32';
+const venvPy = (name) => (IS_WIN
+  ? path.join(__dirname, name, 'Scripts', 'python.exe')
+  : path.join(__dirname, name, 'bin', 'python3'));
+const PY = venvPy('.venv-qwen3');
 // CosyVoice3 克隆服务用 .venv-cosyvoice（复用系统 torch + 本地 CosyVoice 源码）
-const PY_COSYVOICE = path.join(__dirname, '.venv-cosyvoice', 'bin', 'python3');
+const PY_COSYVOICE = venvPy('.venv-cosyvoice');
 // SenseVoice 原始版（funasr）用 .venv-funasr（S6：与 qwen3/cosyvoice 同款受管 venv；
 // 建议 --system-site-packages 复用系统 torch/funasr；缺失时见下方自举指引）
-const PY_FUNASR = path.join(__dirname, '.venv-funasr', 'bin', 'python3');
+const PY_FUNASR = venvPy('.venv-funasr');
 
-// ---------- S1：系统 python 探测序列（替代 /opt/homebrew 绝对路径硬编码） ----------
+// ---------- S1：系统 python 探测序列（替代 /opt/homebrew 绝对路径硬编码；031 跨平台） ----------
 function detectSysPython() {
   if (process.env.PY_SYS) return process.env.PY_SYS;
+  if (IS_WIN) {
+    // Win：where python3 / python 找可执行文件路径；找不到返回 null（安装器自举兜底）
+    for (const cmd of ['python3', 'python']) {
+      try {
+        const p = execSync(`where ${cmd}`, { encoding: 'utf8' }).trim().split('\n')[0];
+        if (p && existsSync(p)) return p;
+      } catch { /* 尝试下一个 */ }
+    }
+    return null;
+  }
   const candidates = [];
   try { candidates.push(execSync('which python3', { encoding: 'utf8' }).trim()); } catch {}
   // 常见安装位置兜底（Apple Silicon homebrew / Intel homebrew / 系统）
@@ -103,18 +118,30 @@ async function probe(url) {
   } catch { return { up: false, version: null }; }
 }
 
-// 返回占用某端口(仅 TCP LISTEN)的进程 PID 列表。
-// ⚠️ 必须加 -sTCP:LISTEN 且排除自身：探测 /health 的出站连接同样带 tcp:9528，
+// 返回占用某端口(仅 TCP LISTEN)的进程 PID 列表（031 跨平台：Win 用 netstat，mac/Linux 用 lsof）。
+// ⚠️ 必须仅取 LISTENING 且排除自身：探测 /health 的出站连接同样带 tcp:9528，
 //    否则旧版本替换分支会把自己也列进去 → 自杀（S2 实测踩坑：exit 143）。
 function portPids(port) {
   try {
+    if (IS_WIN) {
+      const out = execSync(`netstat -ano -p tcp | findstr :${port} | findstr LISTENING`).toString();
+      const pids = new Set();
+      for (const line of out.split('\n')) {
+        const pid = line.trim().split(/\s+/).pop();
+        if (pid && !isNaN(Number(pid)) && Number(pid) !== process.pid) pids.add(Number(pid));
+      }
+      return [...pids];
+    }
     const out = execSync(`lsof -ti tcp:${port} -sTCP:LISTEN`).toString().trim();
     return out ? out.split('\n').map(Number).filter((n) => n && n !== process.pid) : [];
   } catch { return []; }
 }
 function killPids(pids) {
   for (const p of pids) {
-    try { process.kill(Number(p), 'SIGTERM'); } catch {}
+    try {
+      if (IS_WIN) execSync(`taskkill /PID ${p} /F`);
+      else process.kill(Number(p), 'SIGTERM');
+    } catch {}
   }
 }
 

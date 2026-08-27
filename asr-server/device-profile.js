@@ -10,7 +10,9 @@
 
 import { execSync } from 'node:child_process';
 import os from 'node:os';
+import { statfsSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 // systeminformation 为可选依赖：未安装时降级为 nvidia-smi / 系统命令探测，服务照常启动。
@@ -69,13 +71,12 @@ export async function probeDevice() {
   return device;
 }
 
-// 磁盘剩余（GB）：与 /disk 同款 df 只读探测
+// 磁盘剩余（GB）：statfsSync 跨平台（031 适配：替代 df -k，Win/mac 通用）
 function probeDiskFreeGB() {
   try {
-    const dir = import.meta.url ? new URL('.', import.meta.url).pathname : process.cwd();
-    const out = execSync(`df -k "${dir}"`).toString().trim().split('\n');
-    const cols = out[out.length - 1].split(/\s+/);
-    return Math.floor((Number(cols[3]) * 1024) / 1e9);
+    const dir = fileURLToPath(new URL('.', import.meta.url));
+    const st = statfsSync(dir);
+    return Math.floor((Number(st.bavail) * Number(st.bsize)) / 1e9);
   } catch { return null; }
 }
 
