@@ -265,8 +265,9 @@ export default function ModelsPanel(props: PanelProps) {
               : true
             : true;
           const readyNoRun = stateOf(m) === "ready";
-          const launching = readyNoRun && bigShouldStart;
-          const ecoDisabled = readyNoRun && !!ecoBigKey && !bigShouldStart;
+          // 模式期望优先：节能未选的大模型，无论实际进程是否残留 running，一律显示「未启用」黄/红
+          const ecoDisabled = !!ecoBigKey && !bigShouldStart;
+          const launching = !ecoDisabled && readyNoRun && bigShouldStart;
           return (
             <div key={m.engine} className={`model-row ${busyHere ? "busy" : ""}`}>
               <div className="model-info">
@@ -287,10 +288,16 @@ export default function ModelsPanel(props: PanelProps) {
                   <span className="model-size">{m.size}</span>
                 </div>
 
-                {/* 状态行：启动中 / 未启用（节能） / 常规五态 */}
+                {/* 状态行：启动中 / 可用未启用(黄) / 设备不满足(红) / 常规五态 */}
                 <div
                   className={`model-state ${
-                    launching ? "st-launch" : ecoDisabled ? "st-eco-off" : `st-${st.cls}`
+                    launching
+                      ? "st-launch"
+                      : ecoDisabled
+                        ? fitOf(m)?.can
+                          ? "st-avail-off"
+                          : "st-fail"
+                        : `st-${st.cls}`
                   }`}
                 >
                   {launching ? (
@@ -299,9 +306,17 @@ export default function ModelsPanel(props: PanelProps) {
                       <span className="state-hint">模型加载中，冷启动需等待（如克隆约 1–2 分钟）</span>
                     </>
                   ) : ecoDisabled ? (
-                    <>
-                      <Icon icon="lucide:power" width={13} height={13} /> 未启用（节能模式）
-                    </>
+                    fitOf(m)?.can ? (
+                      <>
+                        <Icon icon="lucide:check" width={13} height={13} /> 可用 · 未启用（节能模式）
+                        <span className="state-hint">可切换使用 → 设置 · 服务资源模式</span>
+                      </>
+                    ) : (
+                      <>
+                        <Icon icon="lucide:x" width={13} height={13} /> 设备不满足
+                        <span className="state-hint">节能模式未启用，且本机不满足该模型要求</span>
+                      </>
+                    )
                   ) : (
                     <>
                       <Icon icon={st.icon} width={13} height={13} /> {st.label}

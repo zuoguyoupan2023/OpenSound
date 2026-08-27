@@ -388,6 +388,10 @@ export interface StartingMap {
   qwen3: boolean;
   cosyvoice: boolean;
   sensevoiceOriginal: boolean;
+  /** 该大模型是否在"应启动集合"（全能=true；节能=仅 eco_big 选中的） */
+  shouldStart: (key: string) => boolean;
+  /** 节能模式下未启用的大模型（可用但未开，UI 显示黄"可切换使用"） */
+  ecoDisabled: (key: string) => boolean;
 }
 
 export function computeStarting(
@@ -405,5 +409,7 @@ export function computeStarting(
     sensevoiceOriginal:
       shouldStart("sensevoice-original") &&
       !health?.models?.some((m) => m.engine === "sensevoice-original" && m.installed),
+    shouldStart,
+    ecoDisabled: (s) => eco && (s === "qwen3" || s === "cosyvoice" || s === "sensevoice-original") && s !== big,
   };
 }

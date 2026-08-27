@@ -277,12 +277,21 @@ textarea:focus,
   gap: 5px;
 }
 
+.engine-badge.available {
+  background: rgba(245, 158, 11, 0.16);
+  color: #f59e0b;
+}
+
 .model-state.st-launch {
   color: var(--accent);
 }
 
-.model-state.st-eco-off {
-  color: var(--muted);
+.model-state.st-avail-off {
+  color: #f59e0b;
+}
+
+.model-state.st-fail {
+  color: var(--fail);
 }
 
 .model-state .spinner {

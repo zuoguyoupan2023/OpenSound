@@ -30,16 +30,26 @@ export function EngineBadge({
   label,
   ready,
   starting,
+  availableOff,
 }: {
   label: string;
   ready: boolean;
   /** 已按模式/用户选择启动、但服务仍在加载（如 cosyvoice 9GB 模型冷启动 1-2 分钟） */
   starting?: boolean;
+  /** 可用但节能模式未启用（黄勾，可切换使用） */
+  availableOff?: boolean;
 }) {
   if (starting) {
     return (
       <span className="engine-badge starting" title="服务已拉起，模型加载中…">
         <Spinner /> {label} 启动中…
+      </span>
+    );
+  }
+  if (availableOff) {
+    return (
+      <span className="engine-badge available" title="本机可用，但节能模式未启用；可在「设置 → 服务资源模式」切换">
+        {label} <Icon icon="lucide:check" width={13} height={13} /> 未启用·可切换
       </span>
     );
   }

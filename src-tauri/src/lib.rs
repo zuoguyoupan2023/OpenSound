@@ -372,6 +372,23 @@ fn start_service(app: &tauri::AppHandle, state: &Arc<AppState>) -> Result<(), St
 fn stop_service(state: &Arc<AppState>) {
     let mut guard = state.child.lock().unwrap();
     if let Some(mut child) = guard.take() {
+        let pid = child.id();
+        // 031 生命周期：不能只 kill start-all（会留孤儿子进程占端口）。
+        // Unix 发 SIGTERM → start-all 的信号 handler 会先杀全部子服务再退出；
+        // Windows 用 taskkill /T 树杀。
+        #[cfg(unix)]
+        let _ = std::process::Command::new("kill").arg("-TERM").arg(pid.to_string()).status();
+        #[cfg(windows)]
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .status();
+        // 等 start-all 清理完子进程（最多 5 秒），超时兜底强杀
+        for _ in 0..10 {
+            if child.try_wait().ok().flatten().is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
         let _ = child.kill();
         let _ = child.wait();
     }
@@ -581,10 +598,11 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // 关闭窗口 → 隐藏，不退出（托盘常驻，服务继续）
+            // 031 生命周期：关闭窗口 = 退出 app 并停止全部服务（RunEvent::Exit → stop_service 杀服务树），
+            // 避免"关闭再打开秒绿/孤儿进程占端口"。需要常驻托盘的用户可改回 hide。
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let _ = window.hide();
+                window.app_handle().exit(0);
             }
         })
         .invoke_handler(tauri::generate_handler![

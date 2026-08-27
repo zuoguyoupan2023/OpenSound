@@ -90,9 +90,25 @@ const EXPECTED_VERSION = '2.6.0';
 
 function run(cmd, args, name, env = {}) {
   const p = spawn(cmd, args, { stdio: 'inherit', cwd: __dirname, env: { ...process.env, ...MANAGED_ENV, ...env } });
-  p.on('exit', (code) => console.log(`[start-all] ${name} 退出 (code=${code})`));
+  children.add(p);
+  p.on('exit', (code) => { children.delete(p); console.log(`[start-all] ${name} 退出 (code=${code})`); });
   return p;
 }
+
+// 031 生命周期：start-all 收到终止信号 → 杀掉全部子服务再退出（避免孤儿进程占端口）。
+// Tauri 退出时 stop_service 发 SIGTERM（Unix）/ taskkill 树杀（Win）；本 handler 兜底 Unix 路径。
+const children = new Set();
+function shutdown(sig) {
+  console.log(`[start-all] 收到 ${sig}，终止全部子服务…`);
+  for (const c of [...children]) { try { c.kill('SIGTERM'); } catch {} }
+  setTimeout(() => { for (const c of [...children]) { try { c.kill('SIGKILL'); } catch {} } }, 3000).unref();
+  const iv = setInterval(() => { if (children.size === 0) { clearInterval(iv); process.exit(0); } }, 200);
+  iv.unref();
+  setTimeout(() => process.exit(0), 5000).unref(); // 兜底
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGHUP', () => shutdown('SIGHUP'));
 
 // S1：启动时打印实际生效的模型/缓存路径（可见即验收）
 console.log('[start-all] 统一落盘（002-plan S1）：');
