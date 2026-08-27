@@ -17,7 +17,9 @@ const HF_REPO = 'csukuangfj/kokoro-multi-lang-v1_0';
 const HF_API = 'https://hf-mirror.com/api/models/' + HF_REPO;
 const HF_BASE = 'https://hf-mirror.com/' + HF_REPO + '/resolve/main';
 const GH_TAR = 'https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_0.tar.bz2';
-const REQUIRED = ['model.onnx', 'voices.bin', 'tokens.txt', 'espeak-ng-data', 'lexicon-us-en.txt', 'lexicon-zh.txt', 'date-zh.fst', 'number-zh.fst'];
+// 033 修复：REQUIRED 必须覆盖就绪清单（engines/kokoro.json）全部项——曾漏掉 phone-zh.fst 与 dict/，
+// 导致"完成短路"永远触发、这两项永不下载、模型页永远显示缺文件。
+const REQUIRED = ['model.onnx', 'voices.bin', 'tokens.txt', 'espeak-ng-data', 'lexicon-us-en.txt', 'lexicon-zh.txt', 'date-zh.fst', 'number-zh.fst', 'phone-zh.fst', 'dict'];
 // 032 修复：期望字节数（与 engines/kokoro.json checks 一致）——下载中断会留"存在但损坏"文件，
 // 只查存在会被跳过（导致 sherpa 加载崩溃）；校验后损坏文件删掉重下。
 const EXPECTED = { 'model.onnx': 325630829, 'voices.bin': 27678720, 'tokens.txt': 687, 'lexicon-zh.txt': 2364621, 'date-zh.fst': 59154 };
