@@ -19,11 +19,18 @@ export default function AsrPanel(props: PanelProps) {
   const [elapsed, setElapsed] = useState<number>(0);
   const recRef = useRef<Recorder | null>(null);
 
-  const hasSense = props.health?.engines?.some((e) => e.includes("sensevoice"));
-  // 原始版状态：从 /models 里 sensevoice-original 的 installed 读真实可达性（= funasr 后端 8002 是否在跑）
+  // 032 修复：就绪判定以 /models 状态列（state=ready/running）为准；
+  // 不能用 health.engines（含"sensevoice(未下载)"占位）或写死 true，否则未装也显绿勾。
+  const svReady = props.models?.some(
+    (m) => m.engine === "sensevoice" && (m.state === "ready" || m.state === "running")
+  ) ?? false;
+  // 原始版状态：从 /models 里 sensevoice-original 的 state 读真实可达性（= funasr 后端 8002 是否在跑）
   const hasOrig = props.models?.some(
-    (m) => m.engine === "sensevoice-original" && m.installed
-  );
+    (m) => m.engine === "sensevoice-original" && (m.state === "ready" || m.state === "running")
+  ) ?? false;
+  const whisperReady = props.models?.some(
+    (m) => m.engine === "whisper" && (m.state === "ready" || m.state === "running")
+  ) ?? false;
 
   // 030：节能模式未启用原始版 → 选项加「（点击切换并启用）」，选中即关旧启新
   const ecoSettings = getPersistedSettings();
@@ -171,7 +178,7 @@ export default function AsrPanel(props: PanelProps) {
       <div className="engine-status">
         <EngineBadge
           label="SenseVoice 量化版"
-          ready={!!hasSense}
+          ready={svReady}
           starting={computeStarting(getPersistedSettings(), props.health).asr}
         />
         <EngineBadge
@@ -180,7 +187,7 @@ export default function AsrPanel(props: PanelProps) {
           starting={computeStarting(getPersistedSettings(), props.health).sensevoiceOriginal}
           availableOff={!hasOrig && computeStarting(getPersistedSettings(), props.health).ecoDisabled("sensevoice-original")}
         />
-        <EngineBadge label="Whisper" ready={true} />
+        <EngineBadge label="Whisper" ready={whisperReady} />
       </div>
 
       {error && (

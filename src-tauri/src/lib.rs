@@ -167,11 +167,11 @@ fn get_models_catalog(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) ->
     Ok(out)
 }
 
-// 本机磁盘剩余（字节）：本地文件系统直查，不依赖 9528（fs2 跨平台：win=GetDiskFreeSpaceEx / unix=statvfs）
+// 本机磁盘剩余（字节）：本地文件系统直查，不依赖 9528；探测**模型存放目录（数据根）**所在盘，
+// 与设备画像（服务端 probeDiskFreeGB）口径一致（fs2 跨平台：win=GetDiskFreeSpaceEx / unix=statvfs）
 #[tauri::command]
-fn get_disk_local(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) -> Result<u64, String> {
-    let dir = server_dir(&app, &state).ok_or("无法定位 asr-server 目录")?;
-    fs2::available_space(&dir).map_err(|e| format!("磁盘探测失败：{e}"))
+fn get_disk_local(app: tauri::AppHandle) -> Result<u64, String> {
+    fs2::available_space(&data_root(&app)).map_err(|e| format!("磁盘探测失败：{e}"))
 }
 
 // ---------- 工具：找 node ----------
@@ -581,7 +581,13 @@ fn data_root(app: &tauri::AppHandle) -> PathBuf {
             return PathBuf::from(p);
         }
     }
-    app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("."))
+    // 032 P3 拍板：默认数据目录 = <用户下载目录>/opensound-download（Win/Mac 一致）：
+    // 模型体积大，不放系统盘/系统目录（原 app_data_dir 在 C 盘系统盘，容易塞满）。
+    // 用户可在设置「模型存放目录」里改任意位置（如 E:\opensound-download）。
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .unwrap_or_default();
+    PathBuf::from(home).join("Downloads").join("opensound-download")
 }
 
 fn load_config(app: &tauri::AppHandle) -> PersistedConfig {

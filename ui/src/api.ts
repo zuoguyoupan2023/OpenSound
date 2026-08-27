@@ -473,13 +473,19 @@ export function computeStarting(
   const eco = settings.powerMode === "eco";
   const big = settings.ecoBig || "none";
   const shouldStart = (s: string) => (eco ? s === big : true); // 节能只开 eco_big；全能全开
+  // 032 修复：冷启动（启动中…）的前提是「模型文件+环境已就绪（state=ready/running），只差服务进程」；
+  // 未下载/缺环境的引擎显示「未就绪」，不再无限转圈、误导以为在自动装模型。
+  const fileReady = (engine: string) =>
+    health?.models?.some((m) => m.engine === engine && (m.state === "ready" || m.state === "running")) ?? false;
   return {
     asr: health == null,
     kokoro: health == null,
-    qwen3: shouldStart("qwen3") && health?.tts.qwen3 !== "reachable",
-    cosyvoice: shouldStart("cosyvoice") && health?.tts.cosyvoice !== "reachable",
+    qwen3: shouldStart("qwen3") && health?.tts.qwen3 !== "reachable" && fileReady("qwen3"),
+    cosyvoice:
+      shouldStart("cosyvoice") && health?.tts.cosyvoice !== "reachable" && fileReady("cosyvoice-clone"),
     sensevoiceOriginal:
       shouldStart("sensevoice-original") &&
+      fileReady("sensevoice-original") &&
       !health?.models?.some((m) => m.engine === "sensevoice-original" && m.installed),
     shouldStart,
     ecoDisabled: (s) => eco && (s === "qwen3" || s === "cosyvoice" || s === "sensevoice-original" || s === "llm-qwen3-8b") && s !== big,

@@ -310,7 +310,7 @@ export default function SettingsPanel(props: PanelProps) {
               className="input"
               value={modelDataRoot}
               onChange={(e) => setModelDataRoot(e.target.value)}
-              placeholder="留空 = 默认数据目录"
+              placeholder="留空 = 默认（下载目录/opensound-download）"
               disabled={dataRootLoading}
             />
             <Button onClick={saveDataRoot} disabled={dataRootBusy || dataRootLoading}>
