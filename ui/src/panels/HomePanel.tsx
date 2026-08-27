@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import type { PanelProps } from "../App";
 import { Icon } from "@iconify/react";
-import { voiceChat, updateSettings, getPersistedSettings, type PowerMode } from "../api";
+import { voiceChat, updateSettings, getPersistedSettings, computeStarting, type PowerMode } from "../api";
 import { createRecorder, type Recorder, playWav, stopAudio } from "../audio";
 import { saveRecording, saveTts } from "../audioStore";
 import { Panel, Button, EngineBadge, Select, Spinner } from "../components/ui";
@@ -219,6 +219,7 @@ export default function HomePanel(props: PanelProps) {
         <EngineBadge
           label="ASR"
           ready={!!props.health && (props.health.engines?.length ?? 0) > 0}
+          starting={computeStarting(getPersistedSettings(), props.health).asr}
         />
         <EngineBadge
           label="LLM"
@@ -227,6 +228,7 @@ export default function HomePanel(props: PanelProps) {
         <EngineBadge
           label={`朗读·${ttsEngine}`}
           ready={!!props.health && ttsReady}
+          starting={computeStarting(getPersistedSettings(), props.health).kokoro}
         />
       </div>
 

@@ -13,7 +13,7 @@ import {
 } from "../voiceStore";
 import type { AudioRecord } from "../audioStore";
 import { saveRecording } from "../audioStore";
-import { speakStream, transcribe, getPersistedSettings } from "../api";
+import { speakStream, transcribe, getPersistedSettings, computeStarting } from "../api";
 import { createFramePlayer, stopAudio, type FramePlayer } from "../audio";
 import { Panel, Button, Spinner } from "../components/ui";
 
@@ -262,13 +262,17 @@ export default function VoicePanel(props: PanelProps) {
         </div>
       )}
 
-      {/* 030：当前可用的克隆音色模型（引擎）状态 */}
+      {/* 030：当前可用的克隆音色模型（引擎）状态；三态：运行中 / 启动中 / 未就绪 */}
       <div className="clone-engine-line">
         <Icon icon="lucide:server" width={13} height={13} />
         克隆引擎：<b>CosyVoice3</b>（Fun-CosyVoice3-0.5B）
         {cosyReady ? (
           <span className="badge fit-ok" style={{ marginLeft: 8 }}>
             <Icon icon="lucide:circle-check" width={11} height={11} /> 运行中
+          </span>
+        ) : computeStarting(getPersistedSettings(), props.health).cosyvoice ? (
+          <span className="badge fit-slow" style={{ marginLeft: 8, display: "inline-flex", alignItems: "center", gap: 4 }}>
+            <Spinner /> 启动中…（加载 9GB 模型，约 1–2 分钟）
           </span>
         ) : (
           <span className="badge fit-no" style={{ marginLeft: 8 }}>

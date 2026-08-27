@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { PanelProps } from "../App";
 import { Icon } from "@iconify/react";
-import { cancelInstall, getDisk, getDeviceProfile, installModel } from "../api";
+import { cancelInstall, getDisk, getDeviceProfile, installModel, getPersistedSettings } from "../api";
 import type { DeviceProfile, EngineFit, InstallProgress, ModelInfo } from "../types";
 import { Panel, Button, Spinner } from "../components/ui";
 
@@ -250,6 +250,23 @@ export default function ModelsPanel(props: PanelProps) {
         {props.models.map((m) => {
           const st = STATE_META[stateOf(m)] || STATE_META.ready;
           const busyHere = installing === m.engine;
+          // 030 启动中判定：文件就绪（state=ready）但服务应启动未 running → 冷启动加载中；
+          // 节能模式下未选择的大模型 → 「未启用」而非缺文件/启动中
+          const BIG_ENGINE_KEY: Record<string, string> = {
+            qwen3: "qwen3",
+            "cosyvoice-clone": "cosyvoice",
+            "sensevoice-original": "sensevoice-original",
+          };
+          const ecoBigKey = BIG_ENGINE_KEY[m.engine];
+          const pm = getPersistedSettings();
+          const bigShouldStart = ecoBigKey
+            ? pm.powerMode === "eco"
+              ? pm.ecoBig === ecoBigKey
+              : true
+            : true;
+          const readyNoRun = stateOf(m) === "ready";
+          const launching = readyNoRun && bigShouldStart;
+          const ecoDisabled = readyNoRun && !!ecoBigKey && !bigShouldStart;
           return (
             <div key={m.engine} className={`model-row ${busyHere ? "busy" : ""}`}>
               <div className="model-info">
@@ -270,11 +287,28 @@ export default function ModelsPanel(props: PanelProps) {
                   <span className="model-size">{m.size}</span>
                 </div>
 
-                {/* 状态行 */}
-                <div className={`model-state st-${st.cls}`}>
-                  <Icon icon={st.icon} width={13} height={13} /> {st.label}
-                  {!needFix(m) && m.serviceUp && stateOf(m) === "ready" && (
-                    <span className="state-hint">服务进程未拉起</span>
+                {/* 状态行：启动中 / 未启用（节能） / 常规五态 */}
+                <div
+                  className={`model-state ${
+                    launching ? "st-launch" : ecoDisabled ? "st-eco-off" : `st-${st.cls}`
+                  }`}
+                >
+                  {launching ? (
+                    <>
+                      <Spinner /> 启动中…
+                      <span className="state-hint">模型加载中，冷启动需等待（如克隆约 1–2 分钟）</span>
+                    </>
+                  ) : ecoDisabled ? (
+                    <>
+                      <Icon icon="lucide:power" width={13} height={13} /> 未启用（节能模式）
+                    </>
+                  ) : (
+                    <>
+                      <Icon icon={st.icon} width={13} height={13} /> {st.label}
+                      {!needFix(m) && m.serviceUp && stateOf(m) === "ready" && (
+                        <span className="state-hint">服务进程未拉起</span>
+                      )}
+                    </>
                   )}
                 </div>
 

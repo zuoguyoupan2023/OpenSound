@@ -29,10 +29,20 @@ export function Panel({
 export function EngineBadge({
   label,
   ready,
+  starting,
 }: {
   label: string;
   ready: boolean;
+  /** 已按模式/用户选择启动、但服务仍在加载（如 cosyvoice 9GB 模型冷启动 1-2 分钟） */
+  starting?: boolean;
 }) {
+  if (starting) {
+    return (
+      <span className="engine-badge starting" title="服务已拉起，模型加载中…">
+        <Spinner /> {label} 启动中…
+      </span>
+    );
+  }
   return (
     <span className={`engine-badge ${ready ? "ok" : "off"}`}>
       {label}{" "}

@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import type { PanelProps } from "../App";
 import { Icon } from "@iconify/react";
-import { transcribe } from "../api";
+import { transcribe, computeStarting, getPersistedSettings } from "../api";
 import { createRecorder, type Recorder } from "../audio";
 import { saveRecording } from "../audioStore";
 import { Panel, Button, Select, Spinner, EngineBadge } from "../components/ui";
@@ -141,8 +141,16 @@ export default function AsrPanel(props: PanelProps) {
       </div>
 
       <div className="engine-status">
-        <EngineBadge label="SenseVoice 量化版" ready={!!hasSense} />
-        <EngineBadge label="SenseVoice 原始版" ready={!!hasOrig} />
+        <EngineBadge
+          label="SenseVoice 量化版"
+          ready={!!hasSense}
+          starting={computeStarting(getPersistedSettings(), props.health).asr}
+        />
+        <EngineBadge
+          label="SenseVoice 原始版"
+          ready={!!hasOrig}
+          starting={computeStarting(getPersistedSettings(), props.health).sensevoiceOriginal}
+        />
         <EngineBadge label="Whisper" ready={true} />
       </div>
 

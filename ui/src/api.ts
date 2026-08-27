@@ -380,3 +380,30 @@ export async function cancelInstall(): Promise<void> {
 export async function getDisk(): Promise<{ availBytes: number | null }> {
   return jfetch<{ availBytes: number | null }>("/disk");
 }
+
+// ---------- 启动中状态判定（030 资源模式：按模式+用户选择应启动，但服务尚未加载完成） ----------
+export interface StartingMap {
+  asr: boolean; // 9528 整体（最小集在 9528 内，进程未就绪 = 整体启动中）
+  kokoro: boolean;
+  qwen3: boolean;
+  cosyvoice: boolean;
+  sensevoiceOriginal: boolean;
+}
+
+export function computeStarting(
+  settings: { powerMode?: PowerMode; ecoBig?: EcoBig },
+  health: HealthInfo | null
+): StartingMap {
+  const eco = settings.powerMode === "eco";
+  const big = settings.ecoBig || "none";
+  const shouldStart = (s: string) => (eco ? s === big : true); // 节能只开 eco_big；全能全开
+  return {
+    asr: health == null,
+    kokoro: health == null,
+    qwen3: shouldStart("qwen3") && health?.tts.qwen3 !== "reachable",
+    cosyvoice: shouldStart("cosyvoice") && health?.tts.cosyvoice !== "reachable",
+    sensevoiceOriginal:
+      shouldStart("sensevoice-original") &&
+      !health?.models?.some((m) => m.engine === "sensevoice-original" && m.installed),
+  };
+}

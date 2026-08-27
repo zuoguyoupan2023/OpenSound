@@ -1,7 +1,7 @@
 import { useRef, useState, useEffect } from "react";
 import type { PanelProps } from "../App";
 import { Icon } from "@iconify/react";
-import { speakStream } from "../api";
+import { speakStream, computeStarting, getPersistedSettings } from "../api";
 import { createFramePlayer, type FramePlayer, stopAudio } from "../audio";
 import {
   teeCollect,
@@ -289,9 +289,21 @@ export default function ReadPanel(props: PanelProps) {
       </div>
 
       <div className="engine-status">
-        <EngineBadge label="Kokoro" ready={kokoroReady} />
-        <EngineBadge label="Qwen3" ready={qwen3Ready} />
-        <EngineBadge label="克隆音色" ready={cloneReady} />
+        <EngineBadge
+          label="Kokoro"
+          ready={kokoroReady}
+          starting={computeStarting(getPersistedSettings(), props.health).kokoro}
+        />
+        <EngineBadge
+          label="Qwen3"
+          ready={qwen3Ready}
+          starting={computeStarting(getPersistedSettings(), props.health).qwen3}
+        />
+        <EngineBadge
+          label="克隆音色"
+          ready={cloneReady}
+          starting={computeStarting(getPersistedSettings(), props.health).cosyvoice}
+        />
       </div>
 
       <div className="read-history">
