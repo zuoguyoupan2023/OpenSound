@@ -1,6 +1,7 @@
 # 003 · 两类音频的本地存放与播放（录音 + TTS 朗读）
 
-> 状态：**规划（等审阅后执行）**。
+> 状态：**P0–P3 编码完成（方案 A asset protocol；导出=zip 打包；克隆样本来源=录音标记）。克隆引擎集成待模型选型确认**。
+> 补充：全 App 数据存储位置总览与存储规范已升级到 `011-朗读历史与生成策略方案.md §2.3 / §5.6`（含对话历史 conversations/ 与 localStorage 迁移决策），本文只保留音频库本身的实现记录。
 > 关联：`000-voice-tauri-app规划.md`（M2.5 已完成，录音链路已跑通）、`002-voice-research.md`、`GUIDE.md`（接口）、`SPEC.md`（对外规范）。
 > 本文解决一个现状缺口：**用户录音、以及 App 内 TTS 朗读的声音，目前都只在内存中（Base64/Blob/帧流），关闭即丢失，无法再次打开播放**。本文为这两类音频设计「本地落盘 + 元数据索引 + 再次打开播放」的方案，并给出分阶段实施计划。
 
@@ -34,7 +35,7 @@
 沿用现有 Tauri 配置路径的约定（`lib.rs` 里 `app_config_dir()` 已用于 config.json）：
 
 ```
-~/Library/Application Support/com.tabu.local/
+~/Library/Application Support/world.opensound.local/
    ├─ config.json                 # 已存在（asr-server 路径）
    └─ audio/
        ├─ recordings/             # 用户录音 16kHz WAV
@@ -139,17 +140,24 @@
 - 新增 `ui/src/panels/AudioLibraryPanel.tsx` + 侧边栏入口。
 - 用当前会话内存数据展示两条演示/真实记录，可播放/停止/删除（仅内存）。
 - 验收：**界面能打开、能看到两类音频、能点播放**。
+- **状态：✅ 已完成**（面板含「我的录音 / 朗读历史」两标签，可播放/删除；P0/P1/P2 一次性实现，未拆内存版）。
 
 ### P1 · 真实落盘（录音 + TTS 都存下来）
 - Rust 新增 `audio_store.rs`（保存/列/读/删/路径 5 个 command）+ `tauri.conf.json` 注册。
 - 录音停止后、TTS 朗读/语音工作台拿到结果后，异步落盘 + 写 index.json。
 - 前端 `audio_list` 拉到真实历史。
 - 验收：**录音一次、朗读一次 → 重启 App → 列表仍在，能播放**。
+- **状态：✅ 编码完成**（`audio_save/audio_list/audio_delete/audio_get_dir`；录音在 Asr/Home/Chat 落盘，TTS 帧流经 `teeCollect`+`mergeWavFrames` 在 Read/Home/Chat 落盘）。
 
 ### P2 · 播放方案落地 + 打磨
 - 接入 asset protocol（方案 A）或 base64 回退（方案 B）播放本地文件。
 - 删除真正删文件；加导出/打开位置按钮。
 - 验收：**历史音频可再次打开播放、可删除、可导出**。
+- **状态：✅ 编码完成**（方案 A：`tauri.conf.json` `assetProtocol.enable`+scope、`protocol-asset` feature、前端 `convertFileSrc` 播放；删除落盘文件；面板显示音频库位置路径。**导出已加**：每条记录「📦 导出」→ 保存对话框选路径 → Rust `zip` 打包 `.wav` + `.txt`(含类型/引擎/时长/时间/文本说明)。录音+识别文本、朗读+原文均可一起导出）。
+
+### P3 · 克隆音色样本来源 + 导出（部分完成）
+- 录音可「🎨 作样本」标记为克隆音色参考样本（`is_clone_sample` 存 index.json），供后续克隆引擎使用。
+- **克隆引擎已定：CosyVoice 3.0**（见 `004`，模型在 `005` 下载中）。**后端 `/clone` 尚未实现** → 任务已移交 `006-voice-后续规划.md`。
 
 ### P3（可选/后续）· 增强
 - 自定义音频库路径、录音重命名、批量管理、按文本搜索、语音克隆样本从录音库选取（衔接 000 的克隆路线）。
