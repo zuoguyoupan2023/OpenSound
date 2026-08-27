@@ -1,12 +1,12 @@
 [package]
-name = "tabu-local"
+name = "opensound"
 version = "0.1.0"
-description = "Tabu-Local 桌面 App：本地语音服务（ASR/TTS/LLM）+ 开放后端"
+description = "OpenSound 桌面 App：本地语音服务（ASR/TTS/LLM）+ 开放后端"
 edition = "2021"
 rust-version = "1.77"
 
 [lib]
-name = "tabu_local_lib"
+name = "opensound_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

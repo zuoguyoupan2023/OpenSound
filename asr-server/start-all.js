@@ -4,7 +4,7 @@
 // 两个子进程均继承本终端 stdio，Ctrl+C 会一起退出。
 //
 // 可选环境变量：
-//   TABU_SKIP_QWEN3=1        只启动 asr-server，不拉 qwen3-tts（省内存/时间）
+//   OPENSOUND_SKIP_QWEN3=1    只启动 asr-server，不拉 qwen3-tts（省内存/时间）
 //   HF_ENDPOINT=...          qwen3 模型下载/校验源（默认 hf-mirror.com 国内镜像）
 //   HF_HUB_OFFLINE=1         强制离线（qwen3 模型已缓存时，可彻底避免联网）
 //   ASR_ENGINE=sensevoice|whisper   只针对 asr-server 的默认识别模型（传给 asr-server.js）
@@ -79,11 +79,11 @@ const ASR_URL = (process.env.ASR_SERVER_URL || 'http://127.0.0.1:9528').replace(
 const QWEN3_URL = (process.env.QWEN3_TTS_URL || 'http://127.0.0.1:8001').replace(/\/+$/, '');
 const SENSE_ORIGINAL_URL = (process.env.SENSEVOICE_ORIGINAL_URL || 'http://127.0.0.1:8002').replace(/\/+$/, '');
 const COSYVOICE_URL = (process.env.COSYVOICE_URL || 'http://127.0.0.1:8003').replace(/\/+$/, '');
-const SKIP_QWEN3 = ['1', 'true', 'yes'].includes(String(process.env.TABU_SKIP_QWEN3 || '').toLowerCase());
-// 默认启动 cosyvoice 克隆服务（加载 ~9GB 模型较慢、占 ~4GB 内存）；设 TABU_SKIP_COSYVOICE=1 可跳过
-const SKIP_COSYVOICE = ['1', 'true', 'yes'].includes(String(process.env.TABU_SKIP_COSYVOICE || '').toLowerCase());
-// 默认启动 funasr 原始版（让 UI 两个版本都可用）；设 TABU_SKIP_SENSEVOICE_ORIGINAL=1 可跳过（省 900MB 内存/加载时间）
-const SKIP_SENSE_ORIGINAL = ['1', 'true', 'yes'].includes(String(process.env.TABU_SKIP_SENSEVOICE_ORIGINAL || '').toLowerCase());
+const SKIP_QWEN3 = ['1', 'true', 'yes'].includes(String(process.env.OPENSOUND_SKIP_QWEN3 || '').toLowerCase());
+// 默认启动 cosyvoice 克隆服务（加载 ~9GB 模型较慢、占 ~4GB 内存）；设 OPENSOUND_SKIP_COSYVOICE=1 可跳过
+const SKIP_COSYVOICE = ['1', 'true', 'yes'].includes(String(process.env.OPENSOUND_SKIP_COSYVOICE || '').toLowerCase());
+// 默认启动 funasr 原始版（让 UI 两个版本都可用）；设 OPENSOUND_SKIP_SENSEVOICE_ORIGINAL=1 可跳过（省 900MB 内存/加载时间）
+const SKIP_SENSE_ORIGINAL = ['1', 'true', 'yes'].includes(String(process.env.OPENSOUND_SKIP_SENSEVOICE_ORIGINAL || '').toLowerCase());
 // 期望的 asr-server 架构版本（须与 asr-server.js 的 SERVER_VERSION 一致）：
 // 若 9528 上的服务 version 与之不符 → 判定为旧进程残留 → 终止后重启。
 const EXPECTED_VERSION = '2.6.0';
@@ -190,7 +190,7 @@ const [qwen3Up, svOriginalUp, cosyvoiceUp] = await Promise.all([
 ]);
 
 if (SKIP_QWEN3) {
-  console.log('[start-all] TABU_SKIP_QWEN3=1，跳过 qwen3-tts');
+  console.log('[start-all] OPENSOUND_SKIP_QWEN3=1，跳过 qwen3-tts');
 } else if (qwen3Up) {
   console.log(`[start-all] qwen3-tts 已在运行（${QWEN3_URL}），跳过`);
 } else {
@@ -204,7 +204,7 @@ if (SKIP_QWEN3) {
 }
 
 if (SKIP_SENSE_ORIGINAL) {
-  console.log('[start-all] TABU_SKIP_SENSEVOICE_ORIGINAL=1，跳过 SenseVoice 原始版(funasr)');
+  console.log('[start-all] OPENSOUND_SKIP_SENSEVOICE_ORIGINAL=1，跳过 SenseVoice 原始版(funasr)');
 } else if (svOriginalUp) {
   console.log(`[start-all] sensevoice-original 已在运行（${SENSE_ORIGINAL_URL}），跳过`);
 } else {
@@ -224,7 +224,7 @@ if (SKIP_SENSE_ORIGINAL) {
 }
 
 if (SKIP_COSYVOICE) {
-  console.log('[start-all] TABU_SKIP_COSYVOICE=1，跳过 CosyVoice3 克隆服务');
+  console.log('[start-all] OPENSOUND_SKIP_COSYVOICE=1，跳过 CosyVoice3 克隆服务');
 } else if (cosyvoiceUp) {
   console.log(`[start-all] cosyvoice 已在运行（${COSYVOICE_URL}），跳过`);
 } else {

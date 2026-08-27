@@ -1,8 +1,8 @@
 {
-  "name": "tabu-local",
+  "name": "opensound",
   "version": "0.1.0",
   "private": true,
-  "description": "Tabu-Local 桌面 App（Tauri）：点开即用的本地语音服务 + 开放后端",
+  "description": "OpenSound 桌面 App（Tauri）：点开即用的本地语音服务 + 开放后端",
   "type": "module",
   "scripts": {
     "dev": "tauri dev",

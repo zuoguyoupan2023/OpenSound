@@ -374,7 +374,7 @@ pub fn audio_export(
     zw.write_all(&wav).map_err(|e| e.to_string())?;
 
     let txt = format!(
-        "# Tabu-Local {kind_label}导出\n\n- 类型: {}\n- 引擎: {}\n- 时长: {:.1} 秒\n- 时间: {}\n\n## 文本\n\n{}\n",
+        "# OpenSound {kind_label}导出\n\n- 类型: {}\n- 引擎: {}\n- 时长: {:.1} 秒\n- 时间: {}\n\n## 文本\n\n{}\n",
         kind_label,
         if rec.engine.is_empty() { "auto" } else { &rec.engine },
         rec.duration_sec,

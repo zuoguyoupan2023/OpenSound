@@ -5,15 +5,15 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>English</string>
 	<key>CFBundleDisplayName</key>
-	<string>Tabu-Local</string>
+	<string>OpenSound</string>
 	<key>CFBundleExecutable</key>
-	<string>tabu-local</string>
+	<string>opensound</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.tabu.local</string>
+	<string>world.opensound.local</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>Tabu-Local</string>
+	<string>OpenSound</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -31,6 +31,6 @@
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Tabu-Local 需要使用麦克风进行语音识别与语音对话。</string>
+	<string>OpenSound 需要使用麦克风进行语音识别与语音对话。</string>
 </dict>
 </plist>

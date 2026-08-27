@@ -262,7 +262,7 @@ export default function SettingsPanel(props: PanelProps) {
               className="input"
               value={serverPath}
               onChange={(e) => setServerPath(e.target.value)}
-              placeholder="/路径/到/Tabu-Voice/asr-server"
+              placeholder="/路径/到/OpenSound/asr-server"
               disabled={pathLoading}
             />
             <Button onClick={savePath} disabled={restarting || pathLoading}>
@@ -338,7 +338,7 @@ export default function SettingsPanel(props: PanelProps) {
 
       <div className="settings-block">
         <div className="settings-item">
-          <label className="settings-label">端口约定（与 Tabu-AI 兼容）</label>
+          <label className="settings-label">端口约定（与配套插件兼容）</label>
           <div className="ports-table">
             <div><code>9528</code> asr-server 主入口（识别/朗读/LLM/对话）</div>
             <div><code>8001</code> qwen3-tts（可选低延迟朗读）</div>

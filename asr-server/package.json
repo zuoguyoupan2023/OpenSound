@@ -1,8 +1,8 @@
 {
-  "name": "tabu-asr-server",
+  "name": "opensound-asr-server",
   "version": "0.1.0",
   "private": true,
-  "description": "TabU 本地语音服务（ASR: whisper / sensevoice；TTS: kokoro / qwen3）",
+  "description": "OpenSound 本地语音服务（ASR: whisper / sensevoice；TTS: kokoro / qwen3）",
   "type": "module",
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
@@ -21,7 +21,7 @@
     "all": "node start-all.js",
     "all-sensevoice": "ASR_ENGINE=sensevoice node start-all.js",
     "all-whisper": "ASR_ENGINE=whisper node start-all.js",
-    "all-asr": "TABU_SKIP_QWEN3=1 node start-all.js",
+    "all-asr": "OPENSOUND_SKIP_QWEN3=1 node start-all.js",
     "download-sensevoice": "node asr-server-download.js",
     "start-sensevoice-original": "/opt/homebrew/bin/python3 sensevoice-server.py --port 8002",
     "download-kokoro": "node download-kokoro.js",

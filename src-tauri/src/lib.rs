@@ -49,7 +49,7 @@ fn find_node() -> Option<String> {
     let exe = if is_win { "node.exe" } else { "node" };
     let sep = if is_win { ';' } else { ':' };
     // 1) 环境变量显式指定
-    if let Ok(p) = std::env::var("TABU_NODE_PATH") {
+    if let Ok(p) = std::env::var("OPENSOUND_NODE_PATH") {
         if !p.is_empty() {
             return Some(p);
         }
@@ -158,6 +158,44 @@ fn save_config(app: &tauri::AppHandle, cfg: &PersistedConfig) -> Result<(), Stri
     fs::write(&p, json).map_err(|e| format!("写入配置失败: {e}"))
 }
 
+// ---------- 旧标识符（com.tabu.local）配置迁移 ----------
+// identifier 从 com.tabu.local 升级到 world.opensound.local 后，app_config_dir 变化：
+// 首次启动时若新 config.json 不存在，自动把旧目录下的 server_path 与 ui 设置
+// （token / 资源模式 / 云端 Key 等）原样迁入新目录，用户无感、旧 token 持续有效。
+fn legacy_config_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    let cands: Vec<PathBuf> = if std::env::consts::OS == "windows" {
+        vec![PathBuf::from(std::env::var_os("APPDATA")?).join("com.tabu.local").join("config.json")]
+    } else {
+        vec![
+            // macOS：~/Library/Application Support/com.tabu.local/config.json
+            PathBuf::from(&home).join("Library").join("Application Support").join("com.tabu.local").join("config.json"),
+            // Linux：~/.config/com.tabu.local/config.json
+            PathBuf::from(&home).join(".config").join("com.tabu.local").join("config.json"),
+        ]
+    };
+    cands.into_iter().find(|p| p.is_file())
+}
+
+fn migrate_legacy_config(app: &tauri::AppHandle) {
+    let new_path = match config_path(app) {
+        Some(p) => p,
+        None => return, // 定位不到配置目录，跳过迁移
+    };
+    if new_path.exists() {
+        return; // 新配置已初始化（非首次启动），不动
+    }
+    let Some(old_path) = legacy_config_path() else { return };
+    let Ok(s) = fs::read_to_string(old_path) else { return };
+    if let Some(dir) = new_path.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    match fs::write(&new_path, &s) {
+        Ok(()) => eprintln!("[opensound] 已迁移旧配置: com.tabu.local → world.opensound.local"),
+        Err(e) => eprintln!("[opensound] 迁移旧配置失败: {e}"),
+    }
+}
+
 #[tauri::command]
 fn get_server_path(app: tauri::AppHandle) -> String {
     load_config(&app).server_path.unwrap_or_default()
@@ -257,9 +295,11 @@ fn server_dir(app: &tauri::AppHandle, state: &Arc<AppState>) -> Option<PathBuf> 
             return Some(cand);
         }
     }
-    // 3) 回退：从可执行文件所在目录向上逐级查找包含 asr-server 的项目根（开发模式）
+    // 3) 回退：从可执行文件所在目录向上逐级查找包含 asr-server 的项目根（开发模式）。
+    //    深度 16：App Bundle（OpenSound.app/Contents/MacOS）到仓库根需要 8~9 级，
+    //    旧值 8 在 bundle 运行时恰好差一级找不到 asr-server，导致服务静默起不来（改名后首次出现的"全部启动中"）。
     let mut dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-    for _ in 0..8 {
+    for _ in 0..16 {
         let cand = dir.join(SERVER_DIR);
         if cand.is_dir() {
             return Some(cand);
@@ -313,8 +353,8 @@ fn start_service(app: &tauri::AppHandle, state: &Arc<AppState>) -> Result<(), St
     let entry = dir.join("start-all.js");
 
     // 安全加固②：入站鉴权 token —— config.json ui.token 为空时自动生成一次并持久化；
-    // 同一 token 经 get_ui_settings 交给前端（api.ts jfetch 自动带 Bearer），并以 TABU_TOKEN 注入子进程校验。
-    // 030 阶段一：资源模式 → TABU_SKIP_*（节能=默认关全部大模型服务，只留 9528 最小集：
+    // 同一 token 经 get_ui_settings 交给前端（api.ts jfetch 自动带 Bearer），并以 OPENSOUND_TOKEN 注入子进程校验。
+    // 030 阶段一：资源模式 → OPENSOUND_SKIP_*（节能=默认关全部大模型服务，只留 9528 最小集：
     //   sherpa SenseVoice ASR + kokoro TTS + llm-0.5b 对话；eco_big=节能下用户启用的大模型，单开；全能=全开）
     let (token, skip_qwen3, skip_cosy, skip_sense_orig) = {
         let mut cfg = load_config(app);
@@ -351,23 +391,23 @@ fn start_service(app: &tauri::AppHandle, state: &Arc<AppState>) -> Result<(), St
     };
     let mut header = open_log()?;
     let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let _ = writeln!(header, "\n[tabu-local] === 启动 asr-server (unix_ts={ts}) ===");
+    let _ = writeln!(header, "\n[opensound] === 启动 asr-server (unix_ts={ts}) ===");
 
     let child = Command::new(&node)
         .arg(&entry)
         .current_dir(&dir)
         .env("ASR_ENGINE", "auto")
-        .env("TABU_TOKEN", &token)
-        .env("TABU_SKIP_QWEN3", if skip_qwen3 { "1" } else { "" })
-        .env("TABU_SKIP_COSYVOICE", if skip_cosy { "1" } else { "" })
-        .env("TABU_SKIP_SENSEVOICE_ORIGINAL", if skip_sense_orig { "1" } else { "" })
+        .env("OPENSOUND_TOKEN", &token)
+        .env("OPENSOUND_SKIP_QWEN3", if skip_qwen3 { "1" } else { "" })
+        .env("OPENSOUND_SKIP_COSYVOICE", if skip_cosy { "1" } else { "" })
+        .env("OPENSOUND_SKIP_SENSEVOICE_ORIGINAL", if skip_sense_orig { "1" } else { "" })
         .stdout(Stdio::from(open_log()?))
         .stderr(Stdio::from(open_log()?))
         .spawn()
         .map_err(|e| format!("启动服务失败: {e}"))?;
 
     *state.child.lock().unwrap() = Some(child);
-    println!("[tabu-local] 已启动 asr-server (node={node}, log={})", log_path.display());
+    println!("[opensound] 已启动 asr-server (node={node}, log={})", log_path.display());
     Ok(())
 }
 
@@ -394,7 +434,7 @@ fn stop_service(state: &Arc<AppState>) {
         let _ = child.kill();
         let _ = child.wait();
     }
-    println!("[tabu-local] 服务已停止");
+    println!("[opensound] 服务已停止");
 }
 
 // ---------- 子进程存活判断 ----------
@@ -533,7 +573,7 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let _tray = TrayIconBuilder::with_id("main")
         .icon(app.default_window_icon().unwrap().clone())
         .menu(&menu)
-        .tooltip("Tabu-Local 语音服务")
+        .tooltip("OpenSound 语音服务")
         .show_menu_on_left_click(false)
         .on_menu_event(move |app, event| match event.id().as_ref() {
             "show" => {
@@ -583,12 +623,14 @@ pub fn run() {
         .setup(move |app| {
             let handle = app.handle().clone();
             let state2 = state.clone();
+            // 首次启动：从旧标识符（com.tabu.local）迁移配置（identifier 升级后配置目录变化）
+            migrate_legacy_config(&handle);
             // 加载 asr-server 路径配置到 state
             *state.server_path.lock().unwrap() = load_config(&handle).server_path;
             // 启动服务（直接使用已捕获的 Arc，避免 setup 阶段 state 查询）
             match start_service(&handle, &state) {
                 Ok(()) => {}
-                Err(e) => eprintln!("[tabu-local] 启动服务失败: {e}"),
+                Err(e) => eprintln!("[opensound] 启动服务失败: {e}"),
             }
             setup_tray(&handle)?;
 

@@ -1,9 +1,9 @@
 import type { HealthInfo, ModelInfo, InstallProgress, DeviceProfile } from "./types";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 
-// 后端基地址（Tabu-Local 服务，端口约定 9528，与 Tabu-AI 一致）
+// 后端基地址（OpenSound 服务，端口约定 9528，与配套插件一致）
 // 设置统一存放在 config.json 的 ui 节（Rust 侧），启动时载入内存缓存；
-// 旧版本存 WebView localStorage(tabu_settings)，首次启动自动迁入并清除（011 §5.6 存储规范）
+// 旧版本（0.x）存 WebView localStorage(opensound_settings)，首次启动自动迁入并清除（011 §5.6 存储规范）；更早的 tabu_settings 一并迁移
 // 030 阶段一：服务资源模式（powerMode=全能/节能；ecoBig=节能下启用的大模型，单开）
 export type PowerMode = "full" | "eco";
 export type EcoBig = "none" | "qwen3" | "cosyvoice" | "sensevoice-original" | "llm-qwen3-8b";
@@ -17,7 +17,8 @@ interface PersistedSettings {
   ecoBig?: EcoBig;
 }
 
-const LS_KEY = "tabu_settings";
+const LS_KEY = "opensound_settings";
+const LEGACY_LS_KEY = "tabu_settings"; // 更早版本（0.x 时代）的 key，首次启动迁入 config.json 后清除
 const DEFAULT_BASE_URL = "http://127.0.0.1:9528";
 
 let settingsCache: PersistedSettings | null = null;
@@ -31,7 +32,7 @@ function inTauri(): boolean {
 
 function readLegacyLocalStorage(): PersistedSettings {
   try {
-    return JSON.parse(localStorage.getItem(LS_KEY) || "{}");
+    return JSON.parse(localStorage.getItem(LEGACY_LS_KEY) || "{}");
   } catch {
     return {};
   }
@@ -76,7 +77,7 @@ export async function initSettings(): Promise<void> {
       });
       s = { ...legacy };
       try {
-        localStorage.removeItem(LS_KEY);
+        localStorage.removeItem(LEGACY_LS_KEY);
       } catch {
         /* ignore */
       }

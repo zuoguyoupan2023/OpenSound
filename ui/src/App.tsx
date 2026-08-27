@@ -164,9 +164,9 @@ function App() {
     <div className="layout">
       <aside className="sidebar">
         <div className="brand">
-          <img src="/icons/icon.png" alt="Tabu-Local" className="logo" />
+          <img src="/icons/icon.png" alt="OpenSound" className="logo" />
           <div>
-            <div className="brand-name">Tabu-Local</div>
+            <div className="brand-name">OpenSound</div>
             <div className="brand-sub">本地语音工作台</div>
           </div>
         </div>
