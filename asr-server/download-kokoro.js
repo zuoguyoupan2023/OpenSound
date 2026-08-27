@@ -9,8 +9,10 @@ import { fileURLToPath } from 'node:url';
 import { pipeline } from 'node:stream/promises';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DIR = path.join(__dirname, 'models', 'tts', 'kokoro-multi-lang-v1_0');
-const TARBALL = path.join(__dirname, 'models', 'tts', 'kokoro-multi-lang-v1_0.tar.bz2');
+// 032 P3：模型落数据目录（env 注入；未设置回退代码目录）
+const _DATA = process.env.OPENSOUND_DATA_DIR || __dirname;
+const DIR = path.join(_DATA, 'models', 'tts', 'kokoro-multi-lang-v1_0');
+const TARBALL = path.join(_DATA, 'models', 'tts', 'kokoro-multi-lang-v1_0.tar.bz2');
 const HF_REPO = 'csukuangfj/kokoro-multi-lang-v1_0';
 const HF_API = 'https://hf-mirror.com/api/models/' + HF_REPO;
 const HF_BASE = 'https://hf-mirror.com/' + HF_REPO + '/resolve/main';

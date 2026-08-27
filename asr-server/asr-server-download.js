@@ -6,7 +6,8 @@ import { fileURLToPath } from 'node:url';
 import { pipeline } from 'node:stream/promises';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DIR = path.join(__dirname, 'models', 'sensevoice');
+// 032 P3：模型落数据目录（env 注入；未设置回退代码目录）
+const DIR = path.join(process.env.OPENSOUND_DATA_DIR || __dirname, 'models', 'sensevoice');
 mkdirSync(DIR, { recursive: true });
 
 const BASE = 'https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main';

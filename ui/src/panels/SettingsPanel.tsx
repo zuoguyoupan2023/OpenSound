@@ -5,6 +5,9 @@ import {
   getPersistedSettings,
   updateSettings,
   getBaseUrl,
+  getDataRoot,
+  setDataRoot,
+  migrateModelsToData,
   type PowerMode,
   type EcoBig,
 } from "../api";
@@ -31,6 +34,11 @@ export default function SettingsPanel(props: PanelProps) {
   const [pathMsg, setPathMsg] = useState("");
   // 数据目录（存储规范：音频库/对话历史/config.json 都在这里）
   const [dataDir, setDataDir] = useState("");
+  // 032 P3：模型存放目录（数据根目录，独立于服务代码目录）
+  const [modelDataRoot, setModelDataRoot] = useState("");
+  const [dataRootLoading, setDataRootLoading] = useState(true);
+  const [dataRootBusy, setDataRootBusy] = useState(false);
+  const [dataRootMsg, setDataRootMsg] = useState("");
   // 030 阶段一：资源模式（节能/全能 + 节能下启用的大模型）
   const [powerMode, setPowerMode] = useState<PowerMode>("full");
   const [ecoBig, setEcoBig] = useState<EcoBig>("none");
@@ -83,7 +91,47 @@ export default function SettingsPanel(props: PanelProps) {
     invoke<string>("get_data_dir")
       .then(setDataDir)
       .catch((e) => console.error("get_data_dir 失败:", e));
+    getDataRoot()
+      .then((p) => {
+        setModelDataRoot(p);
+        setDataRootLoading(false);
+      })
+      .catch((e) => {
+        console.error("get_data_root 失败:", e);
+        setDataRootLoading(false);
+      });
   }, []);
+
+  // 032 P3：保存模型存放目录 → 重启服务生效
+  const saveDataRoot = async () => {
+    setDataRootBusy(true);
+    setDataRootMsg("");
+    try {
+      await setDataRoot(modelDataRoot.trim());
+      await invoke("start_service_cmd");
+      setDataRootMsg(`已保存并重启服务。模型/缓存/音色将落盘于：${modelDataRoot.trim() || "默认数据目录"}`);
+      setTimeout(() => props.refresh(), 800);
+    } catch (e) {
+      setDataRootMsg("失败: " + e);
+    } finally {
+      setDataRootBusy(false);
+    }
+  };
+
+  // 032 P3：把历史落在服务代码目录的 models 迁到模型存放目录
+  const doMigrateModels = async () => {
+    setDataRootBusy(true);
+    setDataRootMsg("");
+    try {
+      const msg = await migrateModelsToData();
+      setDataRootMsg(msg);
+      setTimeout(() => props.refresh(), 800);
+    } catch (e) {
+      setDataRootMsg("迁移失败: " + e);
+    } finally {
+      setDataRootBusy(false);
+    }
+  };
 
   // 填写后自动保存（600ms 防抖）+ toast「已保存」
   useEffect(() => {
@@ -256,7 +304,32 @@ export default function SettingsPanel(props: PanelProps) {
         </div>
 
         <div className="settings-item">
-          <label className="settings-label">asr-server 目录</label>
+          <label className="settings-label">模型存放目录（032 P3 · 数据目录）</label>
+          <div className="path-row">
+            <input
+              className="input"
+              value={modelDataRoot}
+              onChange={(e) => setModelDataRoot(e.target.value)}
+              placeholder="留空 = 默认数据目录"
+              disabled={dataRootLoading}
+            />
+            <Button onClick={saveDataRoot} disabled={dataRootBusy || dataRootLoading}>
+              {dataRootBusy ? <Spinner /> : "保存并重启服务"}
+            </Button>
+          </div>
+          <p className="settings-hint">
+            所有模型权重/缓存/克隆音色都存放在这里（<b>不再写进源码文件夹</b>）；换盘/迁移时修改此路径即可，旧模型可用下方按钮一键迁移。
+          </p>
+          <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 10 }}>
+            <Button variant="ghost" onClick={doMigrateModels} disabled={dataRootBusy || dataRootLoading}>
+              迁移旧模型（从服务代码目录）
+            </Button>
+          </div>
+          {dataRootMsg && <p className="settings-msg">{dataRootMsg}</p>}
+        </div>
+
+        <div className="settings-item">
+          <label className="settings-label">服务代码目录（高级）</label>
           <div className="path-row">
             <input
               className="input"
@@ -270,7 +343,7 @@ export default function SettingsPanel(props: PanelProps) {
             </Button>
           </div>
           <p className="settings-hint">
-            指向本机 asr-server 目录（含 start-all.js）。模型本地已有则直接复用，缺的首次按需下载。
+            ⚠️ 这是<b>后端程序所在目录</b>（含 start-all.js），与模型存储无关；模型存放在上方「模型存放目录」。普通用户无需修改。
           </p>
           {pathMsg && <p className="settings-msg">{pathMsg}</p>}
         </div>

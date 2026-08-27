@@ -57,23 +57,28 @@ function detectSysPython() {
 }
 const PY_SYS = detectSysPython();
 
-// ---------- S1：统一模型/缓存目录 ----------
-const MODELS_DIR = path.join(__dirname, 'models');
+// ---------- S1：统一模型/缓存目录（032 P3：从数据目录派生，代码目录只读） ----------
+const DATA_DIR = process.env.OPENSOUND_DATA_DIR || __dirname;
+const MODELS_DIR = path.join(DATA_DIR, 'models');
+const VOICE_DIR = path.join(DATA_DIR, 'voices'); // 032 P3：克隆音色（新默认）
 for (const d of [
   MODELS_DIR,
   path.join(MODELS_DIR, 'hf'),             // python hub 缓存根（实际落在 hf/hub/）
   path.join(MODELS_DIR, 'modelscope'),
-  path.join(__dirname, 'data', 'cache', 'numba'),
-  path.join(__dirname, 'data', 'cache', 'mpl'),
+  path.join(DATA_DIR, 'cache', 'numba'),
+  path.join(DATA_DIR, 'cache', 'mpl'),
+  VOICE_DIR,
 ]) {
   try { mkdirSync(d, { recursive: true }); } catch {}
 }
 // 注入到所有子进程的受管路径（用户显式设置的同名变量优先，尊重高级用法）
 const MANAGED_ENV = {
+  OPENSOUND_DATA_DIR: process.env.OPENSOUND_DATA_DIR || DATA_DIR,
+  OPENSOUND_VOICE_DIR: process.env.OPENSOUND_VOICE_DIR || VOICE_DIR,
   HF_HOME: process.env.HF_HOME || path.join(MODELS_DIR, 'hf'),
   MODELSCOPE_CACHE: process.env.MODELSCOPE_CACHE || path.join(MODELS_DIR, 'modelscope'),
-  NUMBA_CACHE_DIR: process.env.NUMBA_CACHE_DIR || path.join(__dirname, 'data', 'cache', 'numba'),
-  MPLCONFIGDIR: process.env.MPLCONFIGDIR || path.join(__dirname, 'data', 'cache', 'mpl'),
+  NUMBA_CACHE_DIR: process.env.NUMBA_CACHE_DIR || path.join(DATA_DIR, 'cache', 'numba'),
+  MPLCONFIGDIR: process.env.MPLCONFIGDIR || path.join(DATA_DIR, 'cache', 'mpl'),
 };
 const ASR_URL = (process.env.ASR_SERVER_URL || 'http://127.0.0.1:9528').replace(/\/+$/, '');
 const QWEN3_URL = (process.env.QWEN3_TTS_URL || 'http://127.0.0.1:8001').replace(/\/+$/, '');
@@ -235,8 +240,8 @@ if (SKIP_COSYVOICE) {
   console.log(`[start-all] cosyvoice 已在运行（${COSYVOICE_URL}），跳过`);
 } else {
   console.log('[start-all] 启动 cosyvoice-tts-server（加载 ~9GB 模型，首次较慢）…');
-  // NUMBA/MPL 缓存目录已由 MANAGED_ENV 统一注入（S1：不再落 /tmp）
-  run(PY_COSYVOICE, ['cosyvoice-tts-server.py', '--port', '8003'], 'cosyvoice-tts');
+  // NUMBA/MPL 缓存目录已由 MANAGED_ENV 统一注入（S1：不再落 /tmp）；克隆音色落数据目录 voices/
+  run(PY_COSYVOICE, ['cosyvoice-tts-server.py', '--port', '8003', '--voice-dir', VOICE_DIR], 'cosyvoice-tts');
   started++;
 }
 

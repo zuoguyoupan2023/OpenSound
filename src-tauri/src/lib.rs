@@ -565,10 +565,23 @@ struct UiSettings {
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct PersistedConfig {
     server_path: Option<String>,
+    /// 032 P3：用户数据目录（模型/缓存/音色/运行时），默认 app_data_dir；可自定义
+    #[serde(default)]
+    data_dir: Option<String>,
     /// GUI 设置（服务地址/鉴权/云端 API Key）。此前存 WebView localStorage，
     /// 现统一迁入 config.json（见 011 §5.6 存储规范）。
     #[serde(default)]
     ui: UiSettings,
+}
+
+/// 数据根目录：配置优先，否则默认 app_data_dir（Win: %APPDATA%\world.opensound.local）
+fn data_root(app: &tauri::AppHandle) -> PathBuf {
+    if let Some(p) = load_config(app).data_dir {
+        if !p.trim().is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
 fn load_config(app: &tauri::AppHandle) -> PersistedConfig {
@@ -641,6 +654,70 @@ fn set_server_path(app: tauri::AppHandle, state: State<'_, Arc<AppState>>, path:
     cfg.server_path = if trimmed.is_empty() { None } else { Some(trimmed.clone()) };
     save_config(&app, &cfg)?;
     *state.server_path.lock().unwrap() = if trimmed.is_empty() { None } else { Some(trimmed.clone()) };
+    Ok(())
+}
+
+// ---------- 032 P3 数据目录（模型存放目录）：读写 + 旧模型迁移 ----------
+#[tauri::command]
+fn get_data_root(app: tauri::AppHandle) -> String {
+    data_root(&app).to_string_lossy().into_owned()
+}
+
+#[tauri::command]
+fn set_data_root(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let mut cfg = load_config(&app);
+    let trimmed = path.trim().to_string();
+    if trimmed.is_empty() {
+        cfg.data_dir = None; // 清空 = 回到默认 app_data_dir
+    } else {
+        let dir = std::path::PathBuf::from(&trimmed);
+        fs::create_dir_all(&dir).map_err(|e| format!("无法创建数据目录：{e}"))?;
+        cfg.data_dir = Some(trimmed);
+    }
+    save_config(&app, &cfg)
+}
+
+// 把历史落盘在 asr-server/models 的模型迁移到数据目录 models（同盘 rename 优先，跨盘复制后删除）
+#[tauri::command]
+fn migrate_models_to_data(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) -> Result<String, String> {
+    let server = server_dir(&app, &state).ok_or("无法定位 asr-server 目录")?;
+    let src = server.join("models");
+    if !src.is_dir() { return Ok("无旧模型目录可迁移（asr-server/models 不存在）".to_string()); }
+    let entries: Vec<_> = fs::read_dir(&src).map_err(|e| e.to_string())?.filter_map(|e| e.ok()).collect();
+    if entries.is_empty() { return Ok("旧模型目录为空，无需迁移".to_string()); }
+    let dst = data_root(&app).join("models");
+    fs::create_dir_all(&dst).map_err(|e| e.to_string())?;
+    let mut moved = 0;
+    let mut failed = Vec::new();
+    for e in entries {
+        let name = e.file_name();
+        let from = e.path();
+        let to = dst.join(&name);
+        if to.exists() { continue; }
+        match fs::rename(&from, &to) {
+            Ok(()) => moved += 1,
+            Err(_) => match copy_dir_recursive(&from, &to) {
+                Ok(()) => { let _ = fs::remove_dir_all(&from).or_else(|_| fs::remove_file(&from)); moved += 1; }
+                Err(err) => failed.push(format!("{}（{}）", name.to_string_lossy(), err)),
+            },
+        }
+    }
+    if failed.is_empty() {
+        Ok(format!("已迁移 {} 项到 {}", moved, dst.display()))
+    } else {
+        Ok(format!("迁移 {moved} 项；失败 {} 项：{}", failed.len(), failed.join("；")))
+    }
+}
+
+fn copy_dir_recursive(from: &std::path::Path, to: &std::path::Path) -> Result<(), String> {
+    fs::create_dir_all(to).map_err(|e| e.to_string())?;
+    for entry in fs::read_dir(from).map_err(|e| e.to_string())? {
+        let e = entry.map_err(|e| e.to_string())?;
+        let from_p = e.path();
+        let to_p = to.join(e.file_name());
+        if from_p.is_dir() { copy_dir_recursive(&from_p, &to_p)?; }
+        else { fs::copy(&from_p, &to_p).map_err(|e| format!("{}：{e}", from_p.display()))?; }
+    }
     Ok(())
 }
 
@@ -831,6 +908,8 @@ fn start_service(app: &tauri::AppHandle, state: &Arc<AppState>) -> Result<(), St
         .current_dir(&dir)
         .env("ASR_ENGINE", "auto")
         .env("OPENSOUND_TOKEN", &token)
+        // 032 P3：数据目录注入 —— 服务端所有模型/缓存/音色落盘均从该目录派生（代码目录只读）
+        .env("OPENSOUND_DATA_DIR", data_root(app).to_string_lossy().into_owned())
         .env("OPENSOUND_SKIP_QWEN3", if skip_qwen3 { "1" } else { "" })
         .env("OPENSOUND_SKIP_COSYVOICE", if skip_cosy { "1" } else { "" })
         .env("OPENSOUND_SKIP_SENSEVOICE_ORIGINAL", if skip_sense_orig { "1" } else { "" })
@@ -1121,6 +1200,9 @@ pub fn run() {
             realtime_is_paused,
             get_server_path,
             set_server_path,
+            get_data_root,
+            set_data_root,
+            migrate_models_to_data,
             get_ui_settings,
             set_ui_settings,
             get_data_dir,

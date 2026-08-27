@@ -71,10 +71,11 @@ export async function probeDevice() {
   return device;
 }
 
-// 磁盘剩余（GB）：statfsSync 跨平台（031 适配：替代 df -k，Win/mac 通用）
+// 磁盘剩余（GB）：statfsSync 跨平台（031 适配：替代 df -k，Win/mac 通用）。
+// 032 P3：探测模型落盘所在盘（数据目录），而非代码目录。
 function probeDiskFreeGB() {
   try {
-    const dir = fileURLToPath(new URL('.', import.meta.url));
+    const dir = process.env.OPENSOUND_DATA_DIR || fileURLToPath(new URL('.', import.meta.url));
     const st = statfsSync(dir);
     return Math.floor((Number(st.bavail) * Number(st.bsize)) / 1e9);
   } catch { return null; }

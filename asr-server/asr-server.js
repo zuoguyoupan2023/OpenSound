@@ -43,8 +43,17 @@ function runtimePathExists(p) {
 const OPENSOUND_TOKEN = process.env.OPENSOUND_TOKEN || '';
 const WHISPER_MODEL = `onnx-community/whisper-${MODEL_SIZE}`;
 
-// 模型缓存目录
-const CACHE_DIR = path.join(__dirname, 'models');
+// 032 P3：数据目录 env 化——模型/缓存/音色等"用户数据"从 OPENSOUND_DATA_DIR 派生，
+// 不再写死在代码目录（asr-server 回归"代码"职责）；未设置（手动启动/老版本）时回退 __dirname。
+const DATA_DIR = process.env.OPENSOUND_DATA_DIR || __dirname;
+// 解析"用户数据"相对路径：models/、data/、cache/ 前缀 → 数据目录；其余（node_modules/vendor/engines）仍代码目录
+function resolveData(p) {
+  if (/^(models|data|cache)[\\/]/.test(p)) return path.join(DATA_DIR, p);
+  return path.join(__dirname, p);
+}
+
+// 模型缓存目录（模型/权重统一落盘 <数据目录>/models）
+const CACHE_DIR = path.join(DATA_DIR, 'models');
 mkdirSync(CACHE_DIR, { recursive: true });
 
 const SENSEVOICE_MODEL = path.join(CACHE_DIR, 'sensevoice/model.int8.onnx');
@@ -61,8 +70,8 @@ const VAD = !['0', 'false', 'no'].includes(String(process.env.VAD || '1').toLowe
 const QWEN3_TTS_URL = (process.env.QWEN3_TTS_URL || 'http://127.0.0.1:8001').replace(/\/+$/, '');
 // CosyVoice3 本地克隆服务（cosyvoice-tts-server.py，独立进程 8003）
 const COSYVOICE_URL = (process.env.COSYVOICE_URL || 'http://127.0.0.1:8003').replace(/\/+$/, '');
-// 克隆音色存储目录（与 cosyvoice-tts-server.py --voice-dir 一致）
-const COSYVOICE_VOICE_DIR = path.join(__dirname, 'data', 'clone-voices');
+// 克隆音色存储目录（与 cosyvoice-tts-server.py --voice-dir 一致；P3：env 注入，默认落数据目录）
+const COSYVOICE_VOICE_DIR = process.env.OPENSOUND_VOICE_DIR || resolveData('data/clone-voices');
 mkdirSync(COSYVOICE_VOICE_DIR, { recursive: true });
 const KOKORO_DIR = path.join(CACHE_DIR, 'tts', 'kokoro-multi-lang-v1_0');
 const KOKORO = {
@@ -983,7 +992,7 @@ function countFilesDeep(dir, cap = 5000) {
 // 单项校验：null=通过；否则返回缺失描述
 function checkEntry(c) {
   if (c.type === 'file') {
-    const p = path.join(__dirname, c.path);
+    const p = resolveData(c.path);
     if (!existsSync(p)) return { path: c.path, type: '缺文件', expectBytes: c.bytes || 0 };
     if (c.bytes) {
       try {
@@ -994,7 +1003,7 @@ function checkEntry(c) {
     return null;
   }
   if (c.type === 'dir') {
-    const p = path.join(__dirname, c.path);
+    const p = resolveData(c.path);
     if (!existsSync(p)) return { path: c.path, type: '缺目录', expectFiles: c.minFiles || 1 };
     if (c.minFiles && countFilesDeep(p) < c.minFiles) return { path: c.path, type: '目录不完整', expectFiles: c.minFiles };
     return null;
@@ -1065,7 +1074,7 @@ const ACTIVE_DOWNLOAD = { proc: null, cancelled: false };
 // opts.mirror：把指定镜像排到最前（UI 镜像切换）；
 // 进度：每 800ms 读 .part 实际大小，发 NDJSON {type:'progress', received, total}。
 function downloadOneFile(fileSpec, ctx, opts = {}) {
-  const target = path.join(__dirname, fileSpec.file);
+  const target = resolveData(fileSpec.file);
   mkdirSync(path.dirname(target), { recursive: true });
   return new Promise((resolve, reject) => {
     const mirrors = [...(fileSpec.mirrors || [])];
@@ -1208,7 +1217,7 @@ const INSTALLERS = {
   //        因属大流量（约 4.4GB），首次调用不带 opts.confirmBigDownload 时仅返回 BIG_DOWNLOAD_CONFIRM 标记，
   //        由前端弹二次确认后带 confirm=1 重试才真正下载。
   'cosyvoice-clone': async (ctx, opts = {}) => {
-    const modelDir = path.join(__dirname, 'models', 'cosyvoice', 'Fun-CosyVoice3-0.5B');
+    const modelDir = path.join(CACHE_DIR, 'cosyvoice', 'Fun-CosyVoice3-0.5B');
     const vendorDir = path.join(__dirname, 'vendor', 'cosyvoice');
     const srcDir = vendorDir;
     const keyFiles = ['llm.pt', 'flow.pt', 'hift.pt', 'speech_tokenizer_v3.onnx', 'campplus.onnx', 'cosyvoice3.yaml'];

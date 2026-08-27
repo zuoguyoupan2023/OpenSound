@@ -148,6 +148,19 @@ function authHeaders(init?: RequestInit): RequestInit {
   return { ...init, headers };
 }
 
+// ---------- 032 P3 数据目录（模型存放目录） ----------
+// 生效中的数据根目录（模型/缓存/音色落盘处；默认 app_data_dir，可自定义）
+export async function getDataRoot(): Promise<string> {
+  return invoke<string>("get_data_root");
+}
+export async function setDataRoot(path: string): Promise<void> {
+  await invoke("set_data_root", { path });
+}
+// 把历史落在服务代码目录的 asr-server/models 迁移到数据目录 models/
+export async function migrateModelsToData(): Promise<string> {
+  return invoke<string>("migrate_models_to_data");
+}
+
 // ---------- 通用 ----------
 async function jfetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(getBaseUrl() + path, authHeaders(init));
