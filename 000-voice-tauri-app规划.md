@@ -1,10 +1,10 @@
-# 000 · Tabu-Voice 桌面 App 规划（Tauri · 开放本地语音后端）
+# 000 · OpenSound 桌面 App 规划（Tauri · 开放本地语音后端）
 
-> 状态：**规划**（可作为 010 相位1 的落地文档；目录当前为 `Tabu-Voice/`，正式名 **Tabu-Local**）
+> 状态：**规划**（可作为 010 相位1 的落地文档；目录当前为 `OpenSound/`，正式名 **OpenSound**）
 > 📌 **看当前完成状态 → `000-summary.md`；看后续任务 → `006-voice-后续规划.md`（最新参考规划）。**
 > 目标：把本地语音服务做成一个**点开即用的 Tauri 桌面 App**——既能独立完整使用（识别/朗读/对话），又作为**开放端口后端**支撑 浏览器插件(Tabu-AI) / 网站 / 其它 App / 命令行终端 接入本地语音与 LLM 能力。
 > 关联文档：`007`（本地 ASR/TTS 实现与踩坑）、`008`（语音助手）、`009`（桌面 App 愿景）、`010`（本地语音一体化 voice-server）、`011`（项目拆分）、`013`（性能/硬件加速）、`014`（TTS 调研）、`015`（Tabu-AI 能力来源）、`016`（手机 ASR 调研）、`017`（浏览器 SenseVoice）。
-> 本文件是「Tabu-Voice 作为桌面 App + 后端」的**专项规划**；接口细节以 `Tabu-Voice/GUIDE.md`（调用指南）与 `000-backend.md`（启动手册）为准。
+> 本文件是「OpenSound 作为桌面 App + 后端」的**专项规划**；接口细节以 `OpenSound/GUIDE.md`（调用指南）与 `000-backend.md`（启动手册）为准。
 
 ---
 
@@ -26,10 +26,10 @@
 
 ### 1.1 创建 Tauri App
 - 桌面壳：**Tauri 2**（Rust core + 前端 Webview），轻量、低内存、Rust 侧可直接管本地服务进程与模型文件。
-- 仓库：建议独立 `Tabu-Voice/`（当前目录）升级为 Tauri 工程，或 `tabu-local` monorepo。
+- 仓库：建议独立 `OpenSound/`（当前目录）升级为 Tauri 工程，或 `opensound` monorepo。
 - 结构：
   ```
-  Tabu-Voice/
+  OpenSound/
    ├─ src-tauri/            # Rust：窗口、托盘、系统集成、拉启/守护 voice-server 子进程
    ├─ ui/ (前端)            # 可选：内置 GUI 界面（识别/朗读/对话/模型管理）
    ├─ asr-server/           # 现有 Node 语音服务（核心引擎，作为子进程被拉起）
@@ -78,7 +78,7 @@
 外部方（网站/插件/App/CLI/终端）
    │  HTTP :9528   （Token 可选；本机默认免鉴权，需开放局域网时才启用 Token）
    ▼
-Tabu-Voice App（Tauri 壳 → 常驻 asr-server 子进程）
+OpenSound App（Tauri 壳 → 常驻 asr-server 子进程）
    ├─ POST /transcribe   语音 → 文本   （SenseVoice/whisper，engine 可选）
    ├─ POST /speak        文本 → 语音   （kokoro/qwen3/cloud/azure/cosyvoice；帧流）
    ├─ POST /chat         文本 → LLM    （llama-cpp/ollama）
@@ -95,7 +95,7 @@ Tabu-Voice App（Tauri 壳 → 常驻 asr-server 子进程）
 - Token 生成/展示在 GUI「连接」页，与插件设置一致。
 
 ### SPEC 文档要点（交付物）
-`Tabu-Voice/SPEC.md` 作为唯一对外事实来源，含：
+`OpenSound/SPEC.md` 作为唯一对外事实来源，含：
 1. 端口、鉴权、CORS、错误码表。
 2. 每个端点的请求/响应 JSON 与 curl 示例。
 3. 音频编码约定与帧流协议。
@@ -136,7 +136,7 @@ Tabu-Voice App（Tauri 壳 → 常驻 asr-server 子进程）
 
 ### 4.5 与插件、终端桥接的关系
 - Tabu-AI：走 9528 本地服务（无需改）。
-- 终端桥接：复用 9527 bridge（见 `000-bridge.md`）——Tabu-Voice 作为桥接后端的宿主之一。
+- 终端桥接：复用 9527 bridge（见 `000-bridge.md`）——OpenSound 作为桥接后端的宿主之一。
 - 手机 App（016）：后续经局域网 Token 接入本 App 的本地模型。
 
 ### 4.6 隐私与可观测
@@ -235,7 +235,7 @@ Tabu-Voice App（Tauri 壳 → 常驻 asr-server 子进程）
 ---
 
 ## 附：与既有文档的边界
-- 本文 = **Tabu-Voice 桌面 App（Tauri）专项**：形态、CI、开放端口+SPEC、独立/服务双模式、realtime/克隆路线。
+- 本文 = **OpenSound 桌面 App（Tauri）专项**：形态、CI、开放端口+SPEC、独立/服务双模式、realtime/克隆路线。
 - `010` = 本地语音一体化服务（voice-server）架构与相位。
 - `009` = 更大的「内容助理」App 愿景（不限于语音）。
 - `015` / `000-plan.md` = Tabu-AI 能力来源与待办。

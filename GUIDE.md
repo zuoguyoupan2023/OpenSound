@@ -1,8 +1,8 @@
-# Tabu-Local 本地能力服务 · 调用指南
+# OpenSound 本地能力服务 · 调用指南
 
-> 📌 **命名说明**：本目录当前为 `Tabu-Voice/`，但**严格应称 `Tabu-Local`**——它不仅提供"语音"（TTS / ASR），还提供 **LLM**（`/chat`、`/voice-chat`）。"Voice" 会漏掉 LLM 让人误解。改名随桌面应用阶段推进（见 `crazycodecat2/015` 规划）。
+> 📌 **命名说明**：本目录当前为 `OpenSound/`，但**严格应称 `OpenSound`**——它不仅提供"语音"（TTS / ASR），还提供 **LLM**（`/chat`、`/voice-chat`）。"Voice" 会漏掉 LLM 让人误解。改名随桌面应用阶段推进（见 `crazycodecat2/015` 规划）。
 >
-> 📖 **本文档 = 如何调用当前端口**。能力变化时随改随更新，让 Tabu-Local 既可独立使用，也可作为 浏览器扩展 / 网站 / 其他 app 的后端。
+> 📖 **本文档 = 如何调用当前端口**。能力变化时随改随更新，让 OpenSound 既可独立使用，也可作为 浏览器扩展 / 网站 / 其他 app 的后端。
 
 ---
 
@@ -26,7 +26,7 @@
 ## 二、快速启动
 
 ```bash
-cd /Users/burenweiye/Documents/GitHub/Tabu-Voice/asr-server
+cd /Users/burenweiye/Documents/GitHub/OpenSound/asr-server
 npm install            # 首次（含 sherpa-onnx 原生绑定）
 npm run all            # 一键起 asr-server(9528) + qwen3(8001)，幂等（已在跑自动跳过）
 ```
@@ -143,7 +143,7 @@ curl -s -X POST 'http://127.0.0.1:9528/chat' \
 
 ## 六、Tabu-AI 插件如何用它（分工速览）
 
-| 能力 | Tabu-AI 走本地（Tabu-Local） | 走 API / 浏览器 |
+| 能力 | Tabu-AI 走本地（OpenSound） | 走 API / 浏览器 |
 |---|---|---|
 | 朗读 | 引擎下拉选 kokoro / qwen3 → `POST /speak` | 系统 `chrome.tts`（即时兜底）/ 云端 API |
 | 识别 | 后端选「💻 本地服务」→ `POST /transcribe` | azure / openai / aliyun |
@@ -158,4 +158,4 @@ curl -s -X POST 'http://127.0.0.1:9528/chat' \
 
 - **能力变化 → 更新本指南**（端口、参数、示例），同时同步 `asr-server/README.md` 与 `crazycodecat2/015`。
 - 阶段二桌面应用（GUI）推进后：**端口保持稳定**，只加 GUI 层与鉴权；本指南继续作为接口事实来源。
-- 命名：当前目录 `Tabu-Voice/`，正式名 **Tabu-Local**（见 015 规划 §〇）。
+- 命名：当前目录 `OpenSound/`，正式名 **OpenSound**（见 015 规划 §〇）。

@@ -1,10 +1,10 @@
-# 002 · Tabu-Local 可接入语音能力目录（模型与技术路线）
+# 002 · OpenSound 可接入语音能力目录（模型与技术路线）
 
 > 状态：**调研（2026-08）**。
-> 定位：**Tabu-Local 不是一个"配好单一模型"的 App，而是一个"封装好的模型接入器"**——把市场上做得好的**语音识别（ASR）、语音合成（TTS）、语音克隆、对话（LLM）、实时语音（Realtime）**各路线与模型都列出来；能技术验证、能在本项目里接入的，就都接进来。发布后，用户要做的是：
+> 定位：**OpenSound 不是一个"配好单一模型"的 App，而是一个"封装好的模型接入器"**——把市场上做得好的**语音识别（ASR）、语音合成（TTS）、语音克隆、对话（LLM）、实时语音（Realtime）**各路线与模型都列出来；能技术验证、能在本项目里接入的，就都接进来。发布后，用户要做的是：
 >
 > ```
-> ① 下载 Tabu-Local App
+> ① 下载 OpenSound App
 > ② 设置模型下载路径
 > ③ 下载自己想要的模型
 > ④ 启用对应引擎
@@ -16,7 +16,7 @@
 
 ---
 
-## 〇、Tabu-Local 接入模型的方式（架构）
+## 〇、OpenSound 接入模型的方式（架构）
 
 所有能力走**统一 HTTP 端口 9528**，模型由 `/models` + `/install-model` 管理：
 
@@ -24,7 +24,7 @@
 外部方（网站/插件/App/CLI）或 GUI
    │  HTTP :9528
    ▼
-Tabu-Local App（Tauri 壳 → asr-server 子进程）
+OpenSound App（Tauri 壳 → asr-server 子进程）
    ├─ 识别 POST /transcribe   （引擎可配：sensevoice/whisper/…）
    ├─ 朗读 POST /speak        （引擎可配：kokoro/qwen3/cloud/…）
    ├─ 对话 POST /chat         （llama-cpp/ollama/…）
@@ -89,7 +89,7 @@ Tabu-Local App（Tauri 壳 → asr-server 子进程）
 
 - **训练**：约 7 万小时人工精选标注，论文结论"数据质量可弥补参数量差距"。
 - **sherpa-onnx 支持** ✅：[sherpa-onnx-fire-red-asr2-zh_en-int8-2026-02-26](https://k2-fsa.github.io/sherpa/onnx/FireRedAsr/index.html)（AED/CTC，Node.js/WASM/Python 全支持）。
-- **Tabu-Local 接入**：🔶 可接入——sherpa-onnx 已提供 Node.js 接口，与现有 SenseVoice 同栈，加引擎 + `/install-model` 即可。
+- **OpenSound 接入**：🔶 可接入——sherpa-onnx 已提供 Node.js 接口，与现有 SenseVoice 同栈，加引擎 + `/install-model` 即可。
 
 ### 1.3 流式 vs 非流式分类
 
@@ -101,7 +101,7 @@ Tabu-Local App（Tauri 壳 → asr-server 子进程）
 
 ### 1.4 sherpa-onnx 本地可部署 ASR 模型清单 + 接入状态
 
-| 模型 | 大小(int8) | 中文 | 流式 | 热词 | 接入状态（Tabu-Local）|
+| 模型 | 大小(int8) | 中文 | 流式 | 热词 | 接入状态（OpenSound）|
 |---|---|---|---|---|---|
 | **SenseVoice** | 239MB | ✅优（中/粤/日/韩）| ❌(配VAD伪流式) | ❌ | ✅ **已接入**（默认）|
 | **Whisper**（transformers.js）| base 75–140MB | 一般 | ❌ | ❌ | ✅ **已接入**（兜底）|
@@ -157,11 +157,11 @@ Tabu-Local App（Tauri 壳 → asr-server 子进程）
 | sherpa-onnx 支持 | ❌ 不支持（大 AR 模型）；ONNX 零样本克隆可用官方 **ZipVoice** |
 | 授权 | **Apache 2.0 可商用** |
 
-**Tabu-Local 接入**：🔶 可接入——SGLang-Omni 暴露 OpenAI 兼容 `/v1/audio/speech`，Tabu-Local 的 `/speak` 可像转发 cloud 引擎一样接入（需 GPU）。
+**OpenSound 接入**：🔶 可接入——SGLang-Omni 暴露 OpenAI 兼容 `/v1/audio/speech`，OpenSound 的 `/speak` 可像转发 cloud 引擎一样接入（需 GPU）。
 
 ### 2.3 模型清单 + 接入状态
 
-| 模型 | 大小 | 授权 | 克隆 | 多角色 | 语言 | 设备 | 接入状态（Tabu-Local）|
+| 模型 | 大小 | 授权 | 克隆 | 多角色 | 语言 | 设备 | 接入状态（OpenSound）|
 |---|---|---|---|---|---|---|---|
 | **Kokoro** | ~350MB | Apache2 | ❌ | ❌ | 英/少中 | CPU | ✅ **已接入**（默认）|
 | **Qwen3-TTS** | 0.6B~1.2GB | Apache2 | ✅ | 9预设拼装 | 中英多语 | MPS | ✅ **已接入**（流式）|
@@ -200,7 +200,7 @@ Tabu-Local App（Tauri 壳 → asr-server 子进程）
 
 ## 四、对话（LLM）
 
-> Tabu-Local 不只做语音，还内置本地 LLM 对话（`/chat` / `/voice-chat`）。本节讲清楚三件事：
+> OpenSound 不只做语音，还内置本地 LLM 对话（`/chat` / `/voice-chat`）。本节讲清楚三件事：
 > 1. **omlx** 是什么（用户问到的 Mac 方案，一个 LLM **推理服务器**，不是格式）；
 > 2. **MLX vs GGUF**（Apple 框架/格式 vs 跨平台通用格式）；**Windows 没有"专属格式"，GGUF 是跨平台事实标准**；
 > 3. 有哪些消费级可用的开源 LLM、Mac/Win 怎么部署。
@@ -221,8 +221,8 @@ Tabu-Local App（Tauri 壳 → asr-server 子进程）
 | 授权 | Apache 2.0 |
 | 与 MLX 关系 | oMLX **构建在 MLX 之上**（MLX 是底层框架，oMLX 是面向用户的推理服务器产品）|
 
-**接入 Tabu-Local 的可行性**：
-- oMLX 暴露 **OpenAI 兼容 `/v1`** → Tabu-Local 的 `/chat` 可像转发 Ollama(11434) 一样**转发 oMLX(8000)**，作为 **Mac 上的高质量 LLM 后端**。
+**接入 OpenSound 的可行性**：
+- oMLX 暴露 **OpenAI 兼容 `/v1`** → OpenSound 的 `/chat` 可像转发 Ollama(11434) 一样**转发 oMLX(8000)**，作为 **Mac 上的高质量 LLM 后端**。
 - 优势：长上下文/工具调用场景（语音助手的连续对话、上下文累积）比 llama.cpp 默认更优。
 - 注意：**仅 Mac**；Windows 无对应物（Windows 用 GGUF + CUDA/DirectML，见 4.2）。
 
@@ -239,7 +239,7 @@ Tabu-Local App（Tauri 壳 → asr-server 子进程）
 - **oMLX 是"服务器"，MLX 是"框架+格式"，GGUF 是"跨平台格式"**——三者不同层。用户在 Mac 上可用 **oMLX（基于 MLX）** 或 **llama.cpp（GGUF）**。
 - **Windows 没有"专属格式/服务器"**——它用 **GGUF**（llama.cpp），配合 CUDA（NVIDIA）/ DirectML（AMD/Intel）。Windows 上没有 oMLX 对应物。
 - **同一模型的 GGUF 可在 Mac 和 Win 都跑**（跨平台）；MLX/oMLX 只能在 Mac 跑（但有速度优势）。
-- **接入 Tabu-Local**：Mac 可转发 **oMLX(OpenAI 兼容 /v1)** 或加 **MLX 引擎**作速度优先；Win / 跨平台用现有 GGUF(llama.cpp) 引擎。用户选引擎即可，无需关心底层。
+- **接入 OpenSound**：Mac 可转发 **oMLX(OpenAI 兼容 /v1)** 或加 **MLX 引擎**作速度优先；Win / 跨平台用现有 GGUF(llama.cpp) 引擎。用户选引擎即可，无需关心底层。
 
 ### 4.3 消费级可用的开源本地 LLM（按内存档位，2026 前沿）
 
@@ -258,14 +258,14 @@ Tabu-Local App（Tauri 壳 → asr-server 子进程）
 | **MiniCPM-V 4.6** | 1.3B | ~1.5GB | **6GB 手机** | 262K | 多模态端侧之王 | Apache 2.0 |
 | **GLM-4.6V-Flash** | 9B | ~6GB | 16GB | 200K | 多模态工具调用 | MIT |
 
-> **默认档位建议**（Tabu-Local 当前默认 qwen2.5-0.5b，偏小用于验证）：16GB 可跑 **Qwen3.5-9B**（Q4≈5.3GB，可开 128K+ 上下文）；32GB 可跑 **Qwen3.5-35B-A3B**（Q4≈19GB）或 27B。
+> **默认档位建议**（OpenSound 当前默认 qwen2.5-0.5b，偏小用于验证）：16GB 可跑 **Qwen3.5-9B**（Q4≈5.3GB，可开 128K+ 上下文）；32GB 可跑 **Qwen3.5-35B-A3B**（Q4≈19GB）或 27B。
 > ⚠️ **纠错**：中文媒体流传的「Qwen3.5-27B-A3B」不存在——27B 是稠密模型，MoE 3B 激活的是 **35B-A3B**。
 
 ### 4.4 Mac / Win 部署方式
 
 | 平台 | 引擎/运行时 | 格式/端口 | 说明 |
 |---|---|---|---|
-| **macOS（M 芯片）** | llama.cpp | GGUF | 现状（Tabu-Local 内嵌 node-llama-cpp）；Metal 加速 |
+| **macOS（M 芯片）** | llama.cpp | GGUF | 现状（OpenSound 内嵌 node-llama-cpp）；Metal 加速 |
 | **macOS（M 芯片，长上下文/agent）** | **oMLX** | safetensors；`:8000/v1` | 🔶 可接入：SSD KV 缓存，长上下文 TTFT 快；OpenAI 兼容转发 |
 | **macOS（M 芯片，速度优先）** | **MLX** | safetensors/mlx | 🔶 可接入：Apple 硬件 decode 最快（+20~87%），作可选用引擎 |
 | **Windows（NVIDIA）** | llama.cpp + CUDA | GGUF | 推荐：GPU 加速 |
@@ -335,7 +335,7 @@ Tabu-Local App（Tauri 壳 → asr-server 子进程）
 
 ## 七、落地优先级（按"接入更多模型"逻辑）
 
-> 目标：**用户能在 App 里下载并启用的模型越多，Tabu-Local 越有价值**。按"验证成本低 / 用户收益高"排序：
+> 目标：**用户能在 App 里下载并启用的模型越多，OpenSound 越有价值**。按"验证成本低 / 用户收益高"排序：
 
 | 优先级 | 内容 | 难度 | 用户价值 |
 |---|---|---|---|

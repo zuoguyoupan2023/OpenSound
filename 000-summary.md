@@ -1,4 +1,4 @@
-# 000-SUMMARY · Tabu-Local 语音工作台（项目总览）
+# 000-SUMMARY · OpenSound 语音工作台（项目总览）
 
 > 定位：面向后续快速上手/接手的**项目总览**，不是开发流水账。讲清"是什么、整体怎么搭的、能做什么、有哪些坑"，帮你 5 分钟建立全貌。
 > 现状：**已可独立完整使用**（识别 / 朗读[含历史] / 对话[含历史] / 语音工作台 / 实时语音 / 模型管理 / 音频库 / 音色管理 / 设置），且是**开放端口后端**（`9528`）可被插件/网站/CLI 接入。
@@ -187,7 +187,7 @@ GUI 新建音色 ──▶ 参考音频(base64) + 参考文本 ──▶ asr-ser
 
 ### 7.2 macOS TCC 弹"访问文稿"多次（项目在 `~/Documents` 下）
 - **现象**：App 启动连续弹"文稿"文件夹访问授权（多次）。
-- **根因**：项目位于 `~/Documents/GitHub/Tabu-Voice`，App 拉起的 node/python 子进程读写项目内模型/配置文件，被 macOS 视为访问受 TCC 保护的"文稿"，且**未签名 App** 的授权缓存不稳定 → 多次弹。
+- **根因**：项目位于 `~/Documents/GitHub/OpenSound`，App 拉起的 node/python 子进程读写项目内模型/配置文件，被 macOS 视为访问受 TCC 保护的"文稿"，且**未签名 App** 的授权缓存不稳定 → 多次弹。
 - **解决**：弹窗点"允许"即可记住；**公开发布签名/公证后通常只弹一次**。
 - **长期**：如需彻底避免，可把模型/运行数据移出 `~/Documents`（但项目要公开，目录明确性更重要，暂不移）。
 
@@ -224,8 +224,8 @@ GUI 新建音色 ──▶ 参考音频(base64) + 参考文本 ──▶ asr-ser
 cd asr-server
 npm install
 npm run all          # 一键拉起 asr-server(9528) + qwen3(8001) + sensevoice-original(8002) + cosyvoice(8003)
-# 可选：TABU_SKIP_QWEN3=1 跳过 qwen3；TABU_SKIP_SENSEVOICE_ORIGINAL=1 跳过原始版
-#       TABU_SKIP_COSYVOICE=1 跳过克隆服务（省内存/加载时间）
+# 可选：OPENSOUND_SKIP_QWEN3=1 跳过 qwen3；OPENSOUND_SKIP_SENSEVOICE_ORIGINAL=1 跳过原始版
+#       OPENSOUND_SKIP_COSYVOICE=1 跳过克隆服务（省内存/加载时间）
 # 单独：npm run start-sensevoice-original  # funasr 原始版
 ```
 桌面 App：`npm run build`（tauri build，需 rustc ≥1.88）→ 运行生成的 `.app`；或 `npm run dev`（tauri dev）。

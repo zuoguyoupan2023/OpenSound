@@ -1,4 +1,4 @@
-# Tabu-Local 桌面 App（Tauri）
+# OpenSound 桌面 App（Tauri）
 
 把本地语音服务（ASR / TTS / LLM / 对话）做成一个**点开即用的 Tauri 桌面 App**：既能独立使用，又作为开放端口后端，供浏览器插件(Tabu-AI) / 网站 / 其它 App / CLI 接入。
 
@@ -7,7 +7,7 @@
 ## 目录结构
 
 ```
-Tabu-Voice/
+OpenSound/
  ├─ src-tauri/        # Rust：窗口、托盘、拉起/守护 asr-server 子进程
  ├─ ui/               # 前端：Vite + React + TS（M2 完整 GUI）
  │  └─ src/

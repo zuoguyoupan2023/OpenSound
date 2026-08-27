@@ -1,6 +1,6 @@
-# SPEC · Tabu-Local 对外开放接口规范
+# SPEC · OpenSound 对外开放接口规范
 
-> **Tabu-Local** 是一个**点开即用的本地语音服务桌面 App**：识别（ASR）、朗读（TTS）、对话（LLM）全本机运行，并作为**开放端口后端**供任意网站 / 浏览器插件 / 其它 App / 命令行终端接入。
+> **OpenSound** 是一个**点开即用的本地语音服务桌面 App**：识别（ASR）、朗读（TTS）、对话（LLM）全本机运行，并作为**开放端口后端**供任意网站 / 浏览器插件 / 其它 App / 命令行终端接入。
 >
 > 本文档是**对外唯一事实来源**。目标读者：想接入本地识别/朗读/对话能力的任意开发者。
 >
@@ -371,7 +371,7 @@ wx.request({
 > 详细方案与决策记录见 `011-朗读历史与生成策略方案.md §2.3 / §5.6`；本节为对外事实摘要。
 
 ```
-~/Library/Application Support/com.tabu.local/     （Tauri app_data_dir，Windows/Linux 由 Tauri 定位）
+~/Library/Application Support/world.opensound.local/     （Tauri app_data_dir，Windows/Linux 由 Tauri 定位）
 ├─ config.json            # 启动配置 + GUI 设置（服务地址/token/云端 API Key，ui 节）
 ├─ audio/
 │   ├─ recordings/*.wav   # 用户录音（16kHz WAV）
