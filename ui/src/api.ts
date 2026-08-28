@@ -397,11 +397,20 @@ export async function installModel(
       const line = buf.slice(0, idx).trim();
       buf = buf.slice(idx + 1);
       if (!line) continue;
+      let parsed: InstallProgress;
       try {
-        onProgress(JSON.parse(line) as InstallProgress);
+        parsed = JSON.parse(line) as InstallProgress;
       } catch {
-        /* skip bad line */
+        continue; // skip bad line
       }
+      // 关键修复（035 遗留根因）：服务端把安装器抛出的错误（如 BIG_DOWNLOAD_CONFIRM 二次确认标记）
+      // 写成 type:"error" 的 NDJSON 行、HTTP 仍 200。原实现把错误行当普通进度丢给 onProgress、
+      // 流正常结束 → 前端 catch 永不触发 → bigConfirm 永远不设置 → 确认行永远不出现（"晃一下"）。
+      // 这里把 error 行转成抛出，前端 install() 的 catch 才能统一处理（识别二次确认 / 展示错误日志）。
+      if (parsed.type === "error") {
+        throw new Error(parsed.message || "安装失败");
+      }
+      onProgress(parsed);
     }
   }
 }

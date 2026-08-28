@@ -17,7 +17,7 @@
     { "kind": "path", "path": ".venv-funasr/bin/python3", "label": "受管 venv：数据目录 venvs/.venv-funasr（034 阶段3 uv 自举创建；复用系统 torch/funasr 可 --system-site-packages）" }
   ],
   "install": {
-    "kind": "hint",
-    "message": "SenseVoice 原始版无独立下载器：权重已在 models/sensevoice-original 本地化，由 funasr 服务启动时加载。"
+    "kind": "env",
+    "message": "SenseVoice 原始版：① 安装引擎环境（.venv-funasr，含 funasr/torch，约 2.5GB）点「检测/修复」+ 二次确认；② 权重已本地化于 models/sensevoice-original，装完重启服务即可用。"
   }
 }

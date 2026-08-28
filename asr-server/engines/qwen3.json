@@ -13,7 +13,7 @@
     { "kind": "path", "path": ".venv-qwen3/bin/python3", "label": "受管 venv：数据目录 venvs/.venv-qwen3（034 阶段3 uv 自举创建）" }
   ],
   "install": {
-    "kind": "hint",
-    "message": "Qwen3-TTS 无独立下载脚本：模型在 qwen3 服务首次启动时经 HF_HOME(models/hf) 自动下载。"
+    "kind": "env",
+    "message": "Qwen3-TTS：① 安装引擎环境（.venv-qwen3，含 qwen-tts/torch，约 2.5GB）点「检测/修复」+ 二次确认；② 模型在服务首次启动时自动下载到 models/hf/。"
   }
 }

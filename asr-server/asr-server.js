@@ -1034,7 +1034,15 @@ async function engineReadiness(mf) {
   }
   for (const r of mf.runtime || []) {
     if (r.kind === 'path') {
-      if (!runtimePathExists(r.path)) missingRuntime.push({ kind: '缺失', label: r.label || r.path });
+      // 034 防空壳假就绪：runtime 是引擎 venv（bin/python3 或 Scripts/python.exe 形态）时，
+      // 必须"venv python 在 且 关键依赖包已装"才算就绪——只建了目录没装依赖的 venv 会如实报缺环境
+      const venvName = r.path.split(/[\\/]/)[0];
+      const keyPkg = VENV_KEY_PKG[mf.id];
+      if (keyPkg) {
+        if (!venvKeyPkgOk(venvName, keyPkg)) missingRuntime.push({ kind: '缺失', label: r.label || r.path });
+      } else if (!runtimePathExists(r.path)) {
+        missingRuntime.push({ kind: '缺失', label: r.label || r.path });
+      }
     } else if (r.kind === 'bin') {
       try { execSync(IS_WIN ? `where ${r.name}` : `which ${r.name}`, { stdio: 'ignore' }); } catch { missingRuntime.push({ kind: '缺失', label: r.label || ('命令 ' + r.name) }); }
     }
@@ -1073,6 +1081,40 @@ function runDownload(cmd, args) {
       if (buf.trim()) ctx.nd({ type: 'log', message: buf.trim() });
       if (code === 0) ctx.nd({ type: 'done', message: '安装完成' });
       else reject(new Error('下载失败（退出码 ' + code + '）'));
+    });
+  });
+}
+
+// 通用子进程执行（带 env）→ NDJSON 行级进度；退出码 0 视为成功（034 阶段3：uv envenv 安装用）
+function runCmdWithEnv(cmd, args, envAdd = {}, cwdOverride = __dirname) {
+  return (ctx) => new Promise((resolve, reject) => {
+    ctx.nd({ type: 'log', message: `> ${cmd.split(/[\\/]/).pop()} ${args.join(' ')}` });
+    const p = spawn(cmd, args, {
+      cwd: cwdOverride,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, ...envAdd },
+    });
+    let buf = '';
+    const onData = (chunk) => {
+      buf += chunk.toString();
+      let idx;
+      while ((idx = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, idx).replace(/\r$/, '').trim();
+        buf = buf.slice(idx + 1);
+        if (line) ctx.nd({ type: 'log', message: line });
+      }
+    };
+    p.stdout.on('data', onData);
+    p.stderr.on('data', onData);
+    p.on('error', (e) => reject(new Error('无法启动命令：' + e.message)));
+    p.on('exit', (code) => {
+      if (buf.trim()) ctx.nd({ type: 'log', message: buf.trim() });
+      if (code === 0) {
+        ctx.nd({ type: 'log', message: '✓ 命令完成（exit 0）' });
+        resolve();
+      } else {
+        reject(new Error(`命令失败（退出码 ${code}）：${args.slice(0, 4).join(' ')}…`));
+      }
     });
   });
 }
@@ -1194,6 +1236,97 @@ const cvWeightSpec = (name) => ({
   ],
 });
 
+// ---------- 034 阶段3：引擎 venv（uv 受管）安装器 ----------
+// 分层重申：全局「安装 Python 基础」按钮只装 uv + CPython 3.11；
+// 这里负责"模型管理页对应卡片"的引擎自身 venv + 依赖（含 torch 等大流量，二次确认后执行）。
+// 与 Rust 侧一致：uv 走数据目录 runtime/uv，受管 CPython 走 runtime/python，venv 走数据目录 venvs/。
+const UV_EXE = path.join(DATA_DIR, 'runtime', 'uv', IS_WIN ? 'uv.exe' : 'uv');
+const UV_PY_HOME = path.join(DATA_DIR, 'runtime', 'python');
+const UV_INDEX = process.env.OPENSOUND_UV_INDEX || 'https://pypi.tuna.tsinghua.edu.cn/simple';
+const venvDirOf = (name) => path.join(DATA_DIR, 'venvs', name);
+const venvPyOf = (name) => (IS_WIN
+  ? path.join(venvDirOf(name), 'Scripts', 'python.exe')
+  : path.join(venvDirOf(name), 'bin', 'python3'));
+// 034 防空壳假就绪：每个 python 引擎的关键依赖包名（engineReadiness 据此判定 venv 是否"真就绪"）
+const VENV_KEY_PKG = {
+  'qwen3': 'qwen_tts',
+  'sensevoice-original': 'funasr',
+  'cosyvoice-clone': 'torch',
+};
+// 关键包就绪 = venv python 在 且 site-packages 有引擎依赖包（防空壳假就绪）
+function venvKeyPkgOk(name, keyPkg) {
+  const py = venvPyOf(name);
+  if (!existsSync(py)) return false;
+  const sp = path.join(venvDirOf(name), 'Lib', 'site-packages', keyPkg);
+  return existsSync(sp) && (() => { try { return statSync(sp).isDirectory(); } catch { return false; } })();
+}
+// 引擎 venv 安装器工厂：{ name, pkgs?, lockRel?, keyPkg, label, estGB }
+//  - 未确认大流量 → 抛 BIG_DOWNLOAD_CONFIRM 给前端二次确认（带 confirm=1 重试）
+//  - uv 缺失 → 明确提示先装全局 Python 基础（不静默）
+function uvVenvInstaller({ name, pkgs, lockRel, keyPkg, label, estGB }) {
+  return async (ctx, opts = {}) => {
+    if (venvKeyPkgOk(name, keyPkg)) {
+      ctx.nd({ type: 'log', message: `${label} 引擎环境已就绪 ✓（${name}）` });
+      ctx.nd({ type: 'done', message: '环境就绪' });
+      return;
+    }
+    ctx.nd({ type: 'log', message: `${label} 缺引擎环境（${name}）→ 开始检测/安装…` });
+    if (!existsSync(UV_EXE)) {
+      throw new Error('未安装受管 Python 基础（uv）。请先在设置页/引导条点「安装 Python 基础」（uv + CPython 3.11，约 100MB），再回来装引擎环境。');
+    }
+    const totalEst = estGB ? `（约 ${estGB}GB，含 torch 等大依赖）` : '';
+    if (estGB && !opts.confirmBigDownload) {
+      ctx.nd({ type: 'log', message: `${label} 需安装引擎依赖${totalEst}，等二次确认…` });
+      throw new Error(`BIG_DOWNLOAD_CONFIRM:${estGB}GB:${name}`);
+    }
+    ctx.nd({ type: 'log', message: `已确认，创建 ${name}（uv venv --python 3.11 --clear）…` });
+    await runCmdWithEnv(UV_EXE, ['venv', '--python', '3.11', '--clear', venvDirOf(name)],
+      { UV_PYTHON_INSTALL_DIR: UV_PY_HOME, UV_INDEX_URL: UV_INDEX })(ctx);
+    ctx.nd({ type: 'log', message: `venv 创建完成，安装 ${name} 依赖${totalEst}（pip 走镜像 ${UV_INDEX}）…` });
+    const pipArgs = lockRel
+      ? ['pip', 'install', '--python', venvPyOf(name), '-r', path.join(__dirname, lockRel)]
+      : ['pip', 'install', '--python', venvPyOf(name), ...pkgs];
+    await runCmdWithEnv(UV_EXE, pipArgs,
+      { UV_PYTHON_INSTALL_DIR: UV_PY_HOME, UV_INDEX_URL: UV_INDEX })(ctx);
+    if (!venvKeyPkgOk(name, keyPkg)) {
+      throw new Error(`${label} 依赖安装后仍未就绪（${name} 缺 ${keyPkg}），查看上方日志`);
+    }
+    ctx.nd({ type: 'log', message: `${label} 引擎环境就绪 ✓（${name}）` });
+    ctx.nd({ type: 'done', message: '环境就绪，重启服务后生效' });
+  };
+}
+
+// qwen3 二段式安装器：① 引擎 venv（uvVenvInstaller，含大流量二次确认）
+// ② 模型文件 —— hf hub 快照缓存（models/hf/hub/models--Qwen--Qwen3-TTS-12Hz-0.6B-CustomVoice），
+//    由 .venv-qwen3 内 huggingface_hub snapshot_download 拉取（默认 hf-mirror，HF_ENDPOINT 可覆盖）。
+//    此前模型只能靠"重启服务时 qwen3-tts-server.py 顺带拉取"，点「补齐」会静默 done（用户实测"晃一下没反应"）。
+function qwen3ModelInstaller(venvInst) {
+  return async (ctx, opts = {}) => {
+    await venvInst(ctx, opts); // ① 引擎环境（未就绪时走 uv 安装，含 2.5GB 二次确认）
+    const mf = ENGINE_MANIFESTS.find((x) => x.id === 'qwen3');
+    const missing = (mf?.checks || []).map(checkEntry).filter(Boolean);
+    if (!missing.length) {
+      ctx.nd({ type: 'log', message: 'Qwen3 模型文件完整 ✓（models/hf/hub/）' });
+      ctx.nd({ type: 'done', message: '引擎环境与模型均已就绪' });
+      return;
+    }
+    ctx.nd({ type: 'log', message: `Qwen3 模型文件缺失 ${missing.length} 项（约 2.3GB，hf 快照缓存）→ 需二次确认下载…` });
+    if (!opts.confirmBigDownload) {
+      throw new Error('BIG_DOWNLOAD_CONFIRM:2.3GB:qwen3-model');
+    }
+    const py = venvPyOf('.venv-qwen3');
+    if (!existsSync(py)) throw new Error('.venv-qwen3 python 不存在，请先完成引擎环境安装');
+    ctx.nd({ type: 'log', message: '已确认，用 huggingface_hub 拉取模型（默认 hf-mirror，写入 models/hf/hub/）…' });
+    await runCmdWithEnv(py, ['-c',
+      "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice'))"],
+      { HF_HOME: path.join(CACHE_DIR, 'hf'), HF_ENDPOINT: process.env.HF_ENDPOINT || 'https://hf-mirror.com' })(ctx);
+    const after = (mf?.checks || []).map(checkEntry).filter(Boolean);
+    if (after.length) throw new Error('模型拉取后仍未就绪：' + after.map((r) => r.path).join('、') + '，查看上方日志');
+    ctx.nd({ type: 'log', message: 'Qwen3 模型就绪 ✓，重启服务后引擎可用' });
+    ctx.nd({ type: 'done', message: '模型就绪，重启服务后生效' });
+  };
+}
+
 // ─────────────────────────────────────────────────────────────
 // 【新增模型接入约定 · 必读】（S5 起，本区域顶部常驻）
 // 未来在 INSTALLERS 里注册任何新模型/引擎时，都必须做到"开箱即用"：
@@ -1215,7 +1348,23 @@ const INSTALLERS = {
     ENGINE_MANIFESTS.filter((mf) => mf.install && mf.install.kind === 'url-multi')
       .map((mf) => [mf.id, manifestUrlMultiInstaller(mf)])
   ),
-  qwen3: (ctx) => ctx.nd({ type: 'done', message: 'Qwen3-TTS 无独立下载脚本：模型在首次启动 qwen3 服务（npm run start-qwen3）时自动下载。' }),
+  // 034 阶段3：引擎 venv 安装走 uv（受管 CPython）；qwen3 模型文件此前仅靠重启服务顺带拉取，
+  // 点「补齐」静默 done → 现改为二段式：venv（uvVenvInstaller）+ 模型缺失走二次确认+huggingface_hub 拉取
+  qwen3: qwen3ModelInstaller(uvVenvInstaller({
+    name: '.venv-qwen3',
+    pkgs: ['qwen-tts', 'torch', 'torchaudio'],
+    keyPkg: 'qwen_tts',
+    label: 'Qwen3-TTS',
+    estGB: 2.5,
+  })),
+  // 034 阶段3：sensevoice-original（funasr）引擎环境——此前无安装器，点「检测/修复」直接 400；现在有真安装器
+  'sensevoice-original': uvVenvInstaller({
+    name: '.venv-funasr',
+    pkgs: ['funasr', 'torch', 'torchaudio'],
+    keyPkg: 'funasr',
+    label: 'SenseVoice 原始版',
+    estGB: 2.5,
+  }),
   whisper: (ctx) => ctx.nd({ type: 'done', message: 'Whisper 无独立下载脚本：首次识别时由 transformers.js 自动下载。' }),
   // CosyVoice3 克隆：双依赖检查——① 9GB 模型（005 手动预下载，缺失时不自动下，避免误触大流量）；
   // ② CosyVoice 源码仓库（cosyvoice 包 + Matcha-TTS 子模块，运行时 import 必需），缺失则自动浅克隆补齐。
@@ -1297,38 +1446,38 @@ const INSTALLERS = {
     const venvPy = IS_WIN
       ? path.join(venvDir, 'Scripts', 'python.exe')
       : path.join(venvDir, 'bin', 'python3');
-    if (!existsSync(venvPy)) {
-      ctx.nd({ type: 'log', message: '.venv-cosyvoice 缺失 → 创建并安装锁定依赖（首次约几分钟）…' });
-      let sysPy = process.env.PY_SYS;
-      if (!sysPy) {
-        try {
-          sysPy = execSync(IS_WIN ? 'where python3' : 'which python3', { encoding: 'utf8' }).trim().split('\n')[0];
-        } catch {}
+    if (!venvKeyPkgOk('.venv-cosyvoice', 'torch')) {
+      // 034：优先 uv（受管 CPython）建引擎环境；uv 未装 → 明确提示先装全局 Python 基础
+      ctx.nd({ type: 'log', message: '.venv-cosyvoice 缺失/不完整 → 用 uv 创建并安装锁定依赖（含 torch，较大，首次约几分钟）…' });
+      if (!existsSync(UV_EXE)) {
+        throw new Error('未安装受管 Python 基础（uv）。请先在设置页/引导条点「安装 Python 基础」（uv + CPython 3.11），再回来装引擎环境。');
       }
-      if (!sysPy) throw new Error('未找到系统 python3（创建 venv 需要）');
-      ctx.nd({ type: 'log', message: `python3 = ${sysPy}` });
-      await new Promise((resolve, reject) => {
-        const p = spawn(sysPy, ['-m', 'venv', venvDir], { cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'] });
-        const onData = (chunk) => String(chunk).split('\n').filter(Boolean)
-          .forEach((line) => ctx.nd({ type: 'log', message: line }));
-        p.stdout.on('data', onData); p.stderr.on('data', onData);
-        p.on('error', (e) => reject(new Error('无法启动 python3 -m venv：' + e.message)));
-        p.on('exit', (code) => code === 0 ? resolve() : reject(new Error(`venv 创建失败（退出码 ${code}）`)));
-      });
-      ctx.nd({ type: 'log', message: 'venv 创建完成，pip 安装依赖…' });
-      const venvPip = IS_WIN ? path.join(venvDir, 'Scripts', 'pip.exe') : path.join(venvDir, 'bin', 'pip');
-      await new Promise((resolve, reject) => {
-        const p = spawn(venvPip, ['install', '-r', path.join(__dirname, 'requirements-cosyvoice.lock')],
-          { cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'] });
-        const onData = (chunk) => String(chunk).split('\n').filter(Boolean)
-          .forEach((line) => ctx.nd({ type: 'log', message: line }));
-        p.stdout.on('data', onData); p.stderr.on('data', onData);
-        p.on('error', (e) => reject(new Error('无法启动 pip：' + e.message)));
-        p.on('exit', (code) => code === 0 ? resolve() : reject(new Error(`pip install 失败（退出码 ${code}），查看上方日志`)));
-      });
-      ctx.nd({ type: 'log', message: '依赖安装完成 ✓' });
+      // venv 创建 + 锁文件依赖（torch 等大流量在这个分支里属于"已确认的引擎安装"，不再单独二次确认——
+      // cosyvoice 模型权重才是最大头，已在上面走 BIG_DOWNLOAD_CONFIRM）
+      await runCmdWithEnv(UV_EXE, ['venv', '--python', '3.11', '--clear', venvDir],
+        { UV_PYTHON_INSTALL_DIR: UV_PY_HOME, UV_INDEX_URL: UV_INDEX })(ctx);
+      ctx.nd({ type: 'log', message: 'venv 创建完成，pip 安装锁定依赖（requirements-cosyvoice.lock，镜像 ' + UV_INDEX + '）…' });
+      await runCmdWithEnv(UV_EXE, ['pip', 'install', '--python', venvPy, '-r', path.join(__dirname, 'requirements-cosyvoice.lock')],
+        { UV_PYTHON_INSTALL_DIR: UV_PY_HOME, UV_INDEX_URL: UV_INDEX })(ctx);
+      if (!venvKeyPkgOk('.venv-cosyvoice', 'torch')) {
+        throw new Error('.venv-cosyvoice 依赖安装后仍未就绪（缺 torch），查看上方日志');
+      }
+      ctx.nd({ type: 'log', message: '.venv-cosyvoice 依赖就绪 ✓' });
     } else {
-      ctx.nd({ type: 'log', message: '.venv-cosyvoice 已存在 ✓' });
+      // venv 已建且 torch 在（旧 venv）：仍要补查 033 实测缺失项 modelscope（旧锁文件漏装 → 8003 秒退）
+      if (!venvKeyPkgOk('.venv-cosyvoice', 'modelscope')) {
+        if (!existsSync(UV_EXE)) {
+          throw new Error('未安装受管 Python 基础（uv）。请先在设置页/引导条点「安装 Python 基础」后重试。');
+        }
+        ctx.nd({ type: 'log', message: '.venv-cosyvoice 缺 modelscope（旧锁文件漏装）→ 补装…' });
+        await runCmdWithEnv(UV_EXE, ['pip', 'install', '--python', venvPy, 'modelscope'],
+          { UV_PYTHON_INSTALL_DIR: UV_PY_HOME, UV_INDEX_URL: UV_INDEX })(ctx);
+        if (!venvKeyPkgOk('.venv-cosyvoice', 'modelscope')) {
+          throw new Error('.venv-cosyvoice 补装 modelscope 失败，查看上方日志');
+        }
+        ctx.nd({ type: 'log', message: '.venv-cosyvoice 补装 modelscope 完成 ✓' });
+      }
+      ctx.nd({ type: 'log', message: '.venv-cosyvoice 已存在且依赖就绪 ✓' });
     }
 
     ctx.nd({ type: 'done', message: '克隆依赖就绪。若「运行中」徽标未变绿：托盘 → 重启服务，等模型加载完成（首次约 1-2 分钟）。' });
