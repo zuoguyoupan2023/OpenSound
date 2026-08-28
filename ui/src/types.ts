@@ -68,6 +68,8 @@ export interface ModelInfo {
   install?: InstallMeta | null;
   /** 035：本机有 NVIDIA 显卡、但引擎 venv 的 torch 是 CPU 版 → 可点「升级 GPU 加速」转为 CUDA 版 */
   gpuUpgrade?: boolean;
+  /** 036：加速版本标记（torch 为 CUDA 版 / CPU 版），前端徽标区分 GPU/CPU */
+  accelTag?: { kind: "cuda" | "cpu"; label: string } | null;
 }
 
 // 安装进度（NDJSON）

@@ -290,6 +290,13 @@ export default function ModelsPanel(props: PanelProps) {
                   <span className="model-cat">{catLabel[m.category] || m.category}</span>
                   <span className="model-engine">{m.engine}</span>
                   <span className="model-size">{m.size}</span>
+                  {/* 036：GPU/CPU 加速版本标记（torch CUDA 版 / CPU 版） */}
+                  {m.accelTag && (
+                    <span className={`badge accel-${m.accelTag.kind}`} title={m.accelTag.kind === "cuda" ? "torch 为 CUDA 版，GPU 加速推理" : "torch 为 CPU 版（无 GPU 加速）"}>
+                      <Icon icon={m.accelTag.kind === "cuda" ? "lucide:gpu" : "lucide:cpu"} width={11} height={11} />{" "}
+                      {m.accelTag.label}
+                    </span>
+                  )}
                 </div>
 
                 {/* 状态行：真实状态优先；启动中 / 可用未启用(黄) / 期望关闭仍运行(黄提示) / 常规 */}

@@ -217,6 +217,18 @@ body {
   opacity: 0.88;
 }
 
+/* 036：GPU（CUDA）/ CPU 加速版本徽标 */
+.badge.accel-cuda {
+  background: rgba(52, 199, 89, 0.12);
+  color: #34c759;
+  border: 1px solid rgba(52, 199, 89, 0.35);
+}
+.badge.accel-cpu {
+  background: rgba(142, 142, 147, 0.12);
+  color: var(--text, #8e8e93);
+  border: 1px solid rgba(142, 142, 147, 0.35);
+}
+
 .select {
   background: var(--card);
   color: var(--text);

@@ -930,6 +930,15 @@ async function collectModels() {
         ? ((mf.runtime?.[0]?.path || '').split(/[\\/]/)[0] || '').startsWith('.venv')
           && torchIsCpuOnly((mf.runtime?.[0]?.path || '').split(/[\\/]/)[0])
         : false,
+      // 036：加速版本标记——torch 是 CUDA 版（+cuXXX）还是 CPU 版（+cpu/无后缀），前端据此显示徽标区分
+      accelTag: (() => {
+        const vn = (mf.runtime?.[0]?.path || '').split(/[\\/]/)[0] || '';
+        if (!vn.startsWith('.venv') || d.missingRuntime.length) return null;
+        const tag = torchBuildTag(vn);
+        if (!tag) return null;
+        if (/[+]cu\d/.test(tag)) return { kind: 'cuda', label: `CUDA ${tag.match(/\+cu\d+/)[0]}` };
+        return { kind: 'cpu', label: 'CPU' };
+      })(),
       // S3：安装方式与可选镜像名（UI 据此渲染镜像切换下拉）
       install: mf.install ? {
         kind: mf.install.kind,
