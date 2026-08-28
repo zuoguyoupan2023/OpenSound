@@ -2,21 +2,29 @@
   "id": "cosyvoice-clone",
   "category": "tts",
   "label": "CosyVoice3 语音克隆（0.5B · MPS）",
-  "sizeHint": "~4.4GB 必需（全量目录 ~9GB，非必需文件见 optionalFiles）",
+  "sizeHint": "~9.1GB 整仓全量（2026-08-28 起不再维护\"必需子集\"；ModelScope/HF 整仓 20 文件逐个字节校验下载）",
   "license": "Apache-2.0",
-  "profile": { "diskGB": 9, "memNeedGB": 4, "accel": "any", "tierRequired": "standard", "slowNote": { "metal": "Mac 上克隆约 1:1 语速（RTF 0.5–1.5，慢速可用，001 §7.1）", "cpu": "CPU 上速度不可期，建议 N 卡或 Apple Silicon（000 §3.3）" } },
+  "profile": { "diskGB": 11, "memNeedGB": 4, "accel": "any", "tierRequired": "standard", "slowNote": { "metal": "Mac 上克隆约 1:1 语速（RTF 0.5–1.5，慢速可用，001 §7.1）", "cpu": "CPU 上速度不可期，建议 N 卡或 Apple Silicon（000 §3.3）" } },
   "checks": [
     { "type": "file", "path": "models/cosyvoice/Fun-CosyVoice3-0.5B/llm.pt", "bytes": 2024669519 },
+    { "type": "file", "path": "models/cosyvoice/Fun-CosyVoice3-0.5B/llm.rl.pt", "bytes": 2024682701 },
     { "type": "file", "path": "models/cosyvoice/Fun-CosyVoice3-0.5B/flow.pt", "bytes": 1329116148 },
+    { "type": "file", "path": "models/cosyvoice/Fun-CosyVoice3-0.5B/flow.decoder.estimator.fp32.onnx", "bytes": 1326216933 },
     { "type": "file", "path": "models/cosyvoice/Fun-CosyVoice3-0.5B/hift.pt", "bytes": 83202622 },
     { "type": "file", "path": "models/cosyvoice/Fun-CosyVoice3-0.5B/speech_tokenizer_v3.onnx", "bytes": 969451503 },
+    { "type": "file", "path": "models/cosyvoice/Fun-CosyVoice3-0.5B/speech_tokenizer_v3.batch.onnx", "bytes": 969451579 },
     { "type": "file", "path": "models/cosyvoice/Fun-CosyVoice3-0.5B/campplus.onnx", "bytes": 28303423 },
-    { "type": "file", "path": "models/cosyvoice/Fun-CosyVoice3-0.5B/cosyvoice3.yaml", "bytes": 6934 }
+    { "type": "file", "path": "models/cosyvoice/Fun-CosyVoice3-0.5B/cosyvoice3.yaml", "bytes": 6934 },
+    { "type": "file", "path": "models/cosyvoice/Fun-CosyVoice3-0.5B/configuration.json", "bytes": 47 },
+    { "type": "file", "path": "models/cosyvoice/Fun-CosyVoice3-0.5B/CosyVoice-BlankEN/config.json", "bytes": 659 },
+    { "type": "file", "path": "models/cosyvoice/Fun-CosyVoice3-0.5B/CosyVoice-BlankEN/generation_config.json", "bytes": 242 },
+    { "type": "file", "path": "models/cosyvoice/Fun-CosyVoice3-0.5B/CosyVoice-BlankEN/model.safetensors", "bytes": 988097824 },
+    { "type": "file", "path": "models/cosyvoice/Fun-CosyVoice3-0.5B/CosyVoice-BlankEN/tokenizer_config.json", "bytes": 1287 },
+    { "type": "file", "path": "models/cosyvoice/Fun-CosyVoice3-0.5B/CosyVoice-BlankEN/vocab.json", "bytes": 2776833 },
+    { "type": "file", "path": "models/cosyvoice/Fun-CosyVoice3-0.5B/CosyVoice-BlankEN/merges.txt", "bytes": 1402109 }
   ],
   "optionalFiles": [
-    { "path": "models/cosyvoice/Fun-CosyVoice3-0.5B/llm.rl.pt", "note": "与 llm.pt 二选一？S4 读 cosyvoice3.yaml 甄别后定" },
-    { "path": "models/cosyvoice/Fun-CosyVoice3-0.5B/speech_tokenizer_v3.batch.onnx", "note": "批量变体，疑似非必需" },
-    { "path": "models/cosyvoice/Fun-CosyVoice3-0.5B/flow.decoder.estimator.fp32.onnx", "note": "onnx 变体，疑似非必需" }
+    { "path": "models/cosyvoice/Fun-CosyVoice3-0.5B/asset/dingding.png", "note": "仓库自带资源图（已随全量下载，非运行必需）" }
   ],
   "runtime": [
     { "kind": "path", "path": ".venv-cosyvoice/bin/python3", "label": "受管 venv：数据目录 venvs/.venv-cosyvoice（034 阶段3 uv 自举；installer 缺失时自动创建）" },
@@ -24,6 +32,6 @@
   ],
   "install": {
     "kind": "legacy",
-    "note": "S4 全自举链：源码 vendored / clone 兜底 / venv 自建 / 模型校验；S5：缺失权重支持自动下载（hf-mirror→huggingface 多镜像 + .part 续传），需 UI 二次确认大流量（confirm=1）"
+    "note": "S4 全自举链：源码 vendored / clone 兜底 / venv 自建；2026-08-28 起**整仓全量下载**（modelscope→hf-mirror→huggingface 多镜像 + .part 续传；ModelScope FunAudioLLM/Fun-CosyVoice3-0.5B-2512 20 文件字节实录与 HF 一致、Range 206 续传，已列首选），不再维护\"必需子集\"；安装器同时自动补 vendor matcha/models（jsdelivr 全量，S4 漏拷）+ 旧锁漏装的运行时依赖"
   }
 }

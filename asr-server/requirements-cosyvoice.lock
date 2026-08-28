@@ -1,9 +1,18 @@
 # requirements-cosyvoice.lock · 由 .venv-cosyvoice freeze --local 提炼（2026-08-23）
 # S4 自举：python3 -m venv .venv-cosyvoice && pip install -r 本文件
 # torch/torchaudio/numpy 原为系统借用项，此处显式钉版本（macOS arm64 MPS wheel）
+# 2026-08-28 补钉：官方 requirements.txt（vendor/cosyvoice）的 win/darwin 推理必需子集——
+#   旧锁漏 onnxruntime（frontend.py import 崩 → 8003 秒退，坑 I 同族）/ omegaconf / librosa / soundfile / unidecode（Matcha-TTS）。
+#   onnxruntime 用 1.24.4（numpy 2.x 兼容；官方 1.18.0 仅配 numpy<2，与锁内 numpy 2.4.6 冲突）。
 torch==2.8.0
 torchaudio==2.8.0
 numpy==2.4.6
+onnxruntime==1.24.4
+omegaconf==2.3.0
+librosa==0.10.2
+soundfile==0.12.1
+unidecode==1.3.8
+hydra-core==1.3.2
 
 absl-py==2.5.0
 annotated-doc==0.0.5

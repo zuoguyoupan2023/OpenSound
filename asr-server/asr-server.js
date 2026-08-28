@@ -16,7 +16,7 @@
 
 import http from 'node:http';
 import { execSync, spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, statfsSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, statfsSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDeviceProfile } from './device-profile.js';
@@ -1048,12 +1048,19 @@ async function engineReadiness(mf) {
   }
   for (const r of mf.runtime || []) {
     if (r.kind === 'path') {
-      // 034 防空壳假就绪：runtime 是引擎 venv（bin/python3 或 Scripts/python.exe 形态）时，
-      // 必须"venv python 在 且 关键依赖包已装"才算就绪——只建了目录没装依赖的 venv 会如实报缺环境
-      const venvName = r.path.split(/[\\/]/)[0];
-      const keyPkg = VENV_KEY_PKG[mf.id];
-      if (keyPkg) {
-        if (!venvKeyPkgOk(venvName, keyPkg)) missingRuntime.push({ kind: '缺失', label: r.label || r.path });
+      // 034 防空壳假就绪：仅当 runtime 项是引擎 venv（路径首段 .venv-*，bin/python3 或 Scripts/python.exe 形态）时，
+      // 必须"venv python 在 且 关键依赖包已装"才算就绪——只建了目录没装依赖的 venv 会如实报缺环境。
+      // 2026-08-28 修复：此前按"引擎有无 VENV_KEY_PKG"判断，把非 venv 项（如 cosyvoice 的
+      // vendor/cosyvoice/... 源码路径，首段 'vendor'）误当 venv 检查 → venvs/vendor 必然缺失 →
+      // cosyvoice 权重 + venv + 源码全就绪仍误报「缺环境」（坑 L 同族）。改为按路径形态（首段 .venv-*）判断。
+      const firstSeg = r.path.split(/[\\/]/)[0];
+      if (firstSeg.startsWith('.venv')) {
+        const keyPkg = VENV_KEY_PKG[mf.id];
+        if (keyPkg) {
+          if (!venvKeyPkgOk(firstSeg, keyPkg)) missingRuntime.push({ kind: '缺失', label: r.label || r.path });
+        } else if (!runtimePathExists(r.path)) {
+          missingRuntime.push({ kind: '缺失', label: r.label || r.path });
+        }
       } else if (!runtimePathExists(r.path)) {
         missingRuntime.push({ kind: '缺失', label: r.label || r.path });
       }
@@ -1065,6 +1072,15 @@ async function engineReadiness(mf) {
   const legacy = MODEL_ITEMS.find((x) => x.engine === mf.id);
   let serviceUp = false;
   if (legacy) { try { serviceUp = !!(await legacy.installed()); } catch {} }
+  // 2026-08-28：cosyvoice 旧锁文件漏装的运行时依赖（坑 I 扩展）——venv 在但缺任一依赖 ≡ 缺环境，
+  // 如实报出并让卡片出「检测/修复」按钮（此前 state=ready 时前端无按钮可点，服务又崩 → 用户陷入「启动中」死等）。
+  if (mf.id === 'cosyvoice-clone' && venvKeyPkgOk('.venv-cosyvoice', 'torch')) {
+    for (const p of COSYVOICE_RUNTIME_DEPS) {
+      if (!venvPkgPresent('.venv-cosyvoice', p)) {
+        missingRuntime.push({ kind: '缺失', label: `${p} 未安装（旧锁文件漏装，点「检测/修复」自动补）` });
+      }
+    }
+  }
   const state = missingRuntime.length
     ? (missingFiles.length ? 'incomplete' : 'missing-runtime')
     : missingFiles.length ? 'partial-files'
@@ -1264,20 +1280,65 @@ function manifestUrlMultiInstaller(mf) {
 
 mkdirSync(LLM_DIR, { recursive: true }); // 供 LLM 模型落盘
 
-// S5：CosyVoice3 必需权重的下载规格（bytes 与 engines/cosyvoice-clone.json 的 checks 保持一致）
+// S5：CosyVoice3 权重下载规格（bytes 与 engines/cosyvoice-clone.json 的 checks 保持一致）
 const CV_MODEL_SUBDIR = 'models/cosyvoice/Fun-CosyVoice3-0.5B';
+// 2026-08-28：**全量下载**（废除"必需子集 + 缺啥补啥"打地鼠式维护——S4 曾筛"必需"导致漏 BlankEN/漏其它，
+// 实测加载逐个崩；用户明确要求完整下载）。清单 = ModelScope FunAudioLLM/Fun-CosyVoice3-0.5B-2512 整仓 20 个文件
+// （字节数实录，含 llm.rl.pt / flow.decoder.estimator.fp32.onnx / speech_tokenizer_v3.batch.onnx 等原"可选"文件）。
+// 安装器 keyFiles 由本清单派生：以后整仓增删文件只需同步本表 + engines json。
 const CV_WEIGHTS = {
   'llm.pt': { bytes: 2024669519 },
+  'llm.rl.pt': { bytes: 2024682701 },
   'flow.pt': { bytes: 1329116148 },
+  'flow.decoder.estimator.fp32.onnx': { bytes: 1326216933 },
   'hift.pt': { bytes: 83202622 },
   'speech_tokenizer_v3.onnx': { bytes: 969451503 },
+  'speech_tokenizer_v3.batch.onnx': { bytes: 969451579 },
   'campplus.onnx': { bytes: 28303423 },
   'cosyvoice3.yaml': { bytes: 6934 },
+  'configuration.json': { bytes: 47 },
+  'CosyVoice-BlankEN/config.json': { bytes: 659 },
+  'CosyVoice-BlankEN/generation_config.json': { bytes: 242 },
+  'CosyVoice-BlankEN/model.safetensors': { bytes: 988097824 },
+  'CosyVoice-BlankEN/tokenizer_config.json': { bytes: 1287 },
+  'CosyVoice-BlankEN/vocab.json': { bytes: 2776833 },
+  'CosyVoice-BlankEN/merges.txt': { bytes: 1402109 },
 };
+// 2026-08-28：cosyvoice 旧锁文件漏装的运行时依赖（坑 I 扩展）——
+// 安装器补装 与 engineReadiness 就绪检查 共用这份清单，避免两处漂移。
+// 缺任一 → 卡片如实报「缺环境」并出「检测/修复」按钮（此前 state=ready 时前端不渲染按钮，用户无入口，陷入「启动中」死等）。
+const COSYVOICE_RUNTIME_DEPS = ['modelscope', 'onnxruntime', 'omegaconf', 'librosa', 'soundfile', 'unidecode'];
+
+// 2026-08-28：元数据/展示类文件跨镜像必然不同（.gitattributes / README.md / asset/* 实测：HF 与 ModelScope 内容不一致），
+// 非运行必需 → 不进校验清单、不强制下载（消除"大小不符"红字与打地鼠）。
+const CV_COSMETIC_RE = /^(\.gitattributes|README\.md|asset\/)/;
+
+// 2026-08-28：**动态清单（正确方式）**——安装时从 ModelScope 整仓文件 API 拉取 Path+Size，
+// 仓库文件变动自动跟随；API 不可用/无 Data 时回退代码内静态清单 CV_WEIGHTS（兜底，非首选）。
+async function cosyVoiceManifest() {
+  try {
+    const d = JSON.parse(await fetchText('https://modelscope.cn/api/v1/models/FunAudioLLM/Fun-CosyVoice3-0.5B-2512/repo/files?Revision=master&Recursive=true', 20000));
+    const list = (d && d.Data && d.Data.Files || []).filter((f) => f.Path && !CV_COSMETIC_RE.test(f.Path));
+    if (list.length) {
+      const map = {};
+      for (const f of list) map[f.Path] = { bytes: Number(f.Size) || 0 };
+      return map;
+    }
+  } catch (e) {
+    // API 失败 → 静态兜底（不静默吞：下一行由调用方打日志）
+  }
+  return CV_WEIGHTS;
+}
+
 const cvWeightSpec = (name) => ({
   file: `${CV_MODEL_SUBDIR}/${name}`,
   bytes: CV_WEIGHTS[name].bytes,
+  // 镜像顺序：modelscope 优先（2026-08-28 实测登记：`FunAudioLLM/Fun-CosyVoice3-0.5B-2512` 六项必需权重
+  // 字节与 HF `Fun-CosyVoice3-0.5B` 完全一致（llm.pt 2024669519 / flow.pt 1329116148 / hift.pt 83202622 /
+  // speech_tokenizer_v3.onnx 969451503 / campplus.onnx 28303423 / cosyvoice3.yaml 6934），国内直连快、
+  // 支持 Range 续传（HTTP 206）；hf-mirror 偶发低速（<20KB/s 90s 判死换源）排第二；huggingface 直连国内不通，兜底）
   mirrors: [
+    { name: 'modelscope', url: `https://modelscope.cn/models/FunAudioLLM/Fun-CosyVoice3-0.5B-2512/resolve/master/${name}` },
     { name: 'hf-mirror', url: `https://hf-mirror.com/FunAudioLLM/Fun-CosyVoice3-0.5B/resolve/main/${name}` },
     { name: 'huggingface', url: `https://huggingface.co/FunAudioLLM/Fun-CosyVoice3-0.5B/resolve/main/${name}` },
   ],
@@ -1306,6 +1367,17 @@ function venvKeyPkgOk(name, keyPkg) {
   if (!existsSync(py)) return false;
   const sp = path.join(venvDirOf(name), 'Lib', 'site-packages', keyPkg);
   return existsSync(sp) && (() => { try { return statSync(sp).isDirectory(); } catch { return false; } })();
+}
+// 2026-08-28：防空壳检查的宽容版（运行时依赖用）——「包目录」或「单文件模块」或「dist-info」任一命中即视为已装。
+// 原因：soundfile 0.14.0 以 soundfile.py 单文件形态安装（无 site-packages/soundfile/ 目录），
+// 纯目录判定会把它误报为缺失（2026-08-28 实测：App 补装后报「仍缺 soundfile」，实际 import 正常）。
+function venvPkgPresent(name, pkg) {
+  const sp = path.join(venvDirOf(name), 'Lib', 'site-packages');
+  try {
+    if (existsSync(path.join(sp, pkg)) && statSync(path.join(sp, pkg)).isDirectory()) return true;
+    if (existsSync(path.join(sp, pkg + '.py'))) return true;
+    return readdirSync(sp).some((x) => x.startsWith(pkg + '-') && x.endsWith('.dist-info'));
+  } catch { return false; }
 }
 // ---------- 035 阶段：N 卡机器上 torch 是否 CPU 版（无 CUDA 加速）→ 引导升级 ----------
 // 本机是否有 NVIDIA GPU：nvidia-smi 可执行即视为有（模块加载时探测一次，缓存）
@@ -1619,28 +1691,45 @@ const INSTALLERS = {
     const modelDir = path.join(CACHE_DIR, 'cosyvoice', 'Fun-CosyVoice3-0.5B');
     const vendorDir = path.join(__dirname, 'vendor', 'cosyvoice');
     const srcDir = vendorDir;
-    const keyFiles = ['llm.pt', 'flow.pt', 'hift.pt', 'speech_tokenizer_v3.onnx', 'campplus.onnx', 'cosyvoice3.yaml'];
+    // 必需权重：**动态清单**（2026-08-28 起，正确方式，铁律 13）——安装时从 ModelScope 整仓文件 API 拉取
+    // Path+Size（仓库变动自动跟随）；API 失败回退静态清单 CV_WEIGHTS（兜底）。
+    // 元数据/展示文件（.gitattributes / README.md / asset/*）跨镜像不同且非运行必需：不下载不校验。
+    const weightsManifest = await cosyVoiceManifest();
+    const keyFiles = Object.keys(weightsManifest);
     const missing = keyFiles.filter((f) => !existsSync(path.join(modelDir, f)));
     if (missing.length) {
-      const totalBytes = missing.reduce((s, f) => s + (CV_WEIGHTS[f]?.bytes || 0), 0);
+      const totalBytes = missing.reduce((s, f) => s + (weightsManifest[f]?.bytes || 0), 0);
       const gb = (totalBytes / 1e9).toFixed(1);
-      // S5：未确认 → 抛标记给前端做二次确认（不在后端静默吞掉大流量）
       if (!opts.confirmBigDownload) {
-        ctx.nd({ type: 'log', message: `检测到缺失必需权重 ${missing.length} 项（合计约 ${gb}GB）` });
+        ctx.nd({ type: 'log', message: `检测到缺失权重 ${missing.length} 项（动态清单，合计约 ${gb}GB）` });
         ctx.nd({ type: 'log', message: `等待确认后自动下载；也可按 005 文档手动放置到: ${modelDir}` });
         throw new Error(`BIG_DOWNLOAD_CONFIRM:${gb}GB:${missing.join(',')}`);
       }
-      ctx.nd({ type: 'log', message: `已确认大流量下载（约 ${gb}GB），开始拉取缺失权重 ${missing.length} 项…` });
+      ctx.nd({ type: 'log', message: `已确认大流量下载（约 ${gb}GB），按动态清单拉取缺失 ${missing.length} 项…` });
       for (const f of missing) {
         await downloadOneFile(cvWeightSpec(f), ctx, opts);
         const got = statSync(path.join(modelDir, f)).size;
-        if (CV_WEIGHTS[f].bytes && got !== CV_WEIGHTS[f].bytes)
-          ctx.nd({ type: 'log', message: `⚠️ ${f} 大小不符（期望 ${CV_WEIGHTS[f].bytes} / 实际 ${got}），建议删除该文件后重新安装` });
-        else
-          ctx.nd({ type: 'log', message: `✓ ${f} 就位（字节数校验通过）` });
+        const expect = weightsManifest[f]?.bytes || 0;
+        if (expect && got !== expect) {
+          // 字节不符 = 失败而非警告（防"下了 2MB 却说 200MB 完成"）。先自动换第二镜像重下一次再校验，
+          // 仍不符才报错（保留 .part / 文件，App 内可重试，无需用户手动删文件）。
+          ctx.nd({ type: 'log', message: `⚠️ ${f} 大小不符（期望 ${expect} / 实际 ${got}）→ 自动换镜像重下一次…` });
+          try { unlinkSync(path.join(modelDir, f)); } catch {}
+          try { await downloadOneFile(cvWeightSpec(f), ctx, { ...opts, mirror: 'hf-mirror' }); } catch (e) {
+            throw new Error(`${f} 换镜像重下失败：${String((e && e.message) || e)}`);
+          }
+          const got2 = statSync(path.join(modelDir, f)).size;
+          if (got2 !== expect) {
+            throw new Error(`${f} 大小不符（期望 ${expect} / 实际 ${got2}，已验证两个镜像）：文件可疑。已保留现场，可重试「检测/修复」。`);
+          }
+          ctx.nd({ type: 'log', message: `✓ ${f} 换镜像后就位（字节数校验通过 ${got2}）` });
+        } else {
+          ctx.nd({ type: 'log', message: `✓ ${f} 就位（字节数校验通过 ${got}）` });
+        }
       }
     } else {
-      ctx.nd({ type: 'log', message: '模型文件完整 ✓（必需项 4.4GB）' });
+      const total = Object.values(weightsManifest).reduce((s, w) => s + (w.bytes || 0), 0);
+      ctx.nd({ type: 'log', message: `模型文件完整 ✓（动态清单 ${keyFiles.length} 项，${fmtMB(total)}）` });
     }
 
     // ① 源码：vendor 优先
@@ -1702,20 +1791,60 @@ const INSTALLERS = {
       }
       ctx.nd({ type: 'log', message: '.venv-cosyvoice 依赖就绪 ✓' });
     } else {
-      // venv 已建且 torch 在（旧 venv）：仍要补查 033 实测缺失项 modelscope（旧锁文件漏装 → 8003 秒退）
-      if (!venvKeyPkgOk('.venv-cosyvoice', 'modelscope')) {
+      // venv 已建且 torch 在（旧 venv）：仍要补查旧锁文件漏装的运行时依赖（坑 I 同族）——
+      // 2026-08-28 实测：锁文件原漏 modelscope（033 已补），还漏 onnxruntime（speech_tokenizer_v3.onnx /
+      // campplus.onnx 必需，缺则 vendor 源码 frontend.py `import onnxruntime` 崩 → 8003 秒退、UI 无限「启动中」）、
+      // omegaconf / librosa / soundfile / unidecode（Matcha-TTS 推理必需）。逐个查 site-packages，缺则 uv 补装（App 内可见进度）。
+      const cosyvoiceExtras = COSYVOICE_RUNTIME_DEPS;
+      const missingExtras = cosyvoiceExtras.filter((p) => !venvPkgPresent('.venv-cosyvoice', p));
+      if (missingExtras.length) {
         if (!existsSync(UV_EXE)) {
           throw new Error('未安装受管 Python 基础（uv）。请先在设置页/引导条点「安装 Python 基础」后重试。');
         }
-        ctx.nd({ type: 'log', message: '.venv-cosyvoice 缺 modelscope（旧锁文件漏装）→ 补装…' });
-        await runCmdWithEnv(UV_EXE, ['pip', 'install', '--python', venvPy, 'modelscope'],
-          { UV_PYTHON_INSTALL_DIR: UV_PY_HOME, UV_INDEX_URL: UV_INDEX })(ctx);
-        if (!venvKeyPkgOk('.venv-cosyvoice', 'modelscope')) {
-          throw new Error('.venv-cosyvoice 补装 modelscope 失败，查看上方日志');
+        ctx.nd({ type: 'log', message: `.venv-cosyvoice 缺运行时依赖：${missingExtras.join(' / ')}（旧锁文件漏装，坑 I 同族）→ 补装…` });
+        for (const p of missingExtras) {
+          await runCmdWithEnv(UV_EXE, ['pip', 'install', '--python', venvPy, p],
+            { UV_PYTHON_INSTALL_DIR: UV_PY_HOME, UV_INDEX_URL: UV_INDEX })(ctx);
         }
-        ctx.nd({ type: 'log', message: '.venv-cosyvoice 补装 modelscope 完成 ✓' });
+        const stillMissing = cosyvoiceExtras.filter((p) => !venvPkgPresent('.venv-cosyvoice', p));
+        if (stillMissing.length) {
+          throw new Error('.venv-cosyvoice 补装依赖失败（仍缺 ' + stillMissing.join(' / ') + '），查看上方日志');
+        }
+        ctx.nd({ type: 'log', message: '.venv-cosyvoice 运行时依赖补装完成 ✓（' + cosyvoiceExtras.join(' / ') + '）' });
       }
       ctx.nd({ type: 'log', message: '.venv-cosyvoice 已存在且依赖就绪 ✓' });
+    }
+
+    // ④ vendor Matcha-TTS 完整性修复（2026-08-28 实测）：
+    //    vendored Matcha-TTS 缺 matcha/models（仅有 hifigan/text/utils）→ cosyvoice.flow.flow_matching / decoder
+    //    `from matcha.models.components.flow_matching import BASECFM` 等在 hyperpyyaml 构造时 pydoc import 崩 → 8003 秒退。
+    //    修复 = 从 jsdelivr（GitHub CDN，国内实测可达）枚举 matcha/models/** 全量补进 vendor，再用 venv python 校验 import。
+    const matchaV = path.join(vendorDir, 'third_party', 'Matcha-TTS', 'matcha');
+    if (!existsSync(path.join(matchaV, 'models'))) {
+      ctx.nd({ type: 'log', message: 'vendor Matcha-TTS 缺 matcha/models（S4 vendoring 漏拷，CosyVoice flow/decoder 加载必需）→ 从 jsdelivr 拉全量补齐…' });
+      let files = [];
+      try {
+        const tree = JSON.parse(await fetchText('https://data.jsdelivr.com/v1/packages/gh/shivammehta25/Matcha-TTS@main?structure=flat', 30000));
+        files = (tree.files || []).map((f) => f.name).filter((n) => n.startsWith('matcha/models/'));
+      } catch (e) {
+        throw new Error('jsdelivr 文件清单拉取失败（' + String((e && e.message) || e) + '），无法补 matcha/models；可稍后重试「检测/修复」');
+      }
+      if (!files.length) throw new Error('jsdelivr 返回 matcha/models 清单为空，异常中止');
+      let n = 0;
+      for (const f of files) {
+        const rel = 'vendor/cosyvoice/third_party/Matcha-TTS/' + f;
+        if (existsSync(path.join(__dirname, rel))) continue;
+        await downloadOneFile({ file: rel, mirrors: [{ name: 'jsdelivr', url: `https://cdn.jsdelivr.net/gh/shivammehta25/Matcha-TTS@main/${f}` }] }, ctx, opts);
+        n++;
+        if (n % 5 === 0 || n === files.length) ctx.nd({ type: 'log', message: `matcha/models 已拉取 ${n}/${files.length} 文件…` });
+      }
+      ctx.nd({ type: 'log', message: `matcha/models 补齐 ${n} 个文件 ✓` });
+    }
+    {
+      const checkPy = 'import matcha.models.components.flow_matching as a; import matcha.models.components.decoder as b; import matcha.models.components.transformer as c; print("matcha repair OK")';
+      await runCmdWithEnv(venvPy, ['-c', checkPy],
+        { PYTHONPATH: path.join(vendorDir, 'third_party', 'Matcha-TTS') + path.delimiter + path.join(vendorDir) })(ctx);
+      ctx.nd({ type: 'log', message: 'matcha 模块校验通过 ✓' });
     }
 
     ctx.nd({ type: 'done', message: '克隆依赖就绪。若「运行中」徽标未变绿：托盘 → 重启服务，等模型加载完成（首次约 1-2 分钟）。' });
