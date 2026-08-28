@@ -426,11 +426,18 @@ export interface RuntimeStatus {
   python_found: boolean;
   python_version: string;
   deps_ready: boolean;
+  // 034 阶段3：受管 python——全局基础（uv + CPython）独立按钮；引擎 venv 归模型页卡片
+  uv_ready: boolean;
+  py311_ready: boolean;
+  python_ready: boolean;
+  qwen3_venv: boolean;
+  funasr_venv: boolean;
+  cosy_venv: boolean;
   data_dir: string;
   server_dir: string;
 }
 
-// 安装步骤事件：{ step: node-download | deps | done | error, message, pct? }
+// 安装步骤事件：{ step: node-download | deps | py | done | error, message, pct? }
 export interface RuntimeProgress {
   step: string;
   message: string;
@@ -445,6 +452,11 @@ export async function checkRuntime(): Promise<RuntimeStatus> {
 // 进度通过 listenRuntimeProgress 事件流接收
 export async function installRuntime(): Promise<void> {
   await invoke("install_runtime");
+}
+
+// 034 阶段3：受管 Python 基础（uv + CPython 3.11）——独立按钮，只装这一层（引擎 venv 在模型页装）
+export async function installPythonBase(): Promise<void> {
+  await invoke("install_python");
 }
 
 export async function listenRuntimeProgress(

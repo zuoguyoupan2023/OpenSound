@@ -34,10 +34,13 @@ _punc_model = None
 _vad_model = None
 MODEL_NAME = "sensevoice-original"
 _device = "cpu"
+# 032/034 P3：模型目录从数据目录派生（env 注入；未设置回退代码目录，兼容手动启动）
+_HERE = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.environ.get('OPENSOUND_DATA_DIR') or _HERE
 # 标点模型目录（funasr punc_ct-transformer，中英）
-PUNC_MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models', 'punc-cn-en')
+PUNC_MODEL_DIR = os.path.join(DATA_DIR, 'models', 'punc-cn-en')
 # VAD 模型目录（funasr fsmn_vad 语音活动检测）
-VAD_MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models', 'fsmn-vad')
+VAD_MODEL_DIR = os.path.join(DATA_DIR, 'models', 'fsmn-vad')
 
 
 def load_vad_model(device):
@@ -196,7 +199,7 @@ def main():
     ap = argparse.ArgumentParser(description='SenseVoice 原始版（funasr）本地 ASR 服务')
     ap.add_argument('--port', type=int, default=8002)
     ap.add_argument('--device', default='cpu', help='cpu | mps')
-    ap.add_argument('--model', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models', 'sensevoice-original'))
+    ap.add_argument('--model', default=os.path.join(DATA_DIR, 'models', 'sensevoice-original'))
     args = ap.parse_args()
     global _device
     _device = args.device

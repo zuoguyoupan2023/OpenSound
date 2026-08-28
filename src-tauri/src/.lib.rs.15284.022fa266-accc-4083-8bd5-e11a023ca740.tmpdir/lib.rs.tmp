@@ -558,6 +558,8 @@ async fn ensure_python_base(app: &tauri::AppHandle, data_root: &std::path::Path)
     Ok(())
 }
 
+fn already_have_venv_removed() {}
+
 // npm ci 安装 asr-server 依赖（strout/stderr 行转发为进度事件；npm≥11 拦截原生脚本时自动批准并 rebuild）
 fn ensure_npm_deps(app: &tauri::AppHandle, server_dir: &std::path::Path, node_exe: &str) -> Result<(), String> {
     let cli = npm_cli_js(node_exe);

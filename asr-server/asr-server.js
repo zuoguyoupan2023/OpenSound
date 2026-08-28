@@ -30,14 +30,18 @@ const ASR_ENGINE = (process.env.ASR_ENGINE || 'auto').toLowerCase(); // auto | s
 const SERVER_VERSION = '2.6.0'; // 2.4.0 = S4：cosyvoice-clone 全自举链；2.5.0 = S5：缺失权重自动下载；2.6.0 = S7：安全加固（仅本机回环 + 入站鉴权）
 // 031 跨平台：Win venv 可执行在 Scripts/ 而非 bin/（engineReadiness 的 runtime 检查据此判定）
 const IS_WIN = process.platform === 'win32';
-// engines/*.json 的 runtime.path 为 unix 形态（.venv-x/bin/python3）时，Win 上改用 Scripts/python.exe 判定
+// 034 阶段3：uv 自举的受管 venv 落数据目录 venvs/（032 L3），引擎清单的 runtime.path 按此双位置判定：
+//   .venv-x/bin/python3（unix 形态）→ 数据目录 venvs/.venv-x/Scripts/python.exe（Win）或 bin/python3（unix）；
+//   代码目录 .venv-* 为历史兼容回退。
 function runtimePathExists(p) {
-  if (existsSync(path.join(__dirname, p))) return true;
+  const cands = [path.join(__dirname, p)];
   if (IS_WIN && /(^|[\\/])bin[\\/]python3$/.test(p)) {
-    const winP = p.replace(/[\\/]bin[\\/]python3$/, path.sep + ['Scripts', 'python.exe'].join(path.sep));
-    return existsSync(path.join(__dirname, winP));
+    const winInData = p.replace(/[\\/]bin[\\/]python3$/, path.sep + ['Scripts', 'python.exe'].join(path.sep));
+    cands.push(path.join(DATA_DIR, 'venvs', winInData));
+  } else {
+    cands.push(path.join(DATA_DIR, 'venvs', p));
   }
-  return false;
+  return cands.some((c) => existsSync(c));
 }
 // 安全加固（S7）：入站鉴权 token —— Tauri 宿主注入；为空（手动 npm start 调试）时不校验
 const OPENSOUND_TOKEN = process.env.OPENSOUND_TOKEN || '';
@@ -1281,9 +1285,15 @@ const INSTALLERS = {
       ctx.nd({ type: 'log', message: 'CosyVoice 源码已存在（vendor/cosyvoice）✓' });
     }
 
-    // ③ venv 自建：缺失才装（含 torch，首次可能几分钟）；031 跨平台：Win 用 Scripts/python.exe
+    // ③ venv 自建：缺失才装（含 torch，首次可能几分钟）；031 跨平台：Win 用 Scripts/python.exe。
+    // 034 阶段3：受管 venv 落数据目录 venvs/（uv 自举目标路径）；代码目录 .venv-cosyvoice 为历史回退。
     const IS_WIN = process.platform === 'win32';
-    const venvDir = path.join(__dirname, '.venv-cosyvoice');
+    const venvCandidates = [
+      path.join(DATA_DIR, 'venvs', '.venv-cosyvoice'),
+      path.join(__dirname, '.venv-cosyvoice'),
+    ];
+    const venvDir = venvCandidates.find((d) => existsSync(IS_WIN ? path.join(d, 'Scripts', 'python.exe') : path.join(d, 'bin', 'python3')))
+      || venvCandidates[0];
     const venvPy = IS_WIN
       ? path.join(venvDir, 'Scripts', 'python.exe')
       : path.join(venvDir, 'bin', 'python3');

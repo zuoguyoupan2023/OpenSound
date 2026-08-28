@@ -936,6 +936,20 @@ textarea:focus,
   color: var(--fail);
 }
 
+/* 033 修复：大流量下载二次确认（内嵌确认行，替代 WebView2 会被吞的 window.confirm） */
+.install-confirm {
+  background: #fff7e6;
+  border: 1px solid #f0c36d;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.install-confirm-text { color: #8a6d3b; font-size: 12px; line-height: 1.5; }
+.install-confirm-actions { display: flex; gap: 8px; }
+
 /* ===== 音频库 ===== */
 .audio-tabs {
   display: flex;
@@ -1534,6 +1548,8 @@ textarea:focus,
 .rb-sub { color: #8a6d3b; font-size: 12px; margin-top: 2px; }
 .rb-btn { display: inline-flex; align-items: center; gap: 6px; background: #d97706; color: #fff; border: none; border-radius: 8px; padding: 8px 16px; font-size: 13px; cursor: pointer; font-weight: 600; white-space: nowrap; }
 .rb-btn:hover { background: #b45309; }
+.rb-btn-ghost { background: transparent; color: #8a6d3b; border: 1px solid #f0c36d; }
+.rb-btn-ghost:hover { background: #fdf3e0; }
 .rb-hint { color: #64748b; font-size: 12px; white-space: nowrap; }
 .rb-bar { height: 6px; background: #e5e7eb; border-radius: 3px; overflow: hidden; }
 .rb-fill { height: 100%; background: #d97706; transition: width 0.3s; }

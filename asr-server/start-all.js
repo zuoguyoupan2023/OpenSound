@@ -23,9 +23,13 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // 031 跨平台：venv 可执行文件路径（Win=Scripts/python.exe，Unix=bin/python3）
 const IS_WIN = process.platform === 'win32';
-const venvPy = (name) => (IS_WIN
-  ? path.join(__dirname, name, 'Scripts', 'python.exe')
-  : path.join(__dirname, name, 'bin', 'python3'));
+// 032 P3：受管 venv 优先落数据目录 venvs/（034 阶段3 uv 自举）；代码目录 .venv-* 为历史兼容回退
+const DATA_DIR = process.env.OPENSOUND_DATA_DIR || __dirname;
+function venvPy(name) {
+  const rel = IS_WIN ? path.join(name, 'Scripts', 'python.exe') : path.join(name, 'bin', 'python3');
+  const managed = path.join(DATA_DIR, 'venvs', rel);
+  return existsSync(managed) ? managed : path.join(__dirname, rel);
+}
 const PY = venvPy('.venv-qwen3');
 // CosyVoice3 克隆服务用 .venv-cosyvoice（复用系统 torch + 本地 CosyVoice 源码）
 const PY_COSYVOICE = venvPy('.venv-cosyvoice');
@@ -58,7 +62,6 @@ function detectSysPython() {
 const PY_SYS = detectSysPython();
 
 // ---------- S1：统一模型/缓存目录（032 P3：从数据目录派生，代码目录只读） ----------
-const DATA_DIR = process.env.OPENSOUND_DATA_DIR || __dirname;
 const MODELS_DIR = path.join(DATA_DIR, 'models');
 const VOICE_DIR = path.join(DATA_DIR, 'voices'); // 032 P3：克隆音色（新默认）
 for (const d of [
@@ -228,7 +231,8 @@ if (SKIP_SENSE_ORIGINAL) {
     started++;
   } else {
     console.error('[start-all] ✗ 未找到 SenseVoice 原始版的 Python 环境（.venv-funasr 缺失且未指定 PY_SYS）。启用方式：');
-    console.error('    python3 -m venv --system-site-packages .venv-funasr && .venv-funasr/bin/pip install funasr');
+    console.error('    运行 asr-server/bootstrap-python.ps1（034 阶段3 uv 自举：下载 uv → 受管 CPython 3.11 → 建 .venv-funasr 并装依赖）');
+    console.error('    或手动：python3 -m venv --system-site-packages .venv-funasr && .venv-funasr/bin/pip install funasr');
     console.error('    （该 venv 复用系统 torch/funasr，通常无需下载；装完重启 app 即启用）');
     console.error('[start-all] 已跳过 sensevoice-original，其余服务不受影响。');
   }

@@ -19,7 +19,7 @@
     { "path": "models/cosyvoice/Fun-CosyVoice3-0.5B/flow.decoder.estimator.fp32.onnx", "note": "onnx 变体，疑似非必需" }
   ],
   "runtime": [
-    { "kind": "path", "path": ".venv-cosyvoice/bin/python3", "label": "受管 venv：.venv-cosyvoice（installer 缺失时自动创建）" },
+    { "kind": "path", "path": ".venv-cosyvoice/bin/python3", "label": "受管 venv：数据目录 venvs/.venv-cosyvoice（034 阶段3 uv 自举；installer 缺失时自动创建）" },
     { "kind": "path", "path": "vendor/cosyvoice/cosyvoice/cli/cosyvoice.py", "label": "CosyVoice 源码子集（S4 vendoring；installer 缺则 clone 进 vendor）" }
   ],
   "install": {

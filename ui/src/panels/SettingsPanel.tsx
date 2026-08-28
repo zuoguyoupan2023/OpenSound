@@ -365,9 +365,38 @@ export default function SettingsPanel(props: PanelProps) {
                 </li>
                 <li className={props.runtime.python_found ? "ok" : "muted"}>
                   {props.runtime.python_found
-                    ? `✅ Python ${props.runtime.python_version}`
-                    : "ℹ️ 未检测到 Python（仅 python 系引擎需要，后续由 App 内自动安装）"}
+                    ? `✅ 系统 Python ${props.runtime.python_version}（仅展示；python 系引擎用 App 受管环境）`
+                    : "ℹ️ 未检测到系统 Python（python 系引擎用 App 内受管环境，见下）"}
                 </li>
+                <li className={props.runtime.python_ready ? "ok" : (props.runtime.uv_ready || props.runtime.py311_ready ? "muted" : "bad")}>
+                  {props.runtime.python_ready
+                    ? "✅ 受管 Python 基础就绪（uv + CPython 3.11）"
+                    : "❌ 受管 Python 基础未就绪（uv / CPython 3.11；独立按钮安装，可选装）"}
+                </li>
+                {!props.runtime.python_ready && (
+                  <ul className="runtime-sub-list">
+                    <li className={props.runtime.uv_ready ? "ok" : "bad"}>
+                      {props.runtime.uv_ready ? "✅" : "❌"} uv（runtime/uv）
+                    </li>
+                    <li className={props.runtime.py311_ready ? "ok" : "bad"}>
+                      {props.runtime.py311_ready ? "✅" : "❌"} CPython 3.11（runtime/python）
+                    </li>
+                  </ul>
+                )}
+                <li className={props.runtime.python_ready ? "" : "muted"}>
+                  引擎环境（venv，在<b>模型管理页</b>各自安装）：
+                </li>
+                <ul className="runtime-sub-list">
+                  <li className={props.runtime.qwen3_venv ? "ok" : "bad"}>
+                    {props.runtime.qwen3_venv ? "✅" : "❌"} Qwen3-TTS venv（.venv-qwen3）
+                  </li>
+                  <li className={props.runtime.funasr_venv ? "ok" : "bad"}>
+                    {props.runtime.funasr_venv ? "✅" : "❌"} SenseVoice 原始版 venv（.venv-funasr）
+                  </li>
+                  <li className={props.runtime.cosy_venv ? "ok" : "bad"}>
+                    {props.runtime.cosy_venv ? "✅" : "❌"} CosyVoice 克隆 venv（.venv-cosyvoice）
+                  </li>
+                </ul>
                 <li>数据目录：<code>{props.runtime.data_dir || "未定位"}</code></li>
                 <li>服务目录：<code>{props.runtime.server_dir || "未定位"}</code></li>
               </ul>
@@ -385,16 +414,25 @@ export default function SettingsPanel(props: PanelProps) {
               </div>
             )}
 
-            <div style={{ marginTop: 10 }}>
+            {/* 034 拆分：node 与 py 各自独立按钮——不再一个按钮装两个；py 可选装 */}
+            <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
               <Button
                 onClick={props.onInstallRuntime}
                 disabled={props.runtimeInstalling || !!(props.runtime?.node_ok && props.runtime?.deps_ready)}
               >
-                {props.runtimeInstalling ? <Spinner /> : "一键安装 / 修复运行环境"}
+                {props.runtimeInstalling ? <Spinner /> : "安装 / 修复 Node 与依赖"}
+              </Button>
+              <Button
+                onClick={props.onInstallPythonBase}
+                disabled={props.pyInstalling || !!props.runtime?.python_ready}
+              >
+                {props.pyInstalling ? <Spinner /> : "安装 / 修复 Python 基础（uv + CPython 3.11）"}
               </Button>
             </div>
             <p className="settings-hint">
-              缺少 Node.js 或服务依赖时，点按钮即可由 App 自动下载便携版 Node 并安装依赖（无需手动装环境）；安装进度见主界面顶部引导条。
+              Node 按钮：缺少 Node.js 或服务依赖时，由 App 自动下载便携版 Node 并安装依赖（无需手动装环境）。
+              Python 基础按钮：可选装（仅 qwen3 / SenseVoice 原始版 / CosyVoice 需要）；不装则这三个引擎不可用，其余不受影响。
+              各引擎的 venv 环境在<b>模型管理页</b>对应卡片点按钮安装。进度见主界面顶部引导条。
             </p>
           </div>
         </div>

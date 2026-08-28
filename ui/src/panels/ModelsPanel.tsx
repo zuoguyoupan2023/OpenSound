@@ -54,6 +54,8 @@ export default function ModelsPanel(props: PanelProps) {
   const [progress, setProgress] = useState<InstallProgress[]>([]);
   // 当前下载进度（仅 progress 事件，用于进度条；log/done/error 进日志）
   const [pct, setPct] = useState<{ received: number; total: number } | null>(null);
+  // 033 修复：大流量二次确认用内嵌确认行代替 window.confirm（WebView2 吞原生 confirm → 点了没反应，已踩坑）
+  const [bigConfirm, setBigConfirm] = useState<{ engine: string; label: string; gb: string } | null>(null);
   // 每引擎选择的镜像（engine → mirror 名）
   const [mirrorPick, setMirrorPick] = useState<Record<string, string>>({});
   const [diskAvail, setDiskAvail] = useState<number | null>(null);
@@ -97,24 +99,11 @@ export default function ModelsPanel(props: PanelProps) {
       await props.refresh();
     } catch (e) {
       const msg = String(e);
-      // S5：后端要求大流量下载二次确认（目前仅 cosyvoice-clone 的缺失权重）
+      // S5/033 修复：后端要求大流量下载二次确认（目前仅 cosyvoice-clone 的缺失权重）——
+      // 内嵌确认行代替 window.confirm（WebView2 原生 confirm 会被静默吞掉返回 false）
       const mConfirm = /BIG_DOWNLOAD_CONFIRM:([\d.]+GB)/.exec(msg);
       if (mConfirm && !confirmBigDownload) {
-        const ok = window.confirm(
-          `「${m.label}」缺失的模型权重需额外下载约 ${mConfirm[1]}（视网速可能耗时较长），\n确认开始自动下载？\n（取消则可按文档手动放置权重后重试）`
-        );
-        if (ok) {
-          setProgress((prev) => [
-            ...prev,
-            { type: "log", message: `已确认，开始下载（约 ${mConfirm[1]}）…` },
-          ]);
-          await install(m, true); // 二次确认后带 confirm=1 重试
-          return;
-        }
-        setProgress((prev) => [
-          ...prev,
-          { type: "log", message: "已取消大流量下载；可按 005 文档手动下载权重到 models/cosyvoice/ 后重试。" },
-        ]);
+        setBigConfirm({ engine: m.engine, label: m.label, gb: mConfirm[1] });
       } else {
         setProgress((prev) => [...prev, { type: "error", message: msg }]);
       }
@@ -466,6 +455,42 @@ export default function ModelsPanel(props: PanelProps) {
           <div className="install-head">
             安装进度{installing ? ` · ${installing}` : ""}
           </div>
+          {bigConfirm && (
+            <div className="install-confirm">
+              <div className="install-confirm-text">
+                「{bigConfirm.label}」缺失的模型权重需额外下载约 <b>{bigConfirm.gb}</b>（视网速可能耗时较长），确认开始自动下载？
+              </div>
+              <div className="install-confirm-actions">
+                <Button
+                  onClick={async () => {
+                    const m = props.models.find((x) => x.engine === bigConfirm.engine);
+                    if (!m) {
+                      setBigConfirm(null);
+                      return;
+                    }
+                    setProgress((prev) => [
+                      ...prev,
+                      { type: "log", message: `已确认，开始下载（约 ${bigConfirm.gb}）…` },
+                    ]);
+                    setBigConfirm(null);
+                    await install(m, true); // 二次确认后带 confirm=1 重试
+                  }}
+                  disabled={!!installing}
+                >
+                  <Icon icon="lucide:download" width={14} height={14} /> 确认下载 {bigConfirm.gb}
+                </Button>
+                <Button variant="ghost" onClick={() => {
+                  setBigConfirm(null);
+                  setProgress((prev) => [
+                    ...prev,
+                    { type: "log", message: "已取消大流量下载；可按 005 文档手动下载权重到 models/cosyvoice/ 后重试。" },
+                  ]);
+                }}>
+                  取消
+                </Button>
+              </div>
+            </div>
+          )}
           {progress.map((p, i) => (
             <div
               key={i}

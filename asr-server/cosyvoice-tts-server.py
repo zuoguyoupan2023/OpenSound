@@ -49,6 +49,8 @@ from urllib.parse import parse_qs, urlparse
 # S4 vendoring：优先 vendor/cosyvoice（随包分发的裁剪子集，锁定 commit 见 VENDOR_COMMIT）；
 # 不存在时回退旧位置 CosyVoice/（installer 的 clone 兜底也写入 vendor，此处仅为历史目录兼容）。
 _HERE = os.path.dirname(os.path.abspath(__file__))
+# 032/034 P3：模型/音色目录从数据目录派生（env 注入；未设置回退代码目录，兼容手动启动）
+DATA_DIR = os.environ.get('OPENSOUND_DATA_DIR') or _HERE
 _CV_ROOT = os.path.join(_HERE, 'vendor', 'cosyvoice')
 if not os.path.exists(os.path.join(_CV_ROOT, 'cosyvoice', 'cli', 'cosyvoice.py')):
     _CV_ROOT = os.path.join(_HERE, 'CosyVoice')
@@ -345,8 +347,8 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == '__main__':
     ap = argparse.ArgumentParser(description='CosyVoice3 本地语音克隆服务')
     ap.add_argument('--port', type=int, default=8003)
-    ap.add_argument('--model-dir', default=os.path.join(_HERE, 'models', 'cosyvoice', 'Fun-CosyVoice3-0.5B'))
-    ap.add_argument('--voice-dir', default=os.path.join(_HERE, 'data', 'clone-voices'))
+    ap.add_argument('--model-dir', default=os.path.join(DATA_DIR, 'models', 'cosyvoice', 'Fun-CosyVoice3-0.5B'))
+    ap.add_argument('--voice-dir', default=os.path.join(DATA_DIR, 'data', 'clone-voices'))
     ap.add_argument('--device', default=None, help='cuda | mps | cpu（默认自动检测）')
     args = ap.parse_args()
 

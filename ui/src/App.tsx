@@ -10,6 +10,7 @@ import {
   getModelsCatalog,
   checkRuntime,
   installRuntime,
+  installPythonBase,
   listenRuntimeProgress,
   type RuntimeStatus,
   type RuntimeProgress,
@@ -62,6 +63,9 @@ export interface PanelProps {
   runtimeInstalling: boolean;
   runtimeLogs: RuntimeProgress[];
   onInstallRuntime: () => void;
+  /** 034 阶段3：受管 Python 基础（uv + CPython）独立按钮——py 一个按键，与 node 分开 */
+  pyInstalling: boolean;
+  onInstallPythonBase: () => void;
   /** 面板间跳转（如朗读面板「在音频库中查看」） */
   goPanel?: (id: PanelId) => void;
   /** 跳到设置页并滚动定位到指定区块（030：资源模式区 "power-mode"） */
@@ -81,6 +85,8 @@ function App() {
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
   const [runtimeLogs, setRuntimeLogs] = useState<RuntimeProgress[]>([]);
   const [runtimeInstalling, setRuntimeInstalling] = useState(false);
+  // 034 阶段3：受管 Python 基础（uv + CPython）独立安装状态——与 node 各自一个按钮、互不干扰
+  const [pyInstalling, setPyInstalling] = useState(false);
 
   const refreshHealth = async () => {
     let dyn: ModelInfo[] = [];
@@ -155,7 +161,7 @@ function App() {
     };
   }, []);
 
-  // 032：运行时自举进度事件（node 下载 → npm ci → 服务拉起）
+  // 032：运行时自举进度事件（node 下载 → npm ci → 服务拉起）；034：py 安装走同一事件流（step=py,deps）
   useEffect(() => {
     let un: UnlistenFn | undefined;
     (async () => {
@@ -164,11 +170,14 @@ function App() {
         if (p.step === "done") {
           if (p.message === "完成") {
             setRuntimeInstalling(false);
+            setPyInstalling(false);
             refreshHealth();
             refreshRuntime();
           }
         } else if (p.step === "error") {
           setRuntimeInstalling(false);
+          setPyInstalling(false);
+          refreshRuntime();
         }
       });
     })();
@@ -178,6 +187,7 @@ function App() {
   }, []);
 
   const doInstallRuntime = async () => {
+    // 033/034：node 按钮——只管「node + 服务端依赖」；python 是另一个按钮（doInstallPythonBase）
     setRuntimeInstalling(true);
     setRuntimeLogs([]);
     try {
@@ -190,8 +200,26 @@ function App() {
     }
   };
 
+  // 034 阶段3：py 按钮——只装受管 Python 基础（uv + CPython 3.11，~100MB 小流量）；
+  // 用户不想装 py 就不装（非强制），引擎 venv 在模型管理页各自安装
+  const doInstallPythonBase = async () => {
+    if (pyInstalling) return;
+    setPyInstalling(true);
+    setRuntimeLogs([]);
+    try {
+      await installPythonBase();
+    } catch (e) {
+      setRuntimeLogs((prev) => [...prev, { step: "error", message: String(e) }]);
+    } finally {
+      setPyInstalling(false);
+      refreshRuntime();
+    }
+  };
+
   const runtimeNeedInstall = runtime && (!runtime.node_ok || !runtime.deps_ready);
-  const runtimeBusy = runtimeInstalling || runtimeLogs.some((l) => l.step === "node-download" || l.step === "deps");
+  // 034：py 基础（uv + CPython）独立检测——与 node 分开提示、分开按钮
+  const pyNeedInstall = runtime && !runtime.python_ready;
+  const runtimeBusy = runtimeInstalling || pyInstalling;
   const lastLog = runtimeLogs[runtimeLogs.length - 1];
   const lastPct = lastLog && lastLog.pct != null ? lastLog.pct : null;
 
@@ -230,6 +258,8 @@ function App() {
     runtimeInstalling,
     runtimeLogs,
     onInstallRuntime: doInstallRuntime,
+    pyInstalling,
+    onInstallPythonBase: doInstallPythonBase,
     goPanel: setPanel,
     goSettings: (anchor) => {
       // 时间戳 tick：即使锚点相同，重复点击也强制触发 SettingsPanel 的定位 effect
@@ -308,34 +338,59 @@ function App() {
         </div>
       </aside>
       <main className="main">
-        {(runtimeNeedInstall || runtimeBusy) && (
+        {(runtimeNeedInstall || pyNeedInstall || runtimeBusy) && (
           <div className={`runtime-banner ${runtimeBusy ? "busy" : ""}`}>
-            <div className="rb-main">
-              <Icon icon={runtimeBusy ? "lucide:loader-2" : "lucide:wrench"} width={16} height={16} className={runtimeBusy ? "rb-busy-icon" : ""} />
-              <div className="rb-text">
-                <div className="rb-title">
-                  {runtimeBusy
-                    ? lastLog?.message || "正在准备运行环境…"
-                    : runtime && !runtime.node_ok
-                      ? "缺少 Node.js 运行环境"
-                      : "服务端依赖未就绪"}
-                </div>
-                {!runtimeBusy && runtime && (
+            {/* 034 拆分：node/py 各自独立按钮，不再"一个按钮装两个"。
+                node 按钮 = node + 服务端依赖；py 按钮 = uv + CPython 基础（可选装，引擎 venv 在模型页）。 */}
+            {!runtimeBusy && runtimeNeedInstall && (
+              <div className="rb-main">
+                <Icon icon="lucide:wrench" width={16} height={16} />
+                <div className="rb-text">
+                  <div className="rb-title">
+                    {!runtime.node_ok ? "缺少 Node.js 运行环境" : "服务端依赖未就绪"}
+                  </div>
                   <div className="rb-sub">
                     {!runtime.node_ok
                       ? "由 App 自动下载便携版 Node（免安装、不污染系统），点一下即可。"
                       : "自动安装服务端依赖（npm ci，首次需数分钟，镜像国内可用）。"}
                   </div>
+                </div>
+                {runtimeInstalling ? (
+                  <span className="rb-hint">正在安装 Node…</span>
+                ) : (
+                  <button className="rb-btn" onClick={doInstallRuntime}>
+                    <Icon icon="lucide:download" width={14} height={14} /> 安装 Node
+                  </button>
                 )}
               </div>
-              {!runtimeBusy ? (
-                <button className="rb-btn" onClick={doInstallRuntime}>
-                  <Icon icon="lucide:download" width={14} height={14} /> 一键安装
-                </button>
-              ) : (
-                <span className="rb-hint">正在安装…请勿关闭窗口</span>
-              )}
-            </div>
+            )}
+            {!runtimeBusy && pyNeedInstall && (
+              <div className="rb-main">
+                <Icon icon="lucide:package" width={16} height={16} />
+                <div className="rb-text">
+                  <div className="rb-title">缺少受管 Python 基础环境（uv + CPython 3.11）</div>
+                  <div className="rb-sub">
+                    仅 Qwen3 / SenseVoice 原始版 / CosyVoice 需要（不装 py 则这三个引擎不可用，其余不受影响）。装完各引擎环境在模型管理页安装。
+                  </div>
+                </div>
+                {pyInstalling ? (
+                  <span className="rb-hint">正在安装 Python 基础…</span>
+                ) : (
+                  <button className="rb-btn" onClick={doInstallPythonBase}>
+                    <Icon icon="lucide:download" width={14} height={14} /> 安装 Python 基础
+                  </button>
+                )}
+              </div>
+            )}
+            {runtimeBusy && (
+              <div className="rb-main">
+                <Icon icon="lucide:loader-2" width={16} height={16} className="rb-busy-icon" />
+                <div className="rb-text">
+                  <div className="rb-title">{lastLog?.message || "正在准备运行环境…"}</div>
+                </div>
+                <span className="rb-hint">请勿关闭窗口</span>
+              </div>
+            )}
             {runtimeBusy && lastPct != null && (
               <div className="rb-bar">
                 <div className="rb-fill" style={{ width: `${Math.min(100, lastPct)}%` }} />
