@@ -925,6 +925,11 @@ async function collectModels() {
       missingFiles: d.missingFiles,
       missingRuntime: d.missingRuntime,
       totalMissingBytes: d.totalMissingBytes,
+      // 035：N 卡机器 + venv 依赖已就绪但 torch 为 CPU 版 → 前端显示「升级 GPU 加速」按钮
+      gpuUpgrade: HAS_NVIDIA && !d.missingRuntime.length
+        ? ((mf.runtime?.[0]?.path || '').split(/[\\/]/)[0] || '').startsWith('.venv')
+          && torchIsCpuOnly((mf.runtime?.[0]?.path || '').split(/[\\/]/)[0])
+        : false,
       // S3：安装方式与可选镜像名（UI 据此渲染镜像切换下拉）
       install: mf.install ? {
         kind: mf.install.kind,
@@ -1086,7 +1091,7 @@ function runDownload(cmd, args) {
 }
 
 // 通用子进程执行（带 env）→ NDJSON 行级进度；退出码 0 视为成功（034 阶段3：uv envenv 安装用）
-function runCmdWithEnv(cmd, args, envAdd = {}, cwdOverride = __dirname) {
+function runCmdWithEnv(cmd, args, envAdd = {}, cwdOverride = __dirname, opts = {}) {
   return (ctx) => new Promise((resolve, reject) => {
     ctx.nd({ type: 'log', message: `> ${cmd.split(/[\\/]/).pop()} ${args.join(' ')}` });
     const p = spawn(cmd, args, {
@@ -1106,8 +1111,30 @@ function runCmdWithEnv(cmd, args, envAdd = {}, cwdOverride = __dirname) {
     };
     p.stdout.on('data', onData);
     p.stderr.on('data', onData);
-    p.on('error', (e) => reject(new Error('无法启动命令：' + e.message)));
+    // 035 坑 O：uv pip 大文件下载无实时进度——用 uv 缓存目录字节增长发 type:'progress'
+    // （uv 下载时先落 cache/.tmp*，装完移入 wheels-v6；我们只计 .tmp* 累加作为"已下载"）
+    let progTimer = null;
+    if (opts.progressDir) {
+      progTimer = setInterval(() => {
+        try {
+          const tmpDirs = readdirSync(opts.progressDir).filter((x) => x.startsWith('.tmp'));
+          let bytes = 0;
+          for (const t of tmpDirs) {
+            try {
+              const full = path.join(opts.progressDir, t);
+              bytes += statSync(full).size; // 目录本身忽略，下面递归求和
+              for (const f of readdirSync(full)) {
+                try { bytes += statSync(path.join(full, f)).size; } catch {}
+              }
+            } catch {}
+          }
+          ctx.nd({ type: 'progress', received: bytes, total: (opts.progressTotal || 0) });
+        } catch {}
+      }, 800);
+    }
+    p.on('error', (e) => { if (progTimer) clearInterval(progTimer); reject(new Error('无法启动命令：' + e.message)); });
     p.on('exit', (code) => {
+      if (progTimer) clearInterval(progTimer);
       if (buf.trim()) ctx.nd({ type: 'log', message: buf.trim() });
       if (code === 0) {
         ctx.nd({ type: 'log', message: '✓ 命令完成（exit 0）' });
@@ -1117,6 +1144,15 @@ function runCmdWithEnv(cmd, args, envAdd = {}, cwdOverride = __dirname) {
       }
     });
   });
+}
+
+// 字节 → 人类可读（B/KB/MB/GB）
+function fmtMB(n) {
+  if (!n || n <= 0) return '0B';
+  const u = ['B', 'KB', 'MB', 'GB'];
+  let i = 0; let v = n;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return `${v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)} ${u[i]}`;
 }
 
 // 当前活动下载进程（S3：供 /install-cancel 终止；.part 保留可续传）
@@ -1159,7 +1195,9 @@ function downloadOneFile(fileSpec, ctx, opts = {}) {
       }
       const m = mirrors[i++];
       ctx.nd({ type: 'log', message: `下载 ${path.basename(fileSpec.file)} ← ${m.name}${opts.mirror === m.name ? '（指定）' : ''} …` });
-      const p = spawn('curl', ['-L', '-C', '-', '--connect-timeout', '15', '--max-time', '14400',
+      // -sS：静默 curl 进度动画（+cu 下载时 % Total 表头刷日志是坑），但保留真实错误输出；
+      // 进度由下方每 800ms 读 .part 大小发 type:'progress'（App 进度条），不靠 curl 打印。
+      const p = spawn('curl', ['-sS', '-L', '-C', '-', '--connect-timeout', '15', '--max-time', '14400',
         '--speed-limit', '20480', '--speed-time', '90', // <20KB/s 持续 90s 判失败 → 换源
         '-o', part, m.url], { cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'] });
       ACTIVE_DOWNLOAD.proc = p;
@@ -1260,14 +1298,205 @@ function venvKeyPkgOk(name, keyPkg) {
   const sp = path.join(venvDirOf(name), 'Lib', 'site-packages', keyPkg);
   return existsSync(sp) && (() => { try { return statSync(sp).isDirectory(); } catch { return false; } })();
 }
+// ---------- 035 阶段：N 卡机器上 torch 是否 CPU 版（无 CUDA 加速）→ 引导升级 ----------
+// 本机是否有 NVIDIA GPU：nvidia-smi 可执行即视为有（模块加载时探测一次，缓存）
+const HAS_NVIDIA = (() => {
+  try { execSync(IS_WIN ? 'where nvidia-smi' : 'which nvidia-smi', { stdio: 'ignore' }); return true; } catch { return false; }
+})();
+// NVIDIA 驱动版本（如 "616.56"）：用于选合适的 PyTorch CUDA wheel（cu121/cu124/cu126/cu128）
+const NVIDIA_DRIVER = (() => {
+  if (!HAS_NVIDIA) return null;
+  try {
+    const out = execSync('nvidia-smi --query-gpu=driver_version --format=csv,noheader', { encoding: 'utf8' }).trim().split('\n')[0];
+    return /^\d+(\.\d+)?/.test(out) ? out : null;
+  } catch { return null; }
+})();
+// ✅ 035 平台原则：不能写死 cu 版本——按驱动选 cu 目录（Win/CUDA 门槛）：
+//   cu128 ← 驱动 ≥ 570；cu126 ← ≥ 560；cu124 ← ≥ 550；更老 → null（提示升级驱动）
+function torchCuDirForDriver(driverVer) {
+  const v = parseFloat(String(driverVer || '0'));
+  if (v >= 570) return 'cu128';
+  if (v >= 560) return 'cu126';
+  if (v >= 550) return 'cu124';
+  return null;
+}
+// PyTorch wheel 镜像 base（每个都是 PEP 503 目录列表，可直接拼文件直链下载）：
+//   阿里云 pytorch-wheels（国内快）→ 清华 pytorch-wheels → 官方
+const TORCH_WHEEL_MIRRORS = [
+  { name: 'aliyun', base: 'https://mirrors.aliyun.com/pytorch-wheels', layout: 'flat' },
+  { name: 'tsinghua', base: 'https://mirrors.tuna.tsinghua.edu.cn/pytorch-wheels', layout: 'flat' },
+  { name: 'official', base: 'https://download.pytorch.org/whl', layout: 'simple' },
+];
+// ✅ 035 实测：阿里云/清华 pytorch-wheels 是**平铺目录**（/cuXXX/xxx.whl，无 torch/ 子目录），
+// 官方是 PEP 503（/cuXXX/torch/xxx.whl）。layout 决定 URL 拼法——
+// 之前统一按官方结构拼 → 阿里云/清华全 404，这就是"镜像失败而且不报错"的真相（原因被我 catch 吞了，已修：全部打日志）。
+// 目录页文本抓取（Node fetch；超时保护）
+async function fetchText(url, timeoutMs = 20000) {
+  const r = await fetch(url, { signal: AbortSignal.timeout(timeoutMs), redirect: 'follow' });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.text();
+}
+// 从某镜像目录页解析 pkg（torch/torchaudio）在 cuXXX 下最新 cp311 win_amd64 wheel
+// 返回 { name, url, bytes, mirror, version } 或 null；不抛错（失败 = 该镜像无此包/不可达）
+async function probeWheelOnMirror(m, cuDir, pkg, log) {
+  const dirUrl = m.layout === 'simple' ? `${m.base}/${cuDir}/${pkg}/` : `${m.base}/${cuDir}/`;
+  try {
+    const html = await fetchText(dirUrl);
+    // ⚠️ 阿里云/清华页面里 wheel 名的 "+" 被编码成 HTML 实体 &#43;（实测）——必须兼容三种：&#43; / %2B / +
+    const re = new RegExp(`${pkg}-(\\d+\\.\\d+\\.\\d+)(?:&#43;|%2B|\\+)${cuDir}-cp311-cp311-win_amd64\\.whl`, 'g');
+    const versions = [];
+    let mm;
+    while ((mm = re.exec(html))) versions.push(mm[1]);
+    if (!versions.length) return null;
+    versions.sort((a, b) => {
+      const pa = a.split('.').map(Number), pb = b.split('.').map(Number);
+      for (let i = 0; i < 3; i++) if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0);
+      return 0;
+    });
+    const ver = versions[versions.length - 1];
+    const name = `${pkg}-${ver}%2B${cuDir}-cp311-cp311-win_amd64.whl`;
+    const url = m.layout === 'simple' ? `${m.base}/${cuDir}/${pkg}/${name}` : `${m.base}/${cuDir}/${name}`;
+    let bytes = 0;
+    try {
+      const hr = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(15000), redirect: 'follow' });
+      bytes = Number(hr.headers.get('content-length') || 0);
+    } catch {}
+    if (log) log(`镜像探测：${m.name} ${cuDir} ${pkg} → v${ver}（${fmtMB(bytes)}）`);
+    return { name, url, bytes, mirror: m.name, version: ver };
+  } catch (e) {
+    if (log) log(`镜像探测 ${m.name} ${pkg} 失败：${String((e && e.message) || e)}`);
+    return null;
+  }
+}
+// torch + torchaudio 两个包的完整候选（各镜像都探测，收集成功项）
+async function resolveTorchWheels(cuDir, log) {
+  const out = { torch: { candidates: [] }, torchaudio: { candidates: [] } };
+  for (const pkg of ['torch', 'torchaudio']) {
+    for (const m of TORCH_WHEEL_MIRRORS) {
+      const hit = await probeWheelOnMirror(m, cuDir, pkg, log);
+      if (hit) out[pkg].candidates.push(hit);
+    }
+  }
+  return out;
+}
+// CUDA torch 重装源列表（兼容旧引用：uv pip --index-url 用；但新版走 downloadOneFile 直下 wheel）
+function torchIndexList() {
+  if (process.env.OPENSOUND_TORCH_INDEX) return [process.env.OPENSOUND_TORCH_INDEX];
+  const cu = torchCuDirForDriver(NVIDIA_DRIVER);
+  if (!cu) return [];
+  return TORCH_WHEEL_MIRRORS.map((m) => `${m.base}/${cu}`);
+}
+// venv 内 torch 是否为 CPU 版：site-packages 里 torch-*.dist-info 目录名
+//   +cu126/+cu128 等 = CUDA 版；纯版本号或 +cpu = CPU 版（PyPI 默认在 Win 无 CUDA）
+function torchBuildTag(venvName) {
+  const sp = path.join(venvDirOf(venvName), 'Lib', 'site-packages');
+  try {
+    const d = readdirSync(sp).find((x) => /^torch-\d/.test(x));
+    if (!d) return null;
+    const m = /^torch-(.+?)(?:\.dist-info)?$/.exec(d);
+    return m ? m[1] : null;
+  } catch { return null; }
+}
+function torchIsCpuOnly(venvName) {
+  const tag = torchBuildTag(venvName);
+  if (!tag) return false;
+  return !/[+]cu\d/.test(tag); // 无 +cuXXX 后缀 → CPU 版
+}
 // 引擎 venv 安装器工厂：{ name, pkgs?, lockRel?, keyPkg, label, estGB }
 //  - 未确认大流量 → 抛 BIG_DOWNLOAD_CONFIRM 给前端二次确认（带 confirm=1 重试）
 //  - uv 缺失 → 明确提示先装全局 Python 基础（不静默）
+//  - 035：N 卡机器且 venv 已就绪但 torch 为 CPU 版 → 同样走二次确认，升级为 CUDA 版 torch
 function uvVenvInstaller({ name, pkgs, lockRel, keyPkg, label, estGB }) {
   return async (ctx, opts = {}) => {
-    if (venvKeyPkgOk(name, keyPkg)) {
+    const ready = venvKeyPkgOk(name, keyPkg);
+    const torchCpuHere = HAS_NVIDIA && ready && torchIsCpuOnly(name); // N 卡 + 依赖就绪但 torch 无 CUDA
+    if (ready && !torchCpuHere) {
       ctx.nd({ type: 'log', message: `${label} 引擎环境已就绪 ✓（${name}）` });
       ctx.nd({ type: 'done', message: '环境就绪' });
+      return;
+    }
+    if (torchCpuHere) {
+      // 035：venv 依赖已装但 torch 是 CPU 版（无加速）→ 二次确认后升级 CUDA 版
+      const cur = torchBuildTag(name) || '未知';
+      const cu = torchCuDirForDriver(NVIDIA_DRIVER);
+      ctx.nd({ type: 'log', message: `${label} 检测到 NVIDIA 显卡，但 torch 为 CPU 版（${cur}）→ 建议升级 CUDA 版以获得 GPU 加速…` });
+      if (!cu) {
+        // 驱动过旧（<527，无匹配 cu wheel）：不白下 2.5GB，给明确指引
+        throw new Error(`${label}：本机 NVIDIA 驱动（${NVIDIA_DRIVER || '未知'}）过旧，无法安装新版 CUDA torch。请先升级显卡驱动（NVIDIA App/官网，560+ 可跑 cu126），再回来点「升级 GPU 加速」。`);
+      }
+      if (!opts.confirmBigDownload) {
+        ctx.nd({ type: 'log', message: `${label} 需升级 CUDA torch（驱动 ${NVIDIA_DRIVER || '未知'} → ${cu}，约 2.5GB），等二次确认…` });
+        throw new Error(`BIG_DOWNLOAD_CONFIRM:2.5GB:${name}-torch-cuda`);
+      }
+      // ⚠️ 035 坑 P：升级 torch 时若引擎服务（如 qwen3-tts 8001）还在运行，
+      // site-packages 的 _C.pyd 会被进程锁住 → uv 报"拒绝访问 (os error 5)"（实测）。
+      // App 内闭环：自动停掉占用端口引擎服务（这些是 App 拉起的子服务，升级时停掉属正常操作），
+      // 完成后提示重启服务重新拉起即可；不静默、不把锅甩给用户手动操作。
+      const ENG_PORTS = [8001, 8002, 8003];
+      const engPids = [];
+      for (const p of ENG_PORTS) {
+        try {
+          const out = execSync(IS_WIN
+            ? `netstat -ano -p tcp | findstr ":${p}" | findstr LISTENING`
+            : `lsof -ti tcp:${p} -sTCP:LISTEN`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+          const pid = String(out).split(/\s+/).filter(Boolean).pop();
+          if (pid && /^\d+$/.test(pid)) engPids.push({ port: p, pid: Number(pid) });
+        } catch { /* 端口未占用 */ }
+      }
+      if (engPids.length) {
+        ctx.nd({ type: 'log', message: `检测到引擎服务占用 venv（${engPids.map((e) => `:${e.port} PID ${e.pid}`).join('、')}）→ 升级前自动停止，完成后请「重启服务」重新拉起…` });
+        for (const e of engPids) {
+          try {
+            if (IS_WIN) execSync(`taskkill /PID ${e.pid} /F`, { stdio: ['ignore', 'pipe', 'ignore'] });
+            else process.kill(e.pid, 'SIGTERM');
+            ctx.nd({ type: 'log', message: `✓ 已停止端口 ${e.port}（PID ${e.pid}）` });
+          } catch (err) {
+            ctx.nd({ type: 'log', message: `⚠️ 停止端口 ${e.port}（PID ${e.pid}）失败：${String((err && err.message) || err)}（可手动重启 App 释放）` });
+          }
+        }
+        // 等待文件锁释放（进程退出 → .pyd 解锁）
+        await new Promise((r) => setTimeout(r, 1200));
+      }
+      // ✅ 035 晚七真相：uv pip --index-url 只认 PEP 503，而阿里云/清华是**平铺目录**（无 /torch/ 子目录）——
+      // 之前统一按官方结构拼 URL → 国内镜像全 404，失败原因还被吞了。正解：
+      // 探测各镜像目录页（真实 URL 结构），收集成功候选 → downloadOneFile 直下 wheel（多镜像+断点续传+真实进度）→ uv 本地安装。
+      ctx.nd({ type: 'log', message: `探测 PyTorch ${cu} wheel 镜像（按真实目录结构逐个探测）…` });
+      const wheels = await resolveTorchWheels(cu, (s) => ctx.nd({ type: 'log', message: s }));
+      if (!wheels.torch.candidates.length || !wheels.torchaudio.candidates.length) {
+        const missing = [];
+        if (!wheels.torch.candidates.length) missing.push('torch');
+        if (!wheels.torchaudio.candidates.length) missing.push('torchaudio');
+        throw new Error(`${label}：无法在任何镜像（阿里云/清华/官方）找到 ${cu} 的 cp311 win_amd64 wheel（缺 ${missing.join('、')}）。请上方日志查看各镜像探测原因，或设置 OPENSOUND_TORCH_INDEX 手动指定源。`);
+      }
+      const wheelDir = path.join(DATA_DIR, 'cache', 'torch-wheels');
+      mkdirSync(wheelDir, { recursive: true });
+      const downloaded = [];
+      for (const pkg of ['torch', 'torchaudio']) {
+        const cand = wheels[pkg].candidates;
+        const local = path.join(wheelDir, cand[0].name.replace(/%2B/g, '+'));
+        if (existsSync(local) && statSync(local).size > 0) {
+          ctx.nd({ type: 'log', message: `复用已下载 wheel：${path.basename(local)}` });
+        } else {
+          const rel = `cache/torch-wheels/${cand[0].name.replace(/%2B/g, '+')}`;
+          ctx.nd({ type: 'log', message: `开始下载 ${pkg} wheel（${cand.map((c) => c.mirror).join(', ')}，约 ${fmtMB(cand[0].bytes)}）…` });
+          await downloadOneFile(
+            { file: rel, mirrors: cand.map((c) => ({ name: c.mirror, url: c.url })), bytes: cand[0].bytes },
+            ctx, opts);
+          ctx.nd({ type: 'log', message: `✓ ${cand[0].name.replace(/%2B/g, '+')} 就位（${fmtMB(statSync(resolveData(rel)).size)}）` });
+        }
+        downloaded.push(local);
+        // 已下载完一个包后，若另一个包探测失败会在此循环外已报错；这里两个包都探测过才到下载
+      }
+      // 本地安装两个 wheel（不联网下载；uv 只做环境合并，秒级）
+      ctx.nd({ type: 'log', message: `wheel 下载完成，本地安装到 ${name}（uv pip install 本地文件）…` });
+      await runCmdWithEnv(UV_EXE, ['pip', 'install', '--python', venvPyOf(name), ...downloaded],
+        { UV_PYTHON_INSTALL_DIR: UV_PY_HOME })(ctx);
+      // 校验：仍 CPU 版 → 明确报错
+      if (torchIsCpuOnly(name)) {
+        throw new Error(`${label} torch 升级后仍为 CPU 版（${torchBuildTag(name) || '未知'}）。已下载 ${downloaded.map((d) => path.basename(d)).join('、')} 并本地安装，但仍未得到 CUDA 版。排查：wheel 版本与驱动 ${cu} 是否匹配、uv 本地安装是否报错（看上方日志）。也可设 OPENSOUND_TORCH_INDEX 手动指定源。`);
+      }
+      ctx.nd({ type: 'log', message: `${label} torch 已升级为 CUDA 版 ✓（${torchBuildTag(name)}），重启服务后 GPU 加速生效` });
+      ctx.nd({ type: 'done', message: 'CUDA torch 就绪，重启服务后生效' });
       return;
     }
     ctx.nd({ type: 'log', message: `${label} 缺引擎环境（${name}）→ 开始检测/安装…` });

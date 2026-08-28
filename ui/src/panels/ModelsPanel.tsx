@@ -390,6 +390,19 @@ export default function ModelsPanel(props: PanelProps) {
               </div>
 
               <div className="model-action">
+                {/* 035：N 卡 + torch CPU 版 → 升级 GPU 加速（重新装 CUDA torch，走二次确认） */}
+                {m.gpuUpgrade && !busyHere && (
+                  <Button
+                    className="gpu-upgrade"
+                    onClick={() => install(m)}
+                    disabled={!!installing}
+                    title="当前引擎的 torch 为 CPU 版，无法用显卡加速。升级为 CUDA 版（PyTorch 官方源，约 2.5GB）后推理大幅提速。"
+                  >
+                    <Icon icon="lucide:zap" width={14} height={14} />
+                    升级 GPU 加速
+                  </Button>
+                )}
+
                 {/* 镜像切换：仅 url-multi 且未装好时显示 */}
                 {(m.install?.mirrors?.length || 0) > 1 && needFix(m) && (
                   <select
@@ -459,7 +472,7 @@ export default function ModelsPanel(props: PanelProps) {
       {bigConfirm && (
         <div className="install-confirm">
           <div className="install-confirm-text">
-            「{bigConfirm.label}」缺失的模型权重需额外下载约 <b>{bigConfirm.gb}</b>（视网速可能耗时较长），确认开始自动下载？
+            「{bigConfirm.label}」需下载约 <b>{bigConfirm.gb}</b>（视网速可能耗时较长），确认开始？
           </div>
           <div className="install-confirm-actions">
             <Button

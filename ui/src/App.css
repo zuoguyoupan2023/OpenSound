@@ -206,6 +206,17 @@ body {
   background: var(--fail);
 }
 
+/* 035：N 卡 + CPU torch → 「升级 GPU 加速」按钮（黄色醒目，强调可提速） */
+.btn.gpu-upgrade {
+  background: var(--warn, #e6a23c);
+  color: #fff;
+  border: none;
+  padding: 8px 12px;
+}
+.btn.gpu-upgrade:hover {
+  opacity: 0.88;
+}
+
 .select {
   background: var(--card);
   color: var(--text);
