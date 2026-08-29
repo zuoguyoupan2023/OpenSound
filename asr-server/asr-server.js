@@ -15,7 +15,7 @@
 // 模型默认从 hf-mirror 下载（国内可达）；可用 --model-size 指定 whisper 大小（tiny/base/small）。
 
 import http from 'node:http';
-import { execSync, spawn } from 'node:child_process';
+import { execSync, spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, statfsSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1840,11 +1840,149 @@ const INSTALLERS = {
       }
       ctx.nd({ type: 'log', message: `matcha/models 补齐 ${n} 个文件 ✓` });
     }
+
+    // ---- §四 CUDA 升级（038 §一：承接 037 #10——「升级 GPU 加速」此前对 cosyvoice 是空壳）----
+    // matcha import 校验已挪到下方 CUDA 升级之后执行：升级中途的半成品 torch（torch.__version__=None，uv 删包被
+    // .pyd 锁打断时会发生）会让 transformers/diffusers import 崩（InvalidVersion），校验须等 torch 修复后再跑。
+    // 复用 uvVenvInstaller torchCpuHere 分支已验证全套：cache/torch-wheels 复用优先 → 零下载秒装；
+    // 无缓存 → 二次确认 2.5GB → resolveTorchWheels 镜像探测（阿里云/清华平铺 + 官方 simple，坑 O 结构）→ 直下 → 本地安装 → 校验 +cu。
+    // torch CPU 版、或 dist-info 缺失（= 上次升级被 .pyd 锁打断留下的半成品，torch.__version__=None）都走 CUDA 修复/升级。
+    const cosyTorchTag = torchBuildTag('.venv-cosyvoice');
+    if (HAS_NVIDIA && (cosyTorchTag === null || !/[+]cu\d/.test(cosyTorchTag))) {
+      const cur = cosyTorchTag === null ? '缺失/损坏' : cosyTorchTag;
+      const cu = torchCuDirForDriver(NVIDIA_DRIVER);
+      ctx.nd({ type: 'log', message: `检测到 NVIDIA 显卡，但 cosyvoice torch 为 CPU 版（${cur}）→ 升级 CUDA 版（驱动 ${NVIDIA_DRIVER || '未知'} → ${cu}）…` });
+      if (!cu) {
+        throw new Error(`cosyvoice：本机 NVIDIA 驱动（${NVIDIA_DRIVER || '未知'}）过旧，无法安装新版 CUDA torch。请先升级显卡驱动（NVIDIA App/官网，560+ 可跑 cu126），再回来点「升级 GPU 加速」。`);
+      }
+      // 坑 P：升级 torch 前自动停 8001/8002/8003（site-packages .pyd 文件锁）
+      const ENG_PORTS = [8001, 8002, 8003];
+      const engPids = [];
+      for (const p of ENG_PORTS) {
+        try {
+          const out = execSync(IS_WIN
+            ? `netstat -ano -p tcp | findstr ":${p}" | findstr LISTENING`
+            : `lsof -ti tcp:${p} -sTCP:LISTEN`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+          const pid = String(out).split(/\s+/).filter(Boolean).pop();
+          if (pid && /^\d+$/.test(pid)) engPids.push({ port: p, pid: Number(pid) });
+        } catch { /* 端口空闲 */ }
+      }
+      if (engPids.length) {
+        ctx.nd({ type: 'log', message: `检测到引擎服务占用 venv（${engPids.map((e) => `:${e.port} PID ${e.pid}`).join('、')}）→ 升级前自动停止，完成后请「重启服务」重新拉起…` });
+        for (const e of engPids) {
+          try {
+            if (IS_WIN) execSync(`taskkill /PID ${e.pid} /F`, { stdio: ['ignore', 'pipe', 'ignore'] });
+            else process.kill(e.pid, 'SIGTERM');
+            ctx.nd({ type: 'log', message: `✓ 已停止端口 ${e.port}（PID ${e.pid}）` });
+          } catch (err) {
+            ctx.nd({ type: 'log', message: `⚠️ 停止端口 ${e.port}（PID ${e.pid}）失败：${String((err && err.message) || err)}（可手动重启 App 释放）` });
+          }
+        }
+        await new Promise((r) => setTimeout(r, 1200));
+      }
+      // 坑 P 加强（037 #10 变体）：端口探测会漏"加载中未监听/孤儿"的 venv python 进程——
+      // 它们同样持有 site-packages/torch/_C.pyd → uv 报"拒绝访问"（2026-08-29 实测：8003 存活却漏停）。
+      // 补救：按命令行（cosyvoice-tts-server / .venv-cosyvoice）枚举 python 进程并 taskkill /T（App 拉起的子服务）。
+      try {
+        const ps = spawnSync('powershell', ['-NoProfile', '-Command',
+          `Get-CimInstance Win32_Process -Filter "name='python.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match 'cosyvoice-tts-server|.venv-cosyvoice' } | ForEach-Object { $_.ProcessId }`],
+          { encoding: 'utf8', timeout: 15000 });
+        const vkilled = [];
+        for (const tok of String(ps.stdout || '').split(/\s+/)) {
+          const pid = Number(tok);
+          if (pid > 0 && !engPids.some((e) => e.pid === pid)) {
+            try { execSync(`taskkill /PID ${pid} /T /F`, { stdio: ['ignore', 'pipe', 'ignore'] }); vkilled.push(pid); } catch {}
+          }
+        }
+        if (vkilled.length) {
+          ctx.nd({ type: 'log', message: `✓ 已按 venv 进程清理停止 ${vkilled.length} 个 python（PID ${vkilled.join('、')}）` });
+          await new Promise((r) => setTimeout(r, 1200));
+        }
+      } catch (e) { ctx.nd({ type: 'log', message: `⚠️ venv 进程枚举跳过：${String((e && e.message) || e)}` }); }
+      // ① 缓存复用优先（cache/torch-wheels 已有 cuXXX cp311 win wheel → 零下载秒装）
+      const wheelDir = path.join(DATA_DIR, 'cache', 'torch-wheels');
+      const cacheHit = (pkg) => {
+        try {
+          const f = readdirSync(wheelDir).find((x) => new RegExp(`^${pkg}-\\d.*\\+${cu}-cp311-cp311-win_amd64\\.whl$`).test(x));
+          return f ? path.join(wheelDir, f) : null;
+        } catch { return null; }
+      };
+      let torchWheel = cacheHit('torch');
+      let audioWheel = cacheHit('torchaudio');
+      if (torchWheel && audioWheel) {
+        ctx.nd({ type: 'log', message: `复用缓存 wheel：${path.basename(torchWheel)} + ${path.basename(audioWheel)} → 本地安装（零下载，秒级）…` });
+      } else {
+        // ② 无缓存 → 二次确认 + 镜像探测下载（与 uvVenvInstaller 同款）
+        if (!opts.confirmBigDownload) {
+          ctx.nd({ type: 'log', message: `cosyvoice 需升级 CUDA torch（${cu}，约 2.5GB），等二次确认…` });
+          throw new Error(`BIG_DOWNLOAD_CONFIRM:2.5GB:.venv-cosyvoice-torch-cuda`);
+        }
+        ctx.nd({ type: 'log', message: `探测 PyTorch ${cu} wheel 镜像（按真实目录结构逐个探测）…` });
+        const wheels = await resolveTorchWheels(cu, (s) => ctx.nd({ type: 'log', message: s }));
+        if (!wheels.torch.candidates.length || !wheels.torchaudio.candidates.length) {
+          const missing = [];
+          if (!wheels.torch.candidates.length) missing.push('torch');
+          if (!wheels.torchaudio.candidates.length) missing.push('torchaudio');
+          throw new Error(`cosyvoice：无法在任何镜像（阿里云/清华/官方）找到 ${cu} 的 cp311 win_amd64 wheel（缺 ${missing.join('、')}）。查看上方日志或设 OPENSOUND_TORCH_INDEX 手动指定源。`);
+        }
+        mkdirSync(wheelDir, { recursive: true });
+        for (const pkg of ['torch', 'torchaudio']) {
+          const cand = wheels[pkg].candidates;
+          const local = path.join(wheelDir, cand[0].name.replace(/%2B/g, '+'));
+          const rel = `cache/torch-wheels/${cand[0].name.replace(/%2B/g, '+')}`;
+          if (existsSync(local) && statSync(local).size > 0) {
+            ctx.nd({ type: 'log', message: `复用已下载 wheel：${path.basename(local)}` });
+          } else {
+            ctx.nd({ type: 'log', message: `开始下载 ${pkg} wheel（${cand.map((c) => c.mirror).join(', ')}，约 ${fmtMB(cand[0].bytes)}）…` });
+            await downloadOneFile({ file: rel, mirrors: cand.map((c) => ({ name: c.mirror, url: c.url })), bytes: cand[0].bytes }, ctx, opts);
+            ctx.nd({ type: 'log', message: `✓ ${cand[0].name.replace(/%2B/g, '+')} 就位（${fmtMB(statSync(resolveData(rel)).size)}）` });
+          }
+          if (pkg === 'torch') torchWheel = local; else audioWheel = local;
+        }
+      }
+      const installTorchWheels = () => runCmdWithEnv(UV_EXE, ['pip', 'install', '--python', venvPy, torchWheel, audioWheel],
+        { UV_PYTHON_INSTALL_DIR: UV_PY_HOME })(ctx);
+      try {
+        await installTorchWheels();
+      } catch (e) {
+        const msg = String((e && e.message) || e);
+        // 坑 P 兜底：uv 仍报 .pyd 文件锁（拒绝访问）→ 宽杀数据目录下所有 venv python（App 子服务）后重试一次
+        if (/拒绝访问|os error 5|access denied/i.test(msg)) {
+          ctx.nd({ type: 'log', message: '升级安装遇文件锁（torch/_C.pyd 被占用）→ 宽杀全部引擎 venv 进程后重试一次…' });
+          try {
+            const ps = spawnSync('powershell', ['-NoProfile', '-Command',
+              `Get-CimInstance Win32_Process -Filter "name='python.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match 'opensound-download\\\\venvs' } | ForEach-Object { $_.ProcessId }`],
+              { encoding: 'utf8', timeout: 15000 });
+            for (const tok of String(ps.stdout || '').split(/\s+/)) {
+              const pid = Number(tok);
+              if (pid > 0) { try { execSync(`taskkill /PID ${pid} /T /F`, { stdio: ['ignore', 'pipe', 'ignore'] }); } catch {} }
+            }
+            await new Promise((r) => setTimeout(r, 1500));
+            await installTorchWheels();
+          } catch (e2) {
+            throw new Error('cosyvoice torch 升级安装仍失败（文件锁未释放）：' + msg + '。请先「重启服务」再点「升级 GPU 加速」（App 会自动停引擎）。');
+          }
+        } else {
+          throw e;
+        }
+      }
+      if (torchIsCpuOnly('.venv-cosyvoice')) {
+        throw new Error(`cosyvoice torch 升级后仍为 CPU 版（${torchBuildTag('.venv-cosyvoice') || '未知'}）。查看上方 uv 安装日志；wheel 与驱动 ${cu} 是否匹配。`);
+      }
+      ctx.nd({ type: 'log', message: `cosyvoice torch 已升级为 CUDA 版 ✓（${torchBuildTag('.venv-cosyvoice')}），重启服务后 GPU 加速生效` });
+    }
+
+    // ---- matcha import 校验（须在 CUDA 升级/依赖就绪之后：torch 可用才验）----
     {
       const checkPy = 'import matcha.models.components.flow_matching as a; import matcha.models.components.decoder as b; import matcha.models.components.transformer as c; print("matcha repair OK")';
-      await runCmdWithEnv(venvPy, ['-c', checkPy],
-        { PYTHONPATH: path.join(vendorDir, 'third_party', 'Matcha-TTS') + path.delimiter + path.join(vendorDir) })(ctx);
-      ctx.nd({ type: 'log', message: 'matcha 模块校验通过 ✓' });
+      try {
+        await runCmdWithEnv(venvPy, ['-c', checkPy],
+          { PYTHONPATH: path.join(vendorDir, 'third_party', 'Matcha-TTS') + path.delimiter + path.join(vendorDir) })(ctx);
+        ctx.nd({ type: 'log', message: 'matcha 模块校验通过 ✓' });
+      } catch (err) {
+        throw new Error('matcha 模块校验失败（torch 可能损坏/未就绪）：' + String((err && err.message) || err)
+          + '。N 卡机器请直接点「升级 GPU 加速」修复 torch；无 N 卡则再点一次「检测/修复」。');
+      }
     }
 
     ctx.nd({ type: 'done', message: '克隆依赖就绪。若「运行中」徽标未变绿：托盘 → 重启服务，等模型加载完成（首次约 1-2 分钟）。' });
