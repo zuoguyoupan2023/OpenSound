@@ -42,7 +42,13 @@ def read_json_lists(list_file):
 
 
 def load_wav(wav, target_sr, min_sr=16000):
-    speech, sample_rate = torchaudio.load(wav, backend='soundfile')
+    # 2026-08-29 fix：torchaudio 2.11+ 的 load()（含 backend='soundfile'）一律走 torchcodec，而 torchcodec
+    # 在 Windows 上必须系统装有 FFmpeg full-shared DLL（无法随包/镜像保证）→ 直接报 "Could not load libtorchcodec"。
+    # 改直接用 soundfile 读取（自带 libsndfile，零额外依赖，与 CPU 版克隆同路径），返回值与 torchaudio.load 一致：
+    # (waveform [channels, time], sample_rate)。
+    import soundfile as _sf
+    _data, sample_rate = _sf.read(wav, dtype='float32', always_2d=True)
+    speech = torch.from_numpy(_data.T)
     speech = speech.mean(dim=0, keepdim=True)
     if sample_rate != target_sr:
         assert sample_rate >= min_sr, 'wav sample rate {} must be greater than {}'.format(sample_rate, target_sr)
