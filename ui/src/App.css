@@ -979,6 +979,27 @@ textarea:focus,
 .install-confirm-text { color: #8a6d3b; font-size: 12px; line-height: 1.5; }
 .install-confirm-actions { display: flex; gap: 8px; }
 
+/* 阶段1：单引擎卸载——操作区横排（徽标/启动按钮 + 卸载按钮） */
+.model-action-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.uninstall-btn.btn-ghost {
+  color: var(--fail, #e5484d);
+  border-color: rgba(229, 72, 77, 0.4);
+}
+.uninstall-btn.btn-ghost:hover {
+  background: rgba(229, 72, 77, 0.08);
+}
+.uninstall-warn {
+  color: #c0392b;
+  font-size: 12px;
+  line-height: 1.5;
+  margin-top: 4px;
+}
+
 /* ===== 音频库 ===== */
 .audio-tabs {
   display: flex;

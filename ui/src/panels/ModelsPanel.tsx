@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { PanelProps } from "../App";
 import { Icon } from "@iconify/react";
-import { cancelInstall, getDisk, getDiskLocal, getDeviceProfile, installModel, getPersistedSettings } from "../api";
+import { cancelInstall, getDisk, getDiskLocal, getDeviceProfile, installModel, getPersistedSettings, uninstallModel, uninstallPreview } from "../api";
 import type { DeviceProfile, EngineFit, InstallProgress, ModelInfo } from "../types";
 import { Panel, Button, Spinner } from "../components/ui";
 
@@ -56,6 +56,15 @@ export default function ModelsPanel(props: PanelProps) {
   const [pct, setPct] = useState<{ received: number; total: number } | null>(null);
   // 033 修复：大流量二次确认用内嵌确认行代替 window.confirm（WebView2 吞原生 confirm → 点了没反应，已踩坑）
   const [bigConfirm, setBigConfirm] = useState<{ engine: string; label: string; gb: string } | null>(null);
+  // 阶段1：单引擎卸载——内嵌确认行（先 uninstall_preview 拿将释放空间，确认后 uninstall_model 停服务+删除）
+  const [uninstallConfirm, setUninstallConfirm] = useState<{
+    engine: string;
+    label: string;
+    estBytes: number | null;
+    sizeHint: string;
+    stopWarn: boolean;
+  } | null>(null);
+  const [uninstalling, setUninstalling] = useState(false);
   // 每引擎选择的镜像（engine → mirror 名）
   const [mirrorPick, setMirrorPick] = useState<Record<string, string>>({});
   const [diskAvail, setDiskAvail] = useState<number | null>(null);
@@ -126,6 +135,60 @@ export default function ModelsPanel(props: PanelProps) {
       ]);
     } catch {
       /* ignore */
+    }
+  };
+
+  // ---------- 阶段1：单引擎卸载（Rust 侧：先停服务 → 删模型文件 + venv + .part） ----------
+  const startUninstall = async (m: ModelInfo) => {
+    if (installing || uninstalling) return;
+    setProgress([]);
+    try {
+      const p = await uninstallPreview(m.engine);
+      setUninstallConfirm({
+        engine: m.engine,
+        label: m.label,
+        estBytes: p.est_bytes || null,
+        sizeHint: m.size,
+        stopWarn: stateOf(m) === "running" || !!m.serviceUp,
+      });
+    } catch (e) {
+      setProgress((prev) => [...prev, { type: "error", message: `卸载预览失败：${e}` }]);
+    }
+  };
+
+  const confirmUninstall = async () => {
+    if (!uninstallConfirm || installing || uninstalling) return;
+    const { engine, label } = uninstallConfirm;
+    setUninstallConfirm(null);
+    setUninstalling(true);
+    setProgress([]);
+    setProgress((prev) => [...prev, { type: "log", message: `开始卸载「${label}」…` }]);
+    try {
+      const r = await uninstallModel(engine);
+      const deleted = r.items.filter((i) => i.deleted);
+      const failed = r.items.filter((i) => !i.deleted && i.error);
+      const restartNote = r.restarted
+        ? "服务已自动重启，其它引擎恢复可用"
+        : r.restart_error
+          ? `自动重启失败：${r.restart_error}（请手动点侧边栏「启动」）`
+          : "服务未运行，未启动";
+      setProgress((prev) => [
+        ...prev,
+        { type: "log", message: `已删除 ${deleted.length} 项（模型文件 + 运行环境）` },
+        ...failed.map((i) => ({
+          type: "error" as const,
+          message: `删除失败 ${i.path}：${i.error}`,
+        })),
+        {
+          type: "done",
+          message: `卸载完成，释放 ${fmtBytes(r.freed_bytes)}；${restartNote}`,
+        },
+      ]);
+      await props.refresh();
+    } catch (e) {
+      setProgress((prev) => [...prev, { type: "error", message: `卸载失败：${e}` }]);
+    } finally {
+      setUninstalling(false);
     }
   };
 
@@ -434,30 +497,67 @@ export default function ModelsPanel(props: PanelProps) {
                 )}
 
                 {stateOf(m) === "unknown" ? (
-                  <Button disabled title="请先启动本地服务（侧边栏「启动」或顶部引导条「一键安装」）">
-                    <Icon icon="lucide:power" width={14} height={14} /> 启动服务后安装
-                  </Button>
+                  <div className="model-action-row">
+                    <Button disabled title="请先启动本地服务（侧边栏「启动」或顶部引导条「一键安装」）">
+                      <Icon icon="lucide:power" width={14} height={14} /> 启动服务后安装
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      className="uninstall-btn"
+                      onClick={() => startUninstall(m)}
+                      disabled={!!installing || uninstalling}
+                      title="卸载：删除该引擎的模型文件与运行环境（含残留 .part）"
+                    >
+                      <Icon icon="lucide:trash-2" width={14} height={14} /> 卸载
+                    </Button>
+                  </div>
                 ) : !needFix(m) ? (
-                  <span className={`badge ${st.cls}`}>
-                    <Icon icon={st.icon} width={13} height={13} /> {st.label}
-                  </span>
+                  <div className="model-action-row">
+                    <span className={`badge ${st.cls}`}>
+                      <Icon icon={st.icon} width={13} height={13} /> {st.label}
+                    </span>
+                    <Button
+                      variant="ghost"
+                      className="uninstall-btn"
+                      onClick={() => startUninstall(m)}
+                      disabled={!!installing || uninstalling}
+                      title="卸载：删除该引擎的模型文件与运行环境（需先停止服务）"
+                    >
+                      <Icon icon="lucide:trash-2" width={14} height={14} /> 卸载
+                    </Button>
+                  </div>
+                ) : uninstalling ? (
+                  <Button disabled title="正在卸载…">
+                    <Spinner /> 卸载中…
+                  </Button>
                 ) : busyHere ? (
                   <Button variant="ghost" onClick={cancel}>
                     取消
                   </Button>
                 ) : (
-                  <Button onClick={() => install(m)} disabled={!!installing}>
-                    {installing ? (
-                      <Spinner />
-                    ) : (
-                      <>
-                        <Icon icon="lucide:download" width={14} height={14} />
-                        {stateOf(m) === "missing-runtime" || (m.missingRuntime && m.missingRuntime.length > 0)
-                          ? "检测/修复"
-                          : `补齐${m.totalMissingBytes ? ` · ${fmtBytes(m.totalMissingBytes)}` : ""}`}
-                      </>
-                    )}
-                  </Button>
+                  <div className="model-action-row">
+                    <Button onClick={() => install(m)} disabled={!!installing}>
+                      {installing ? (
+                        <Spinner />
+                      ) : (
+                        <>
+                          <Icon icon="lucide:download" width={14} height={14} />
+                          {stateOf(m) === "missing-runtime" || (m.missingRuntime && m.missingRuntime.length > 0)
+                            ? "检测/修复"
+                            : `补齐${m.totalMissingBytes ? ` · ${fmtBytes(m.totalMissingBytes)}` : ""}`}
+                        </>
+                      )}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      className="uninstall-btn"
+                      onClick={() => startUninstall(m)}
+                      disabled={!!installing || uninstalling}
+                      title="删除该引擎已下载的文件（含未完成的 .part 残留）"
+                    >
+                      <Icon icon="lucide:trash-2" width={14} height={14} /> 卸载
+                    </Button>
+                  </div>
                 )}
               </div>
             </div>
@@ -517,10 +617,42 @@ export default function ModelsPanel(props: PanelProps) {
         </div>
       )}
 
+      {/* 阶段1：单引擎卸载确认行（与 bigConfirm 同款内嵌确认，替代 window.confirm） */}
+      {uninstallConfirm && (
+        <div className="install-confirm">
+          <div className="install-confirm-text">
+            <div>
+              卸载「<b>{uninstallConfirm.label}</b>」将删除该引擎的模型文件与运行环境
+              {uninstallConfirm.estBytes ? (
+                <>
+                  ，预计释放约 <b>{fmtBytes(uninstallConfirm.estBytes)}</b>；重新安装需重新下载。
+                </>
+              ) : (
+                <>（约 {uninstallConfirm.sizeHint}）。</>
+              )}
+            </div>
+            {uninstallConfirm.stopWarn && (
+              <div className="uninstall-warn">
+                ⚠️ 该引擎服务正在运行，卸载将先停止本地服务、删除完成后自动重启，其它引擎恢复可用（仅该引擎需重新下载）。
+              </div>
+            )}
+            <div className="missing-item hint">仅删除该引擎数据，不影响其它引擎、共享运行环境与音色库。</div>
+          </div>
+          <div className="install-confirm-actions">
+            <Button onClick={confirmUninstall} disabled={!!installing || uninstalling}>
+              <Icon icon="lucide:trash-2" width={14} height={14} /> 确认卸载
+            </Button>
+            <Button variant="ghost" onClick={() => setUninstallConfirm(null)}>
+              取消
+            </Button>
+          </div>
+        </div>
+      )}
+
       {progress.length > 0 && (
         <div className="install-log" ref={logRef}>
           <div className="install-head">
-            安装进度{installing ? ` · ${installing}` : ""}
+            安装进度{installing ? ` · ${installing}` : uninstalling ? " · 卸载" : ""}
           </div>
           {progress.map((p, i) => (
             <div

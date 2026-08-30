@@ -424,6 +424,40 @@ export async function cancelInstall(): Promise<void> {
   await jfetch("/install-cancel", { method: "POST" });
 }
 
+// ---------- 阶段1：单引擎卸载（Rust 侧：先停服务 → 删模型文件 + venv + .part） ----------
+export interface UninstallItem {
+  path: string; // 展示路径（数据根内相对路径）
+  kind: string; // file | dir
+  bytes: number; // 删除前实际占用
+  deleted: boolean;
+  error?: string | null;
+}
+export interface UninstallPreview {
+  engine: string;
+  label: string;
+  size_hint: string;
+  est_bytes: number; // 现存目标合计（含 venv 与 .part）
+  targets: UninstallItem[];
+}
+export interface UninstallResult {
+  engine: string;
+  freed_bytes: number;
+  items: UninstallItem[];
+  was_running: boolean; // 卸载前服务是否在运行
+  restarted: boolean; // 卸载前在运行 → 已自动重启（其它引擎恢复可用）
+  restart_error?: string | null; // 自动重启失败原因（如有）
+}
+
+// 预览：只统计将删除的文件/目录大小，不停服务、不删除（确认框显示"将释放多少"）
+export async function uninstallPreview(engine: string): Promise<UninstallPreview> {
+  return invoke<UninstallPreview>("uninstall_preview", { engine });
+}
+
+// 卸载：Rust 先停服务（释放文件锁）→ 删除模型文件 + 受管 venv + .part 残留 → 返回释放字节
+export async function uninstallModel(engine: string): Promise<UninstallResult> {
+  return invoke<UninstallResult>("uninstall_model", { engine });
+}
+
 // 磁盘剩余空间
 export async function getDisk(): Promise<{ availBytes: number | null }> {
   return jfetch<{ availBytes: number | null }>("/disk");
