@@ -1,8 +1,13 @@
 export interface ServiceStatus {
   asr_up: boolean;
   qwen3_up: boolean;
+  // 2026-08-31：补全 8002/8003 探测（funasr 原始版 / cosyvoice 克隆）
+  funasr_up: boolean;
+  cosyvoice_up: boolean;
   asr_url: string;
   qwen3_url: string;
+  funasr_url: string;
+  cosyvoice_url: string;
   child_alive: boolean;
   node_path: string;
 }

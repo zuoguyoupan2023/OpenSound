@@ -29,8 +29,12 @@ import "./App.css";
 const DEFAULT_STATUS: ServiceStatus = {
   asr_up: false,
   qwen3_up: false,
+  funasr_up: false,
+  cosyvoice_up: false,
   asr_url: "http://127.0.0.1:9528",
   qwen3_url: "http://127.0.0.1:8001",
+  funasr_url: "http://127.0.0.1:8002",
+  cosyvoice_url: "http://127.0.0.1:8003",
   child_alive: false,
   node_path: "",
 };
@@ -72,6 +76,8 @@ export interface PanelProps {
   goSettings?: (anchor?: string) => void;
   settingsAnchor?: string | null;
   clearSettingsAnchor?: () => void;
+  /** 2026-08-31：重新检测运行时状态（check_runtime）——全局清理后环境可能变化，需刷新显示 */
+  onRefreshRuntime?: () => Promise<void>;
 }
 
 function App() {
@@ -268,6 +274,7 @@ function App() {
     },
     settingsAnchor,
     clearSettingsAnchor: () => setSettingsAnchor(null),
+    onRefreshRuntime: refreshRuntime,
   };
 
   const renderPanel = () => {

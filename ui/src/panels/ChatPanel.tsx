@@ -54,28 +54,13 @@ export default function ChatPanel(props: PanelProps) {
   const [llmModel, setLlmModel] = useState<string>("llm-qwen3-8b");
 
   // 030：节能模式在模型选择处直接切换（未启用 → 关旧启新）
+  // 2026-08-31 决策：节能模式 8B 彻底禁用（6–8GB 内存，仅全能模式可用）——不再自动切换启用
   const ecoSettings = getPersistedSettings();
-  const eco8bOff = ecoSettings.powerMode === "eco" && ecoSettings.ecoBig !== "llm-qwen3-8b";
+  const eco8bDisabled = ecoSettings.powerMode === "eco";
   const ecoChatQwenOff = ecoSettings.powerMode === "eco" && ecoSettings.ecoBig !== "qwen3";
   const ecoChatCloneOff = ecoSettings.powerMode === "eco" && ecoSettings.ecoBig !== "cosyvoice";
   const pickLlmModel = async (v: string) => {
-    if (v === "llm-qwen3-8b" && eco8bOff) {
-      if (
-        !window.confirm(
-          "节能模式未启用「Qwen3-8B 对话」。切换将关闭当前启用的大模型并启用 8B（重启服务，冷启动约 5–10 秒），继续？"
-        )
-      )
-        return;
-      try {
-        await switchEcoBig("llm-qwen3-8b" as EcoBig);
-        showToast("已切换启用「Qwen3-8B」，服务重启中…");
-        props.refresh();
-        setTimeout(() => props.refresh(), 1500);
-      } catch (e) {
-        showToast("切换失败: " + e);
-        return;
-      }
-    }
+    if (v === "llm-qwen3-8b" && eco8bDisabled) return; // 节能模式禁用（选项已灰，双保险）
     setLlmModel(v);
   };
   const pickChatTts = async (v: "kokoro" | "qwen3" | "clone") => {
@@ -100,6 +85,13 @@ export default function ChatPanel(props: PanelProps) {
     }
     setTtsEngine(v);
   };
+  // 2026-08-31：节能模式 8B 禁用——初始/遗留选中 8B 时自动回落 0.5B（避免直接对话被后端拦截报错）
+  useEffect(() => {
+    if (ecoSettings.powerMode === "eco" && llmModel === "llm-qwen3-8b") {
+      setLlmModel("llm-0.5b");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ecoSettings.powerMode]);
   const [cloudModel, setCloudModel] = useState<string>("deepseek-v4-flash");
   const [ttsEngine, setTtsEngine] = useState<"kokoro" | "qwen3" | "clone">("kokoro");
   const [cloneVoices, setCloneVoices] = useState<CloneVoice[]>([]);
@@ -484,11 +476,18 @@ export default function ChatPanel(props: PanelProps) {
               installedLlmModels.length
                 ? installedLlmModels.map((m) => ({
                     value: m.engine,
+                    disabled: m.engine === "llm-qwen3-8b" && eco8bDisabled,
                     label: `模型: ${m.label}${
-                      m.engine === "llm-qwen3-8b" && eco8bOff ? "（点击切换并启用）" : ""
+                      m.engine === "llm-qwen3-8b" && eco8bDisabled ? "（节能模式禁用）" : ""
                     }`,
                   }))
-                : [{ value: "llm-qwen3-8b", label: "模型: Qwen3-8B（未下载）" }]
+                : [
+                    {
+                      value: "llm-qwen3-8b",
+                      label: `模型: Qwen3-8B${eco8bDisabled ? "（节能模式禁用）" : "（未下载）"}`,
+                      disabled: eco8bDisabled,
+                    },
+                  ]
             }
           />
         )}

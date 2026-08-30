@@ -137,6 +137,7 @@
 - **语音克隆（006 T1）**：CosyVoice3 本地克隆——音色管理面板新建（音频库样本或**导入音频+ASR 识别文本**）、生成音色、预生成试听音频秒开试听、改名/删除；朗读/对话引擎可选「克隆音色」。
 - 录音链路（macOS cpal + CORS 修复）、音频库落盘/播放/删除/导出；**来源角标 + 元数据快照 + 坏头自愈（011 P1/P2）**；朗读面板内嵌历史区块、停止语义（中断合成、已截断入库）。
 - **对话历史持久化（011 P3）**：会话每轮自动保存 / 历史下拉恢复 / 删除，跨重启可用；朗读音频 id 关联回消息。
+- **单引擎卸载（2026-08-31）**：模型管理页每卡片「卸载」按钮——Rust 侧停服务 → 整目录删除模型文件 + 受管 venv + `.part` 残留 → 卸载前服务在运行则自动重启（其它引擎恢复可用）；内嵌二次确认显示可释放空间；共享 runtime/node_modules/voices/config 不动（详见「九、卸载与清理」）。
 - **设置与存储规范化（011 P4）**：服务地址/token/云端 API Key 迁入 config.json（localStorage 一次性自动迁移），设置项防抖自动保存 + toast，「打开数据文件夹」入口。
 - 桌面壳：窗口/托盘常驻/拉起守护服务/模型管理 UI。
 - 开放后端：`9528` + CORS + SPEC 文档。
@@ -234,6 +235,16 @@ npm run all          # 一键拉起 asr-server(9528) + qwen3(8001) + sensevoice-
 
 ---
 
-## 九、后续任务（详见 006 / 011）
+## 九、卸载与清理（2026-08-31，设计见 000-plan-2 §四）
+
+- **单引擎卸载（已实现）**：模型管理页每卡片「卸载」→ 确认框（`uninstall_preview` 统计将释放空间）→ `uninstall_model`：先停服务（Windows 文件锁：4 个引擎在 asr-server 进程内、python 三引擎独立子进程，必须全停才能释放锁）→ 删除 → 卸载前服务在运行则自动重启。
+- **删除范围**：引擎专属目录**整目录删除**（覆盖清单外残留，如 funasr 的 `bpe.model`、cosyvoice 的 `README.md/.gitattributes`）+ 受管 venv（`.venv-qwen3`/`.venv-funasr`/`.venv-cosyvoice`）；共享目录（`models/llm` 两个 LLM 共用）回退逐文件 + `.part`；共享 runtime/node_modules/voices/config 不动。
+- **全局清理（已实现 2026-08-31）**：设置页「环境与运行时」→「清理与卸载（全局）」四档——① 清理缓存 `cache/` ② 卸载全部模型 `models/` ③ 卸载全部环境 `venvs/`+`runtime/` ④ 恢复出厂（全部 + voices/data + config.json 重置 + 便携 node）。先停服务 → 删 → **不自动重启**（qwen3 启动会自动重下模型）；预览显示将释放空间，内嵌二次确认。
+- **已知残留登记（2026-08-31 全量卸载实测）**：`venvs/.venv-indextts`（4.2GB，无引擎卡片）、`models/hf/onnx-community/whisper-base/`（≈75MB，废弃 transformers.js whisper）——由设置页档位③②覆盖；indextts 代码残留（vendor/index-tts + 2 个 py）已删除（用户授权，041 加回时重新 clone）。
+- **节能模式（030）**：节能 = 9528 最小集（SenseVoice 量化 + Kokoro + Whisper + llm-0.5b）+ `eco_big` 单开一个 Python 大模型；**8B 节能禁用**（`OPENSOUND_SKIP_LLM_8B` 后端双保险，对话面板置灰，仅全能模式可用）。
+
+---
+
+## 十、后续任务（详见 006 / 011）
 Realtime 实时语音（T3）、CI 三平台打包（T4）、本地 LLM 增强（T5）、音频库增强（T6）；克隆阶段C 剩余「音色与原始录音解耦」（可删录音保留音色）。
 011 遗留候选（本期明确不立项）：「按原参数重读」按钮（元数据快照已备好）、「预读缓冲」抹平句间卡顿、对话消息点击重听当轮回答（`tts_audio_id` 关联已埋点）。

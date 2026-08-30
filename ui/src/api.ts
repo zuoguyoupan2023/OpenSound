@@ -7,7 +7,8 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 // 旧版本（0.x）存 WebView localStorage(opensound_settings)，首次启动自动迁入并清除（011 §5.6 存储规范）；更早的 tabu_settings 一并迁移
 // 030 阶段一：服务资源模式（powerMode=全能/节能；ecoBig=节能下启用的大模型，单开）
 export type PowerMode = "full" | "eco";
-export type EcoBig = "none" | "qwen3" | "cosyvoice" | "sensevoice-original" | "llm-qwen3-8b";
+// 2026-08-31 决策：节能模式 8B 也禁用（占 6–8GB），不再作为 eco_big 可选项；8B 仅全能模式可用
+export type EcoBig = "none" | "qwen3" | "cosyvoice" | "sensevoice-original";
 
 interface PersistedSettings {
   baseUrl?: string;
@@ -444,7 +445,8 @@ export interface UninstallResult {
   freed_bytes: number;
   items: UninstallItem[];
   was_running: boolean; // 卸载前服务是否在运行
-  restarted: boolean; // 卸载前在运行 → 已自动重启（其它引擎恢复可用）
+  restarted: boolean; // 已自动重启（其它引擎恢复可用）
+  nothing_left: boolean; // 卸载后无任何其它引擎文件 → 不重启（空壳无意义）
   restart_error?: string | null; // 自动重启失败原因（如有）
 }
 
@@ -456,6 +458,33 @@ export async function uninstallPreview(engine: string): Promise<UninstallPreview
 // 卸载：Rust 先停服务（释放文件锁）→ 删除模型文件 + 受管 venv + .part 残留 → 返回释放字节
 export async function uninstallModel(engine: string): Promise<UninstallResult> {
   return invoke<UninstallResult>("uninstall_model", { engine });
+}
+
+// ---------- 阶段2：全局清理四档（cache/models/envs/all，设置页「环境与运行时」区块） ----------
+export type ClearScope = "cache" | "models" | "envs" | "all";
+
+export interface ClearDataItem {
+  path: string;
+  kind: string; // dir | file
+  bytes: number;
+  error?: string | null;
+}
+export interface ClearDataResult {
+  scope: ClearScope;
+  freed_bytes: number;
+  items: ClearDataItem[];
+  was_running: boolean; // 清理前服务在运行（已停止）
+  restart_hint: string;
+}
+
+// 预览：统计将释放空间（不停服务、不删除）
+export async function clearDataPreview(scope: ClearScope): Promise<number> {
+  return invoke<number>("clear_data_preview", { scope });
+}
+
+// 清理：先停服务 → 删目标目录 → 不自动重启（提示见 restart_hint）
+export async function clearData(scope: ClearScope): Promise<ClearDataResult> {
+  return invoke<ClearDataResult>("clear_data", { scope });
 }
 
 // 磁盘剩余空间

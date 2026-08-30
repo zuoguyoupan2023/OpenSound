@@ -218,7 +218,13 @@ export default function HomePanel(props: PanelProps) {
       <div className="engine-status">
         <EngineBadge
           label="ASR"
-          ready={!!props.health && (props.health.engines?.length ?? 0) > 0}
+          // 2026-08-31 修复：不能以 health.engines.length>0 判就绪（该数组恒含 'sensevoice(未下载)' 占位，
+          // 模型全卸载也恒非空 → 永远绿勾，与识别面板红 x 矛盾）。改与 AsrPanel 同口径：/models 的 state=ready/running。
+          ready={props.models?.some(
+            (m) =>
+              (m.engine === "sensevoice" || m.engine === "whisper") &&
+              (m.state === "ready" || m.state === "running")
+          )}
           starting={computeStarting(getPersistedSettings(), props.health).asr}
         />
         <EngineBadge

@@ -20,6 +20,9 @@ use recorder::Recorder;
 // ---------- 常量 ----------
 const ASR_URL: &str = "http://127.0.0.1:9528";
 const QWEN3_URL: &str = "http://127.0.0.1:8001";
+// 2026-08-31：运行信息补全 8002/8003（funasr / cosyvoice 独立 Python 子服务）
+const SENSE_ORIGINAL_URL: &str = "http://127.0.0.1:8002";
+const COSYVOICE_URL: &str = "http://127.0.0.1:8003";
 const SERVER_DIR: &str = "asr-server"; // 相对项目根
 
 // ---------- 运行时自举（032：App 内一键安装 node/依赖，普通用户免终端） ----------
@@ -52,8 +55,13 @@ struct AppState {
 struct ServiceStatus {
     asr_up: bool,
     qwen3_up: bool,
+    // 2026-08-31：补全 8002/8003 探测（funasr 原始版 / cosyvoice 克隆）
+    funasr_up: bool,
+    cosyvoice_up: bool,
     asr_url: String,
     qwen3_url: String,
+    funasr_url: String,
+    cosyvoice_url: String,
     child_alive: bool,
     node_path: String,
 }
@@ -122,7 +130,7 @@ struct CatalogModel {
     install: Option<CatalogInstall>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Clone)]
 struct EngineJson {
     id: String,
     #[serde(default)] category: String,
@@ -134,21 +142,21 @@ struct EngineJson {
     #[serde(default)] runtime: Vec<EngineRuntimeJson>,
     #[serde(rename = "optionalFiles", default)] optional_files: Vec<EngineOptionalJson>,
 }
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Clone)]
 struct EngineInstallJson {
     #[serde(default)] kind: String,
     #[serde(default)] files: Vec<EngineFileJson>,
 }
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Clone)]
 struct EngineFileJson {
     #[serde(default)] mirrors: Vec<EngineMirrorJson>,
 }
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Clone)]
 struct EngineMirrorJson {
     #[serde(default)] name: String,
 }
 // 卸载用：checks 条目（与 asr-server.js 的 engineReadiness/checkEntry 同一套字段）
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Clone)]
 #[allow(dead_code)] // bytes 等字段为清单 schema 预留（阶段2 全局清理沿用）
 struct EngineCheckJson {
     #[serde(rename = "type", default)] ctype: String,
@@ -157,14 +165,14 @@ struct EngineCheckJson {
     #[serde(default)] bytes: Option<u64>,
 }
 // 卸载用：runtime 条目（首段 .venv-* 的路径 = 该引擎受管 venv）
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Clone)]
 #[allow(dead_code)]
 struct EngineRuntimeJson {
     #[serde(default)] kind: String,
     #[serde(default)] path: String,
 }
 // 卸载用：optionalFiles 条目（如 cosyvoice 的 asset/*，非运行必需但卸载时一并清）
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Clone)]
 struct EngineOptionalJson {
     #[serde(default)] path: String,
 }
@@ -233,7 +241,8 @@ struct UninstallResult {
     freed_bytes: u64, // 实际释放
     items: Vec<UninstallItem>,
     was_running: bool,      // 卸载前服务是否在运行
-    restarted: bool,        // 卸载前在运行 → 已自动重启（其它引擎恢复可用）
+    restarted: bool,        // 已自动重启（其它引擎恢复可用）
+    nothing_left: bool,     // 卸载后无任何其它引擎文件 → 不重启（空壳无意义）
     restart_error: Option<String>, // 自动重启失败原因（如有）
 }
 
@@ -248,22 +257,34 @@ fn resolve_data_path(data_root: &Path, server_dir: &Path, p: &str) -> PathBuf {
 
 // 引擎清单：按 id 匹配 engines/*.json（文件名与 id 可能不一致，一律读内容按 id 找）
 fn find_engine_manifest(app: &tauri::AppHandle, state: &Arc<AppState>, engine: &str) -> Result<(PathBuf, EngineJson), String> {
+    let all = load_all_engine_manifests(app, state)?;
+    for (id, j) in &all {
+        if id == engine {
+            let dir = server_dir(app, state).ok_or("无法定位 asr-server 目录（请在设置中配置）")?;
+            return Ok((dir, j.clone()));
+        }
+    }
+    Err(format!("未知引擎: {engine}（engines/*.json 中无此 id）"))
+}
+
+// 全部引擎清单（id, json）——卸载"整目录删除"需要判断目录是否被其他引擎共享
+fn load_all_engine_manifests(app: &tauri::AppHandle, state: &Arc<AppState>) -> Result<Vec<(String, EngineJson)>, String> {
     let dir = server_dir(app, state).ok_or("无法定位 asr-server 目录（请在设置中配置）")?;
     let engines_dir = dir.join("engines");
+    let mut all = Vec::new();
     let entries = fs::read_dir(&engines_dir).map_err(|e| format!("读取 engines 目录失败：{e}"))?;
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
         if !name.ends_with(".json") {
             continue;
         }
-        let raw = fs::read_to_string(e.path()).map_err(|err| format!("读取 {name} 失败：{err}"))?;
-        if let Ok(j) = serde_json::from_str::<EngineJson>(&raw) {
-            if j.id == engine {
-                return Ok((dir, j));
+        if let Ok(raw) = fs::read_to_string(e.path()) {
+            if let Ok(j) = serde_json::from_str::<EngineJson>(&raw) {
+                all.push((j.id.clone(), j));
             }
         }
     }
-    Err(format!("未知引擎: {engine}（engines/*.json 中无此 id）"))
+    Ok(all)
 }
 
 // 递归目录大小（字节）
@@ -292,9 +313,9 @@ fn path_total_size(p: &Path) -> u64 {
     }
 }
 
-// 一个引擎的卸载目标：checks 的 file/dir + .part 残留 + optionalFiles + 受管 venv（runtime 首段 .venv-*）
-fn uninstall_targets(j: &EngineJson, data_root: &Path, server_dir: &Path) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::new();
+// 该引擎清单涉及的所有落盘路径（checks file/dir + optionalFiles；不含 venv）
+fn engine_manifest_paths(j: &EngineJson, data_root: &Path, server_dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
     for c in &j.checks {
         let target = if !c.path.is_empty() {
             resolve_data_path(data_root, server_dir, &c.path)
@@ -309,27 +330,90 @@ fn uninstall_targets(j: &EngineJson, data_root: &Path, server_dir: &Path) -> Vec
         } else {
             continue;
         };
-        if c.ctype == "dir" {
-            out.push(target);
-        } else {
-            out.push(target.clone());
-            // 断点续传残留（downloadOneFile 的 .part 命名）
-            let mut part = target.clone().into_os_string();
-            part.push(".part");
-            out.push(PathBuf::from(part));
-        }
+        out.push(target);
     }
-    // optionalFiles（如 cosyvoice 的 asset/*）：非必需文件，卸载一并清（否则空目录修剪不到）
     for o in &j.optional_files {
         if !o.path.is_empty() {
             out.push(resolve_data_path(data_root, server_dir, &o.path));
         }
     }
-    // 受管 venv：runtime 路径首段 .venv-*（与 engineReadiness 同判据；vendor 等共享代码不动）
+    out
+}
+
+// 目录是否被其他引擎共享（其下存在别的引擎的落盘路径）
+fn dir_shared_with_others(dir: &Path, engine_id: &str, all: &[(String, EngineJson)], data_root: &Path, server_dir: &Path) -> bool {
+    for (id, j) in all {
+        if id == engine_id {
+            continue;
+        }
+        for p in engine_manifest_paths(j, data_root, server_dir) {
+            if p.starts_with(dir) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// 去重加入（卸载目标可能重叠，如 dir check 与 file check 父目录）
+fn push_unique(out: &mut Vec<PathBuf>, p: PathBuf) {
+    if !out.contains(&p) {
+        out.push(p);
+    }
+}
+
+// 卸载目标：优先"引擎专属目录整目录删除"（覆盖清单外文件，如 cosyvoice 的 README/.gitattributes、
+// funasr 运行时产生的 bpe.model 等——逐文件删必漏）；共享目录（如 models/llm 两个 LLM 共用）回退逐文件 + .part。
+// 受管 venv（runtime 首段 .venv-*）一律整目录删除；vendor 等共享代码不动。
+fn uninstall_targets(j: &EngineJson, engine_id: &str, all: &[(String, EngineJson)], data_root: &Path, server_dir: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for c in &j.checks {
+        let target = if !c.path.is_empty() {
+            resolve_data_path(data_root, server_dir, &c.path)
+        } else if !c.pattern.is_empty() {
+            let pat = &c.pattern;
+            let sep = pat.rfind('/').unwrap_or(0);
+            if sep == 0 {
+                continue;
+            }
+            resolve_data_path(data_root, server_dir, &pat[..sep])
+        } else {
+            continue;
+        };
+        if c.ctype == "dir" {
+            push_unique(&mut out, target);
+        } else if let Some(parent) = target.parent() {
+            let parent = parent.to_path_buf();
+            if parent.starts_with(data_root) && !dir_shared_with_others(&parent, engine_id, all, data_root, server_dir) {
+                // 专属目录：整目录删（含清单外残留与 .part）
+                push_unique(&mut out, parent);
+            } else {
+                // 共享目录：逐文件 + .part 残留
+                push_unique(&mut out, target.clone());
+                let mut part = target.clone().into_os_string();
+                part.push(".part");
+                push_unique(&mut out, PathBuf::from(part));
+            }
+        } else {
+            push_unique(&mut out, target);
+        }
+    }
+    // optionalFiles：父目录已被整目录删则跳过，否则单文件
+    for o in &j.optional_files {
+        if o.path.is_empty() {
+            continue;
+        }
+        let t = resolve_data_path(data_root, server_dir, &o.path);
+        let covered = t.parent().map(|p| out.contains(&p.to_path_buf())).unwrap_or(false);
+        if !covered {
+            push_unique(&mut out, t);
+        }
+    }
+    // 受管 venv 整目录删除
     for r in &j.runtime {
         let first = r.path.split(['/', '\\']).next().unwrap_or("");
         if first.starts_with(".venv") {
-            out.push(data_root.join("venvs").join(first));
+            push_unique(&mut out, data_root.join("venvs").join(first));
         }
     }
     out
@@ -346,11 +430,12 @@ fn display_path(p: &Path, data_root: &Path) -> String {
 // 预览：只统计现存目标大小，不删除、不停服务（确认框显示"将释放多少"）
 #[tauri::command]
 fn uninstall_preview(app: tauri::AppHandle, state: State<'_, Arc<AppState>>, engine: String) -> Result<UninstallPreview, String> {
+    let all = load_all_engine_manifests(&app, &state)?;
     let (sdir, j) = find_engine_manifest(&app, &state, &engine)?;
     let droot = data_root(&app);
     let mut items = Vec::new();
     let mut est = 0u64;
-    for t in uninstall_targets(&j, &droot, &sdir) {
+    for t in uninstall_targets(&j, &engine, &all, &droot, &sdir) {
         if !t.exists() {
             continue;
         }
@@ -367,17 +452,33 @@ fn uninstall_preview(app: tauri::AppHandle, state: State<'_, Arc<AppState>>, eng
     Ok(UninstallPreview { engine: j.id, label: j.label, size_hint: j.size_hint, est_bytes: est, targets: items })
 }
 
+// 卸载后是否还有其他引擎的模型/环境文件存在（决定是否自动重启——全空则空壳无意义，不重启）
+fn any_other_engine_left(engine: &str, all: &[(String, EngineJson)], data_root: &Path, server_dir: &Path) -> bool {
+    for (id, other) in all {
+        if id == engine {
+            continue;
+        }
+        for t in uninstall_targets(other, id, all, data_root, server_dir) {
+            if t.exists() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 // 卸载：先停服务（释放全部文件锁）→ 逐目标删除（失败逐条记录不中断）→ 修剪空父目录（不越数据根）→
-// 卸载前服务在运行则自动重启（其它引擎恢复可用；被卸载引擎缺文件/缺环境如实显示）
+// 卸载前服务在运行且**还有其他引擎文件**才自动重启（其它引擎恢复可用；全部卸载完则不重启——空壳无意义）
 #[tauri::command]
 fn uninstall_model(app: tauri::AppHandle, state: State<'_, Arc<AppState>>, engine: String) -> Result<UninstallResult, String> {
+    let all = load_all_engine_manifests(&app, &state)?;
     let (sdir, j) = find_engine_manifest(&app, &state, &engine)?;
     let droot = data_root(&app);
     let was_running = child_alive(&state);
     if was_running {
         stop_service(&state);
     }
-    let targets = uninstall_targets(&j, &droot, &sdir);
+    let targets = uninstall_targets(&j, &engine, &all, &droot, &sdir);
     let mut freed = 0u64;
     let mut items = Vec::new();
     for t in &targets {
@@ -398,8 +499,10 @@ fn uninstall_model(app: tauri::AppHandle, state: State<'_, Arc<AppState>>, engin
         }
     }
     prune_empty_parents(&targets, &droot);
-    // 卸载前服务在运行 → 自动重启（start_service 内部先停旧的再拉起 start-all，幂等）
-    let (restarted, restart_error) = if was_running {
+    // 重启判定：卸载前服务在运行 且 还有其他引擎文件 → 自动重启（start_service 内部先停旧的再拉起，幂等）；
+    // 全部卸载完 → 不重启（空壳无意义），提示用户需要时手动「启动」
+    let nothing_left = !any_other_engine_left(&engine, &all, &droot, &sdir);
+    let (restarted, restart_error) = if was_running && !nothing_left {
         match start_service(&app, &state) {
             Ok(()) => (true, None),
             Err(e) => (false, Some(e)),
@@ -407,7 +510,7 @@ fn uninstall_model(app: tauri::AppHandle, state: State<'_, Arc<AppState>>, engin
     } else {
         (false, None)
     };
-    Ok(UninstallResult { engine: j.id, freed_bytes: freed, items, was_running, restarted, restart_error })
+    Ok(UninstallResult { engine: j.id, freed_bytes: freed, items, was_running, restarted, nothing_left, restart_error })
 }
 
 // 删除后的空目录修剪：只沿目标父目录向上、只删空目录、绝不越数据根
@@ -433,6 +536,147 @@ fn prune_empty_parents(targets: &[PathBuf], data_root: &Path) {
             };
         }
     }
+}
+
+// ---------- 阶段2：全局清理四档（cache / models / envs / all，2026-08-31） ----------
+// 范围 = 数据根（data_root）下子目录；portable node（app_data_dir/runtime/node）与 config.json
+// （app_config_dir）不在数据根，由 all 档额外处理。
+// ⚠️ 清理后**不自动重启**：qwen3 服务启动时会自动 snapshot_download 重新下载模型（几 GB），
+// 自动重启会让"清理 models 释放空间"白做；由用户在需要时点侧边栏「启动」（启动时按需重下/重建）。
+#[derive(Serialize, Clone)]
+struct ClearDataItem {
+    path: String, // 展示路径
+    kind: String, // dir | file
+    bytes: u64,   // 删除前占用
+    error: Option<String>,
+}
+#[derive(Serialize, Clone)]
+struct ClearDataResult {
+    scope: String,
+    freed_bytes: u64,
+    items: Vec<ClearDataItem>,
+    was_running: bool, // 清理前服务是否在运行（已停止）
+    restart_hint: String,
+}
+
+// scope → 清理目标（数据根内）
+fn clear_scope_targets(scope: &str, data_root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    match scope {
+        "cache" => out.push(data_root.join("cache")),
+        "models" => out.push(data_root.join("models")),
+        "envs" => {
+            out.push(data_root.join("venvs"));
+            out.push(data_root.join("runtime"));
+        }
+        "all" => {
+            out.push(data_root.join("cache"));
+            out.push(data_root.join("models"));
+            out.push(data_root.join("venvs"));
+            out.push(data_root.join("runtime"));
+            out.push(data_root.join("voices"));
+            out.push(data_root.join("data"));
+        }
+        _ => {}
+    }
+    out
+}
+
+// 预览：统计将释放空间（不停服务、不删除）
+#[tauri::command]
+fn clear_data_preview(app: tauri::AppHandle, scope: String) -> Result<u64, String> {
+    if !["cache", "models", "envs", "all"].contains(&scope.as_str()) {
+        return Err(format!("未知清理范围: {scope}（支持 cache / models / envs / all）"));
+    }
+    let droot = data_root(&app);
+    let mut est = 0u64;
+    for t in clear_scope_targets(&scope, &droot) {
+        if t.exists() {
+            est += path_total_size(&t);
+        }
+    }
+    // all 档额外统计：config.json（app_config_dir）+ 便携 node（app_data_dir/runtime/node）
+    if scope == "all" {
+        if let Some(cfg) = config_path(&app) {
+            if cfg.exists() {
+                est += path_total_size(&cfg);
+            }
+        }
+        if let Ok(data_dir) = app.path().app_data_dir() {
+            let nd = data_dir.join("runtime").join("node");
+            if nd.exists() {
+                est += path_total_size(&nd);
+            }
+        }
+    }
+    Ok(est)
+}
+
+// 清理：先停服务 → 删除目标目录（失败逐条记录不中断）→ 不自动重启（提示见 restart_hint）
+#[tauri::command]
+fn clear_data(app: tauri::AppHandle, state: State<'_, Arc<AppState>>, scope: String) -> Result<ClearDataResult, String> {
+    if !["cache", "models", "envs", "all"].contains(&scope.as_str()) {
+        return Err(format!("未知清理范围: {scope}（支持 cache / models / envs / all）"));
+    }
+    let droot = data_root(&app);
+    let was_running = child_alive(&state);
+    if was_running {
+        stop_service(&state);
+    }
+    let mut freed = 0u64;
+    let mut items = Vec::new();
+    for t in clear_scope_targets(&scope, &droot) {
+        if !t.exists() {
+            continue;
+        }
+        let bytes = path_total_size(&t);
+        let kind = if t.is_dir() { "dir" } else { "file" };
+        let r = if t.is_dir() { fs::remove_dir_all(&t) } else { fs::remove_file(&t) };
+        match r {
+            Ok(()) => {
+                freed += bytes;
+                items.push(ClearDataItem { path: display_path(&t, &droot), kind: kind.into(), bytes, error: None });
+            }
+            Err(e) => {
+                items.push(ClearDataItem { path: display_path(&t, &droot), kind: kind.into(), bytes: 0, error: Some(e.to_string()) });
+            }
+        }
+    }
+    // all 档额外：config.json（app_config_dir，恢复出厂：token/设置/API Key 重置、数据目录回默认）
+    // + 便携 node（app_data_dir/runtime/node，存在才删）
+    if scope == "all" {
+        if let Some(cfg) = config_path(&app) {
+            if cfg.exists() {
+                let bytes = path_total_size(&cfg);
+                match fs::remove_file(&cfg) {
+                    Ok(()) => {
+                        freed += bytes;
+                        items.push(ClearDataItem { path: cfg.display().to_string(), kind: "file".into(), bytes, error: None });
+                    }
+                    Err(e) => items.push(ClearDataItem { path: cfg.display().to_string(), kind: "file".into(), bytes: 0, error: Some(e.to_string()) }),
+                }
+            }
+        }
+        if let Ok(data_dir) = app.path().app_data_dir() {
+            let nd = data_dir.join("runtime").join("node");
+            if nd.exists() {
+                let bytes = path_total_size(&nd);
+                match fs::remove_dir_all(&nd) {
+                    Ok(()) => {
+                        freed += bytes;
+                        items.push(ClearDataItem { path: display_path(&nd, &droot), kind: "dir".into(), bytes, error: None });
+                    }
+                    Err(e) => items.push(ClearDataItem { path: display_path(&nd, &droot), kind: "dir".into(), bytes: 0, error: Some(e.to_string()) }),
+                }
+            }
+        }
+    }
+    let restart_hint = if was_running {
+        "服务已停止（未自动重启：清理后启动会按需重新下载/重建，请在需要时点侧边栏「启动」）".to_string()
+    } else {
+        "服务未运行，无需停止".to_string()
+    };
+    Ok(ClearDataResult { scope, freed_bytes: freed, items, was_running, restart_hint })
 }
 
 // 本机磁盘剩余（字节）：本地文件系统直查，不依赖 9528；探测**模型存放目录（数据根）**所在盘，
@@ -1353,22 +1597,23 @@ fn start_service(app: &tauri::AppHandle, state: &Arc<AppState>) -> Result<(), St
     // 同一 token 经 get_ui_settings 交给前端（api.ts jfetch 自动带 Bearer），并以 OPENSOUND_TOKEN 注入子进程校验。
     // 030 阶段一：资源模式 → OPENSOUND_SKIP_*（节能=默认关全部大模型服务，只留 9528 最小集：
     //   sherpa SenseVoice ASR + kokoro TTS + llm-0.5b 对话；eco_big=节能下用户启用的大模型，单开；全能=全开）
-    let (token, skip_qwen3, skip_cosy, skip_sense_orig) = {
+    // 2026-08-31 决策：节能模式下 8B 也禁用——8B 在 9528 进程内无法用 skip 进程控制，
+    // 改注入 OPENSOUND_SKIP_LLM_8B 由 asr-server 拒绝 8B 加载（双保险）；8B 不再是 eco_big 可选项。
+    let (token, skip_qwen3, skip_cosy, skip_sense_orig, skip_llm_8b) = {
         let mut cfg = load_config(app);
         if cfg.ui.token.is_empty() {
             cfg.ui.token = gen_token();
             save_config(app, &cfg)?;
         }
-        let skip = match (cfg.ui.power_mode.as_str(), cfg.ui.eco_big.as_str()) {
-            ("eco", "qwen3") => (false, true, true),
-            ("eco", "cosyvoice") => (true, false, true),
-            ("eco", "sensevoice-original") => (true, true, false),
-            // LLM 8B 在 9528 进程内（llama-cpp 按需加载），只需关闭三个 Python 大服务
-            ("eco", "llm-qwen3-8b") => (true, true, true),
-            ("eco", _) => (true, true, true), // 节能默认：大模型全关，只留最小集
-            _ => (false, false, false),       // 全能默认：全部拉起
+        let is_eco = cfg.ui.power_mode.as_str() == "eco";
+        let skip = match (is_eco, cfg.ui.eco_big.as_str()) {
+            (true, "qwen3") => (false, true, true),
+            (true, "cosyvoice") => (true, false, true),
+            (true, "sensevoice-original") => (true, true, false),
+            (true, _) => (true, true, true), // 节能默认：大模型全关，只留最小集
+            _ => (false, false, false),      // 全能默认：全部拉起
         };
-        (cfg.ui.token, skip.0, skip.1, skip.2)
+        (cfg.ui.token, skip.0, skip.1, skip.2, is_eco)
     };
 
     // 子进程日志落盘（此前 Stdio::null() 会丢弃全部输出，子服务崩溃时无从排查）
@@ -1400,6 +1645,7 @@ fn start_service(app: &tauri::AppHandle, state: &Arc<AppState>) -> Result<(), St
         .env("OPENSOUND_SKIP_QWEN3", if skip_qwen3 { "1" } else { "" })
         .env("OPENSOUND_SKIP_COSYVOICE", if skip_cosy { "1" } else { "" })
         .env("OPENSOUND_SKIP_SENSEVOICE_ORIGINAL", if skip_sense_orig { "1" } else { "" })
+        .env("OPENSOUND_SKIP_LLM_8B", if skip_llm_8b { "1" } else { "" })
         .stdout(Stdio::from(open_log()?))
         .stderr(Stdio::from(open_log()?))
         .spawn()
@@ -1461,12 +1707,21 @@ async fn health_up(url: &str) -> bool {
 #[tauri::command]
 async fn get_service_status(state: State<'_, Arc<AppState>>) -> Result<ServiceStatus, String> {
     let child_alive = child_alive(&state);
-    let (asr_up, qwen3_up) = tokio::join!(health_up(ASR_URL), health_up(QWEN3_URL));
+    let (asr_up, qwen3_up, funasr_up, cosyvoice_up) = tokio::join!(
+        health_up(ASR_URL),
+        health_up(QWEN3_URL),
+        health_up(SENSE_ORIGINAL_URL),
+        health_up(COSYVOICE_URL)
+    );
     Ok(ServiceStatus {
         asr_up,
         qwen3_up,
+        funasr_up,
+        cosyvoice_up,
         asr_url: ASR_URL.to_string(),
         qwen3_url: QWEN3_URL.to_string(),
+        funasr_url: SENSE_ORIGINAL_URL.to_string(),
+        cosyvoice_url: COSYVOICE_URL.to_string(),
         child_alive,
         node_path: state.node_path.lock().unwrap().clone().unwrap_or_default(),
     })
@@ -1547,12 +1802,21 @@ async fn poll_health(app: tauri::AppHandle, state: Arc<AppState>) {
     loop {
         let s = {
             let child_alive = child_alive(&state);
-            let (asr_up, qwen3_up) = tokio::join!(health_up(ASR_URL), health_up(QWEN3_URL));
+            let (asr_up, qwen3_up, funasr_up, cosyvoice_up) = tokio::join!(
+                health_up(ASR_URL),
+                health_up(QWEN3_URL),
+                health_up(SENSE_ORIGINAL_URL),
+                health_up(COSYVOICE_URL)
+            );
             ServiceStatus {
                 asr_up,
                 qwen3_up,
+                funasr_up,
+                cosyvoice_up,
                 asr_url: ASR_URL.to_string(),
                 qwen3_url: QWEN3_URL.to_string(),
+                funasr_url: SENSE_ORIGINAL_URL.to_string(),
+                cosyvoice_url: COSYVOICE_URL.to_string(),
                 child_alive,
                 node_path: state.node_path.lock().unwrap().clone().unwrap_or_default(),
             }
@@ -1680,6 +1944,8 @@ pub fn run() {
             get_models_catalog,
             uninstall_preview,
             uninstall_model,
+            clear_data_preview,
+            clear_data,
             get_disk_local,
             recorder_start,
             recorder_stop,

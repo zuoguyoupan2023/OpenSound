@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { Icon } from "@iconify/react";
 import type { PanelProps } from "../App";
 import {
   getPersistedSettings,
@@ -8,22 +9,80 @@ import {
   getDataRoot,
   setDataRoot,
   migrateModelsToData,
+  clearData,
+  clearDataPreview,
+  type ClearScope,
   type PowerMode,
   type EcoBig,
 } from "../api";
 import { showToast } from "../toast";
 import { Panel, Button, Spinner } from "../components/ui";
 
-// 030 阶段一：节能模式下可启用的大模型（单开；none=最小集）
+// 字节格式化（与模型页同口径）
+function fmtBytes(n?: number | null): string {
+  if (!n || n <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  let v = n;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+}
+
+// 030 阶段一：节能模式下可启用的大模型（单开；none=最小集）。
+// 2026-08-31：8B 不再可选项——节能模式 8B 禁用（6–8GB 内存），仅全能模式可用。
 const ECO_BIG_OPTS: { value: EcoBig; label: string; mem: string; wait: string }[] = [
   { value: "none", label: "都不启用（仅最小集：SenseVoice 量化 + Kokoro + 0.5B 对话）", mem: "0", wait: "—" },
   { value: "qwen3", label: "Qwen3 TTS（高音质朗读）", mem: "2–4GB", wait: "数十秒" },
   { value: "cosyvoice", label: "CosyVoice 克隆（克隆音色朗读）", mem: "4–6GB", wait: "1–2 分钟" },
   { value: "sensevoice-original", label: "SenseVoice 原始版（高精度识别）", mem: "1.5–2.5GB", wait: "20–60s" },
-  { value: "llm-qwen3-8b", label: "Qwen3-8B 对话（更强对话能力）", mem: "6–8GB", wait: "5–10s" },
 ];
 
 export default function SettingsPanel(props: PanelProps) {
+  // ---------- 阶段2：全局清理四档（cache/models/envs/all） ----------
+  const [clearing, setClearing] = useState<ClearScope | null>(null);
+  const [clearConfirm, setClearConfirm] = useState<{ scope: ClearScope; est: number } | null>(null);
+  const [clearMsg, setClearMsg] = useState("");
+  const CLEAR_OPTS: { scope: ClearScope; label: string; desc: string }[] = [
+    { scope: "cache", label: "清理缓存", desc: "cache/：uv pip / torch-wheels / numba（可重下）" },
+    { scope: "models", label: "卸载全部模型", desc: "models/：全部模型文件" },
+    { scope: "envs", label: "卸载全部环境", desc: "venvs/ + runtime/（uv + CPython）" },
+    { scope: "all", label: "恢复出厂", desc: "全部 + 音色 + 配置重置（不可撤销）" },
+  ];
+  const CLEAR_CONFIRM_TEXT: Record<ClearScope, string> = {
+    cache: "清理下载缓存（uv pip / torch-wheels / numba）。不影响模型与已装环境，下次下载会重新产生。",
+    models: "卸载全部模型文件。服务将停止；之后启动服务时各引擎会按需重新下载（大模型需二次确认）。",
+    envs: "卸载全部运行环境（venvs + runtime/uv + runtime/python）。python 系引擎（qwen3/原始版/cosyvoice）需重新安装环境与模型。",
+    all: "恢复出厂：清理全部数据（模型/环境/缓存/音色）+ 重置配置（token/API Key/数据目录设置，数据目录回默认路径）。此操作不可撤销！",
+  };
+  const startClear = async (scope: ClearScope) => {
+    try {
+      const est = await clearDataPreview(scope);
+      setClearConfirm({ scope, est });
+    } catch (e) {
+      setClearMsg("清理预览失败: " + e);
+    }
+  };
+  const confirmClear = async () => {
+    if (!clearConfirm) return;
+    const scope = clearConfirm.scope;
+    setClearConfirm(null);
+    setClearing(scope);
+    setClearMsg("");
+    try {
+      const r = await clearData(scope);
+      setClearMsg(`已清理，释放 ${fmtBytes(r.freed_bytes)}。${r.restart_hint}`);
+      await props.refresh();
+      // 2026-08-31：清理会删环境（uv/python/venvs）——重新检测运行时，避免显示过期的"就绪"
+      await props.onRefreshRuntime?.();
+    } catch (e) {
+      setClearMsg("清理失败: " + e);
+    } finally {
+      setClearing(null);
+    }
+  };
   const [baseUrl, setBaseUrl] = useState(getBaseUrl());
   const [token, setToken] = useState("");
   const [deepseekKey, setDeepseekKey] = useState("");
@@ -434,6 +493,53 @@ export default function SettingsPanel(props: PanelProps) {
               Python 基础按钮：可选装（仅 qwen3 / SenseVoice 原始版 / CosyVoice 需要）；不装则这三个引擎不可用，其余不受影响。
               各引擎的 venv 环境在<b>模型管理页</b>对应卡片点按钮安装。进度见主界面顶部引导条。
             </p>
+
+            {/* 阶段2（2026-08-31）：全局清理四档——由轻到重；每档先停服务、完成后不自动重启 */}
+            <div className="settings-item" style={{ marginTop: 12 }}>
+              <label className="settings-label">清理与卸载（全局）</label>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {CLEAR_OPTS.map((o) => (
+                  <Button
+                    key={o.scope}
+                    variant="ghost"
+                    onClick={() => startClear(o.scope)}
+                    disabled={!!clearing || !!clearConfirm}
+                    title={o.desc}
+                  >
+                    {clearing === o.scope ? (
+                      <Spinner />
+                    ) : (
+                      <>
+                        <Icon icon="lucide:trash-2" width={13} height={13} /> {o.label}
+                      </>
+                    )}
+                  </Button>
+                ))}
+              </div>
+              <p className="settings-hint">
+                四档由轻到重：清理缓存 → 卸载全部模型 → 卸载全部环境 → 恢复出厂。每档执行前会停止服务，完成后不自动重启（启动时按需重新下载/重建）。单引擎卸载在<b>模型管理页</b>卡片上。
+              </p>
+              {clearConfirm && (
+                <div className="install-confirm">
+                  <div className="install-confirm-text">
+                    <div>
+                      「{CLEAR_OPTS.find((o) => o.scope === clearConfirm.scope)?.label}」将释放约{" "}
+                      <b>{fmtBytes(clearConfirm.est)}</b>。
+                    </div>
+                    <div>{CLEAR_CONFIRM_TEXT[clearConfirm.scope]}</div>
+                  </div>
+                  <div className="install-confirm-actions">
+                    <Button onClick={confirmClear} disabled={!!clearing}>
+                      <Icon icon="lucide:trash-2" width={13} height={13} /> 确认清理
+                    </Button>
+                    <Button variant="ghost" onClick={() => setClearConfirm(null)}>
+                      取消
+                    </Button>
+                  </div>
+                </div>
+              )}
+              {clearMsg && <p className="settings-msg">{clearMsg}</p>}
+            </div>
           </div>
         </div>
 
@@ -517,12 +623,20 @@ export default function SettingsPanel(props: PanelProps) {
             <span>{props.status.child_alive ? "是" : "否"}</span>
           </div>
           <div className="kv">
-            <span>asr-server</span>
+            <span>asr-server（9528 · 基础进程，显示模型情况）</span>
             <span>{props.status.asr_up ? "运行中" : "未就绪"}</span>
           </div>
           <div className="kv">
-            <span>qwen3-tts</span>
+            <span>qwen3-tts（8001）</span>
             <span>{props.status.qwen3_up ? "运行中" : "未就绪"}</span>
+          </div>
+          <div className="kv">
+            <span>sensevoice-原始（8002 · funasr）</span>
+            <span>{props.status.funasr_up ? "运行中" : "未就绪"}</span>
+          </div>
+          <div className="kv">
+            <span>cosyvoice（8003 · 克隆）</span>
+            <span>{props.status.cosyvoice_up ? "运行中" : "未就绪"}</span>
           </div>
           <div className="kv">
             <span>Node</span>

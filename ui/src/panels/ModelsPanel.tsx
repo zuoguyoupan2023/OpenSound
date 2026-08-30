@@ -169,9 +169,11 @@ export default function ModelsPanel(props: PanelProps) {
       const failed = r.items.filter((i) => !i.deleted && i.error);
       const restartNote = r.restarted
         ? "服务已自动重启，其它引擎恢复可用"
-        : r.restart_error
-          ? `自动重启失败：${r.restart_error}（请手动点侧边栏「启动」）`
-          : "服务未运行，未启动";
+        : r.nothing_left
+          ? "已无其它引擎文件，服务保持停止（需要时点侧边栏「启动」重新拉起）"
+          : r.restart_error
+            ? `自动重启失败：${r.restart_error}（请手动点侧边栏「启动」）`
+            : "服务未运行，未启动";
       setProgress((prev) => [
         ...prev,
         { type: "log", message: `已删除 ${deleted.length} 项（模型文件 + 运行环境）` },
@@ -316,10 +318,12 @@ export default function ModelsPanel(props: PanelProps) {
           const busyHere = installing === m.engine;
           // 030 启动中判定：文件就绪（state=ready）但服务应启动未 running → 冷启动加载中；
           // 节能模式下未选择的大模型 → 「未启用」而非缺文件/启动中
+          // 2026-08-31：节能模式 8B 也禁用 → llm-qwen3-8b 列入大引擎表（ecoBig 不再含 8b，节能下恒未启用）
           const BIG_ENGINE_KEY: Record<string, string> = {
             qwen3: "qwen3",
             "cosyvoice-clone": "cosyvoice",
             "sensevoice-original": "sensevoice-original",
+            "llm-qwen3-8b": "llm-qwen3-8b",
           };
           const ecoBigKey = BIG_ENGINE_KEY[m.engine];
           const pm = getPersistedSettings();

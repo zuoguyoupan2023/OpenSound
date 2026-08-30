@@ -771,6 +771,8 @@ const TTS_ENGINES = {
 // ---------- LLM：node-llama-cpp 内嵌（单进程自控，引擎可插拔） ----------
 // 抽象层 /chat 支持两种引擎：llama-cpp（内嵌默认）/ ollama（转发，后备，需 ollama serve）
 const LLM_DIR = path.join(CACHE_DIR, 'llm');
+// 2026-08-31：节能模式禁用 8B（Rust start_service 注入 OPENSOUND_SKIP_LLM_8B=1）——见 llmChat 拦截
+const SKIP_LLM_8B = ['1', 'true', 'yes'].includes(String(process.env.OPENSOUND_SKIP_LLM_8B || '').toLowerCase());
 // 默认 LLM 模型（env LLM_MODEL 可覆盖为具体 gguf 文件名/路径）
 const LLM_MODEL = process.env.LLM_MODEL || path.join(LLM_DIR, 'qwen2.5-0.5b-instruct-q4_k_m.gguf');
 // 可选 LLM 档位注册表（key → 下载信息）；前端模型管理 UI 据此展示/安装
@@ -920,7 +922,17 @@ async function chatCloud(engine, messages, opts = {}) {
 
 async function llmChat(engine, messages, opts = {}) {
   const e = (engine || 'llama-cpp').toLowerCase();
-  if (e === 'llama-cpp') return chatLlamaCpp(messages, opts);
+  if (e === 'llama-cpp') {
+    // 2026-08-31 决策：节能模式（OPENSOUND_SKIP_LLM_8B=1，Rust 注入）下 8B 禁用——双保险，
+    // 即使前端未隐藏选项，后端也拒绝 8B 加载（8B 占 6–8GB 内存，节能模式不常驻大模型）。
+    if (SKIP_LLM_8B) {
+      const m = opts.model ? String(opts.model) : '';
+      if (m === 'llm-qwen3-8b' || m === 'Qwen3-8B-Q4_K_M.gguf') {
+        throw new Error('节能模式下 Qwen3-8B 已禁用（6–8GB 内存）。请用默认 0.5B 对话，或在设置页切回全能模式。');
+      }
+    }
+    return chatLlamaCpp(messages, opts);
+  }
   if (e === 'ollama') return chatOllama(messages, opts);
   if (CLOUD_ENGINES[e]) return chatCloud(e, messages, opts);
   throw new Error('未知 LLM 引擎: ' + e + '（支持 llama-cpp / ollama / deepseek / zhipu）');
