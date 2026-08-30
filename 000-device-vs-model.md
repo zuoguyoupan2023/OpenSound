@@ -41,7 +41,7 @@
 | 模型 | 磁盘体积 | 内存/显存需求 | 硬件底线 | 体验预期 | 项目状态 |
 | --- | --- | --- | --- | --- | --- |
 | SenseVoice sherpa 量化版 | ~228–239MB | 几百 MB RAM | 任何设备含入门档 | CPU 实时率<0.1，即说即出 | ✅ 默认引擎 |
-| SenseVoice funasr 原始版 | ~897MB | ~1.5GB RAM | 入门档可用 | 高精度档 | ✅ 已装 |
+| SenseVoice funasr 原始版 | ~2.1GB（900MB 主模型 + VAD + 标点） | ~1.5GB RAM | 入门档可用 | 高精度档 | ✅ 已装（055） |
 | Whisper base (transformers.js) | 75–500MB | 浏览器内运行 | 入门档 | 兜底质量 | ✅ 已装 |
 | whisper large-v3 (whisper.cpp GGUF) | ~3GB | Metal/CUDA 加速后流畅；CPU 慢 | 标准档起 | 多语兜底 CER 9.86 | 🔶 待接入 |
 | faster-whisper large-v3 int8 | ~1.6GB 盘 / ~3GB 显存 | N 卡 int8 后轻松同驻 | 标准档（N 卡） | 原版 4 倍速 | 🔶 自托管档 |

@@ -2,22 +2,31 @@
   "id": "sensevoice-original",
   "category": "asr",
   "label": "SenseVoice 原始版（funasr · 高精度）",
-  "sizeHint": "~900MB + VAD/标点辅助包",
+  "sizeHint": "~2.1GB（900MB 主模型 + VAD + 标点辅助）",
   "license": "Apache-2.0（ModelSense SenseVoiceSmall）",
-  "profile": { "diskGB": 0.9, "memNeedGB": 1.5, "accel": "any", "tierRequired": "entry" },
+  "profile": { "diskGB": 2.2, "memNeedGB": 1.5, "accel": "any", "tierRequired": "entry" },
   "checks": [
     { "type": "file", "path": "models/sensevoice-original/model.pt", "bytes": 936291369 },
     { "type": "file", "path": "models/sensevoice-original/config.yaml" },
     { "type": "file", "path": "models/sensevoice-original/am.mvn" },
     { "type": "file", "path": "models/sensevoice-original/chn_jpn_yue_eng_ko_spectok.bpe.model" },
-    { "type": "dir", "path": "models/fsmn-vad", "minFiles": 4, "note": "VAD 过滤静音辅助模型（ModelScope speech_fsmn_vad_zh-cn-16k-common-pytorch：model.pt/config.yaml/am.mvn/configuration.json 共 4 个，与 download-all-models.ps1 对齐）" },
-    { "type": "dir", "path": "models/punc-cn-en", "minFiles": 6, "note": "标点辅助；⚠️ 权重文件构成待查（.mdl 指针按需拉取），S2 验收项" }
+    { "type": "file", "path": "models/sensevoice-original/tokens.json", "bytes": 352064, "note": "富文本/情感标签 tokenizer 用（与 download-all-models.ps1 同源）" },
+    { "type": "file", "path": "models/fsmn-vad/model.pt", "bytes": 1721366, "note": "VAD 过滤静音辅助（ModelScope speech_fsmn_vad_zh-cn-16k-common-pytorch）" },
+    { "type": "file", "path": "models/fsmn-vad/config.yaml", "bytes": 1215 },
+    { "type": "file", "path": "models/fsmn-vad/am.mvn", "bytes": 8040 },
+    { "type": "file", "path": "models/fsmn-vad/configuration.json", "bytes": 365 },
+    { "type": "file", "path": "models/punc-cn-en/model.pt", "bytes": 1125507622, "note": "标点辅助，构成已查清（055 S2 验收项）：ModelScope punc_ct-transformer_cn-en-common-vocab471067-large 共 6 个，与 download-all-models.ps1 对齐" },
+    { "type": "file", "path": "models/punc-cn-en/config.yaml", "bytes": 812 },
+    { "type": "file", "path": "models/punc-cn-en/configuration.json", "bytes": 450 },
+    { "type": "file", "path": "models/punc-cn-en/tokens.json", "bytes": 8280697 },
+    { "type": "file", "path": "models/punc-cn-en/jieba.c.dict", "bytes": 41536866 },
+    { "type": "file", "path": "models/punc-cn-en/jieba_usr_dict", "bytes": 11280857 }
   ],
   "runtime": [
     { "kind": "path", "path": ".venv-funasr/bin/python3", "label": "受管 venv：数据目录 venvs/.venv-funasr（034 阶段3 uv 自举创建；复用系统 torch/funasr 可 --system-site-packages）" }
   ],
   "install": {
     "kind": "env",
-    "message": "SenseVoice 原始版：① 安装引擎环境（.venv-funasr，含 funasr/torch，约 2.5GB）点「检测/修复」+ 二次确认；② 权重已本地化于 models/sensevoice-original，装完重启服务即可用。"
+    "message": "SenseVoice 原始版：① 安装引擎环境（.venv-funasr，含 funasr/torch/numpy/soundfile，约 2.5GB）点「检测/修复」+ 二次确认；② 模型权重三件套（主模型 ~900MB + fsmn-vad + punc-cn-en，合计约 2.1GB）二次确认后自动下载到 models/（ModelScope 多镜像 + 断点续传 + 字节校验）；装完重启服务即可用。"
   }
 }

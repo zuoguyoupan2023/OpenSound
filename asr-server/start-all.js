@@ -94,7 +94,7 @@ const SKIP_COSYVOICE = ['1', 'true', 'yes'].includes(String(process.env.OPENSOUN
 const SKIP_SENSE_ORIGINAL = ['1', 'true', 'yes'].includes(String(process.env.OPENSOUND_SKIP_SENSEVOICE_ORIGINAL || '').toLowerCase());
 // 期望的 asr-server 架构版本（须与 asr-server.js 的 SERVER_VERSION 一致）：
 // 若 9528 上的服务 version 与之不符 → 判定为旧进程残留 → 终止后重启。
-const EXPECTED_VERSION = '2.6.0';
+const EXPECTED_VERSION = '2.7.0';
 
 function run(cmd, args, name, env = {}) {
   const p = spawn(cmd, args, { stdio: 'inherit', cwd: __dirname, env: { ...process.env, ...MANAGED_ENV, ...env } });
@@ -224,7 +224,18 @@ if (SKIP_SENSE_ORIGINAL) {
 } else {
   // S6：优先受管 venv .venv-funasr（与 qwen3/cosyvoice 同模式，复用系统 funasr/torch，零下载）；
   // 用户显式指定 PY_SYS 视为高级覆盖；都没有 → 给出一条可复制的自举命令，不自动联网安装。
-  const funasrPy = existsSync(PY_FUNASR) ? PY_FUNASR : (process.env.PY_SYS || null);
+  // 055 坑3 守卫（Win 实测隐患）：.venv-funasr 缺失时若回退系统 python，先探针 `import funasr, numpy`——
+  // 本机系统 python 常无 funasr（035 实测 8002 因缺 numpy 秒退同款），直接拉起只会让 8002 崩刷错误。
+  let funasrPy = existsSync(PY_FUNASR) ? PY_FUNASR : null;
+  if (!funasrPy && process.env.PY_SYS) {
+    try {
+      execSync(`${JSON.stringify(process.env.PY_SYS)} -c "import funasr, numpy"`, { stdio: 'ignore', timeout: 20000 });
+      funasrPy = process.env.PY_SYS;
+      console.log(`[start-all] 系统 python 含 funasr/numpy（${process.env.PY_SYS}），作为 sensevoice-original 回退环境`);
+    } catch {
+      console.error(`[start-all] 系统 python（${process.env.PY_SYS}）缺 funasr/numpy，不回退（避免 8002 秒退）；请在 App 模型页安装引擎环境`);
+    }
+  }
   if (funasrPy) {
     console.log(`[start-all] 启动 sensevoice-original（funasr 原始版，python=${funasrPy}，加载 ~900MB 模型，较慢）…`);
     run(funasrPy, ['sensevoice-server.py', '--port', '8002'], 'sensevoice-original');

@@ -27,7 +27,7 @@ const MODEL_SIZE = process.env.ASR_MODEL_SIZE || 'base'; // tiny | base | small 
 const ASR_ENGINE = (process.env.ASR_ENGINE || 'auto').toLowerCase(); // auto | sensevoice | whisper —— 选择默认识别模型
 // asr-server 架构版本：2.x = 含 sensevoice-original + VAD + 标点。
 // 供 start-all.js 探测时判断 9528 上是否旧进程（旧代码无此字段/不同版本 → 视为残留，终止后重启）。
-const SERVER_VERSION = '2.6.0'; // 2.4.0 = S4：cosyvoice-clone 全自举链；2.5.0 = S5：缺失权重自动下载；2.6.0 = S7：安全加固（仅本机回环 + 入站鉴权）
+const SERVER_VERSION = '2.7.0'; // 2.4.0 = S4：cosyvoice-clone 全自举链；2.5.0 = S5：缺失权重自动下载；2.6.0 = S7：安全加固（仅本机回环 + 入站鉴权）；2.7.0 = S8：sensevoice-original 模型下载闭环（二段式安装器：venv + 模型三件套）
 // 031 跨平台：Win venv 可执行在 Scripts/ 而非 bin/（engineReadiness 的 runtime 检查据此判定）
 const IS_WIN = process.platform === 'win32';
 // 034 阶段3：uv 自举的受管 venv 落数据目录 venvs/（032 L3），引擎清单的 runtime.path 按此双位置判定：
@@ -1640,6 +1640,109 @@ function qwen3ModelInstaller(venvInst) {
   };
 }
 
+// 055 §三 第3步：SenseVoice 原始版模型三件套文件清单（字节与 download-all-models.ps1 完全一致，ModelScope 实录）。
+// 镜像：modelscope 首选（ps1 实测可用、支持 Range 206 续传）；sensevoice-original 主模型组另加 hf-mirror 兜底
+// （HF FunAudioLLM/SenseVoiceSmall 官方镜像仓，字节与 ModelScope 一致；fsmn-vad/punc 未核 HF 镜像 → 仅 modelscope）。
+// ⚠️ 新增/改名文件时须同步 engines/sensevoice-original.json 的 checks（engineReadiness 与安装器共用）。
+const SENSEVOICE_ORIGINAL_FILES = [
+  // ---- 主模型（ModelScope iic/SenseVoiceSmall）----
+  { file: 'models/sensevoice-original/model.pt', bytes: 936291369, mirrors: [
+    { name: 'modelscope', url: 'https://modelscope.cn/models/iic/SenseVoiceSmall/resolve/master/model.pt' },
+    { name: 'hf-mirror', url: 'https://hf-mirror.com/FunAudioLLM/SenseVoiceSmall/resolve/main/model.pt' },
+  ] },
+  { file: 'models/sensevoice-original/config.yaml', bytes: 1855, mirrors: [
+    { name: 'modelscope', url: 'https://modelscope.cn/models/iic/SenseVoiceSmall/resolve/master/config.yaml' },
+    { name: 'hf-mirror', url: 'https://hf-mirror.com/FunAudioLLM/SenseVoiceSmall/resolve/main/config.yaml' },
+  ] },
+  { file: 'models/sensevoice-original/am.mvn', bytes: 11203, mirrors: [
+    { name: 'modelscope', url: 'https://modelscope.cn/models/iic/SenseVoiceSmall/resolve/master/am.mvn' },
+    { name: 'hf-mirror', url: 'https://hf-mirror.com/FunAudioLLM/SenseVoiceSmall/resolve/main/am.mvn' },
+  ] },
+  { file: 'models/sensevoice-original/chn_jpn_yue_eng_ko_spectok.bpe.model', bytes: 377341, mirrors: [
+    { name: 'modelscope', url: 'https://modelscope.cn/models/iic/SenseVoiceSmall/resolve/master/chn_jpn_yue_eng_ko_spectok.bpe.model' },
+    { name: 'hf-mirror', url: 'https://hf-mirror.com/FunAudioLLM/SenseVoiceSmall/resolve/main/chn_jpn_yue_eng_ko_spectok.bpe.model' },
+  ] },
+  { file: 'models/sensevoice-original/tokens.json', bytes: 352064, mirrors: [
+    { name: 'modelscope', url: 'https://modelscope.cn/models/iic/SenseVoiceSmall/resolve/master/tokens.json' },
+    { name: 'hf-mirror', url: 'https://hf-mirror.com/FunAudioLLM/SenseVoiceSmall/resolve/main/tokens.json' },
+  ] },
+  // ---- VAD（ModelScope iic/speech_fsmn_vad_zh-cn-16k-common-pytorch）----
+  { file: 'models/fsmn-vad/model.pt', bytes: 1721366, mirrors: [
+    { name: 'modelscope', url: 'https://modelscope.cn/models/iic/speech_fsmn_vad_zh-cn-16k-common-pytorch/resolve/master/model.pt' },
+  ] },
+  { file: 'models/fsmn-vad/config.yaml', bytes: 1215, mirrors: [
+    { name: 'modelscope', url: 'https://modelscope.cn/models/iic/speech_fsmn_vad_zh-cn-16k-common-pytorch/resolve/master/config.yaml' },
+  ] },
+  { file: 'models/fsmn-vad/am.mvn', bytes: 8040, mirrors: [
+    { name: 'modelscope', url: 'https://modelscope.cn/models/iic/speech_fsmn_vad_zh-cn-16k-common-pytorch/resolve/master/am.mvn' },
+  ] },
+  { file: 'models/fsmn-vad/configuration.json', bytes: 365, mirrors: [
+    { name: 'modelscope', url: 'https://modelscope.cn/models/iic/speech_fsmn_vad_zh-cn-16k-common-pytorch/resolve/master/configuration.json' },
+  ] },
+  // ---- 标点（ModelScope iic/punc_ct-transformer_cn-en-common-vocab471067-large）----
+  { file: 'models/punc-cn-en/model.pt', bytes: 1125507622, mirrors: [
+    { name: 'modelscope', url: 'https://modelscope.cn/models/iic/punc_ct-transformer_cn-en-common-vocab471067-large/resolve/master/model.pt' },
+  ] },
+  { file: 'models/punc-cn-en/config.yaml', bytes: 812, mirrors: [
+    { name: 'modelscope', url: 'https://modelscope.cn/models/iic/punc_ct-transformer_cn-en-common-vocab471067-large/resolve/master/config.yaml' },
+  ] },
+  { file: 'models/punc-cn-en/configuration.json', bytes: 450, mirrors: [
+    { name: 'modelscope', url: 'https://modelscope.cn/models/iic/punc_ct-transformer_cn-en-common-vocab471067-large/resolve/master/configuration.json' },
+  ] },
+  { file: 'models/punc-cn-en/tokens.json', bytes: 8280697, mirrors: [
+    { name: 'modelscope', url: 'https://modelscope.cn/models/iic/punc_ct-transformer_cn-en-common-vocab471067-large/resolve/master/tokens.json' },
+  ] },
+  { file: 'models/punc-cn-en/jieba.c.dict', bytes: 41536866, mirrors: [
+    { name: 'modelscope', url: 'https://modelscope.cn/models/iic/punc_ct-transformer_cn-en-common-vocab471067-large/resolve/master/jieba.c.dict' },
+  ] },
+  { file: 'models/punc-cn-en/jieba_usr_dict', bytes: 11280857, mirrors: [
+    { name: 'modelscope', url: 'https://modelscope.cn/models/iic/punc_ct-transformer_cn-en-common-vocab471067-large/resolve/master/jieba_usr_dict' },
+  ] },
+];
+
+// 055：SenseVoice 原始版二段式安装器——① 引擎 venv（uvVenvInstaller，含 2.5GB 二次确认）；
+// ② 模型权重三件套（约 2.1GB，downloadOneFile 多镜像 + .part 续传 + 逐文件字节校验，大流量二次确认）。
+// 此前只有 venv 安装器、模型文件无安装器（036 §7.1 待办「模型 900MB 的安装器要接上」）——
+// 装完 venv 后 funasr AutoModel 无权重可加载 → 8002 起不来，本次补齐模型下载闭环。
+function sensevoiceOriginalInstaller(venvInst) {
+  return async (ctx, opts = {}) => {
+    await venvInst(ctx, opts); // ① 引擎环境（未就绪时 uv 安装，含大流量二次确认；就绪则秒过）
+    const mf = ENGINE_MANIFESTS.find((x) => x.id === 'sensevoice-original');
+    const missing = (mf?.checks || []).map(checkEntry).filter(Boolean);
+    if (!missing.length) {
+      ctx.nd({ type: 'log', message: 'SenseVoice 原始版模型文件完整 ✓（sensevoice-original + fsmn-vad + punc-cn-en）' });
+      ctx.nd({ type: 'done', message: '引擎环境与模型均已就绪' });
+      return;
+    }
+    const totalBytes = missing.reduce((s, r) => s + (r.expectBytes || 0), 0);
+    const gb = (totalBytes / 1e9).toFixed(1);
+    ctx.nd({ type: 'log', message: `SenseVoice 原始版模型缺失 ${missing.length} 项（约 ${gb}GB，主模型+VAD+标点）→ 需二次确认下载…` });
+    if (!opts.confirmBigDownload) {
+      throw new Error(`BIG_DOWNLOAD_CONFIRM:${gb}GB:sensevoice-original-model`);
+    }
+    ctx.nd({ type: 'log', message: '已确认，开始下载模型（modelscope 首选 + hf-mirror 兜底，断点续传）…' });
+    for (const spec of SENSEVOICE_ORIGINAL_FILES) {
+      const t = resolveData(spec.file);
+      if (existsSync(t) && statSync(t).size === spec.bytes) {
+        ctx.nd({ type: 'log', message: `已存在且完整，跳过：${spec.file}` });
+        continue;
+      }
+      await downloadOneFile(spec, ctx, opts);
+      const got = statSync(t).size;
+      if (got !== spec.bytes) {
+        throw new Error(`大小不符：${spec.file} 期望 ${spec.bytes} / 实际 ${got}。已保留 .part，可重试或删除后重新安装。`);
+      }
+      ctx.nd({ type: 'log', message: `✓ 字节数校验通过：${spec.file}（${fmtMB(got)}）` });
+    }
+    const after = (mf?.checks || []).map(checkEntry).filter(Boolean);
+    if (after.length) {
+      throw new Error('模型下载后仍未就绪：' + after.map((r) => r.path).join('、') + '，查看上方日志');
+    }
+    ctx.nd({ type: 'log', message: 'SenseVoice 原始版模型就绪 ✓，重启服务后引擎可用' });
+    ctx.nd({ type: 'done', message: '模型就绪，重启服务后生效' });
+  };
+}
+
 // ─────────────────────────────────────────────────────────────
 // 【新增模型接入约定 · 必读】（S5 起，本区域顶部常驻）
 // 未来在 INSTALLERS 里注册任何新模型/引擎时，都必须做到"开箱即用"：
@@ -1670,14 +1773,17 @@ const INSTALLERS = {
     label: 'Qwen3-TTS',
     estGB: 2.5,
   })),
-  // 034 阶段3：sensevoice-original（funasr）引擎环境——此前无安装器，点「检测/修复」直接 400；现在有真安装器
-  'sensevoice-original': uvVenvInstaller({
+  // 034/055：sensevoice-original（funasr）二段式安装器：
+  // ① 引擎 venv（uvVenvInstaller：funasr/torch/torchaudio + 显式 numpy/soundfile —— 055 坑3/坑4：
+  //    035 实测 .venv-funasr 空壳缺 numpy → 8002 秒退 No module named 'numpy'；torchaudio 无后端 → 预装 soundfile）；
+  // ② 模型权重三件套（主模型 ~900MB + fsmn-vad + punc-cn-en，合计约 2.1GB，见 sensevoiceOriginalInstaller）。
+  'sensevoice-original': sensevoiceOriginalInstaller(uvVenvInstaller({
     name: '.venv-funasr',
-    pkgs: ['funasr', 'torch', 'torchaudio'],
+    pkgs: ['funasr', 'torch', 'torchaudio', 'numpy', 'soundfile'],
     keyPkg: 'funasr',
     label: 'SenseVoice 原始版',
     estGB: 2.5,
-  }),
+  })),
   whisper: (ctx) => ctx.nd({ type: 'done', message: 'Whisper 无独立下载脚本：首次识别时由 transformers.js 自动下载。' }),
   // CosyVoice3 克隆：双依赖检查——① 9GB 模型（005 手动预下载，缺失时不自动下，避免误触大流量）；
   // ② CosyVoice 源码仓库（cosyvoice 包 + Matcha-TTS 子模块，运行时 import 必需），缺失则自动浅克隆补齐。

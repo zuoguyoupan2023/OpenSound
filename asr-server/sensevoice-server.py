@@ -70,11 +70,31 @@ def vad_segments(samples):
         return []
 
 
+def _ensure_bpe_alias(model_dir):
+    """funasr 本地加载按固定名 bpe.model 补 bpemodel（ModelScope 仓库 bpe 文件名是
+    chn_jpn_yue_eng_ko_spectok.bpe.model，且 config.yaml 里 tokenizer_conf.bpemodel: null ——
+    缺别名时 SentencepiecesTokenizer 会 sp.load("None") → RuntimeError: NOT_FOUND: "None"，
+    8002 直接起不来）。已存在 bpe.model 或目录无 *.bpe.model 时跳过。"""
+    target = os.path.join(model_dir, 'bpe.model')
+    if os.path.exists(target):
+        return
+    for f in os.listdir(model_dir):
+        if f.endswith('.bpe.model'):
+            try:
+                import shutil
+                shutil.copyfile(os.path.join(model_dir, f), target)
+                print(f'[sensevoice-server] 已生成 bpe.model 别名（来源 {f}）', flush=True)
+            except Exception as e:  # noqa: BLE001
+                print(f'[sensevoice-server] 生成 bpe.model 别名失败: {e}', flush=True)
+            return
+
+
 def load_model(path, device):
     global _model
     if _model is not None:
         return _model
     from funasr import AutoModel
+    _ensure_bpe_alias(path)  # 实测必需：SenseVoiceSmall 本地加载 bpemodel 补全
     _model = AutoModel(
         model=path,
         device=device,
