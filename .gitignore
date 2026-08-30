@@ -6,6 +6,9 @@ models/
 .venv-funasr/
 npm-debug.log*
 
+# ===== 部署工作目录（本地验证临时文件，不提交） =====
+.fireredtts3-work/
+
 # ===== vendor 源码仓库（体积大，安装时 git clone 拉取，不提交） =====
 asr-server/vendor/
 asr-server/models/indextts/
