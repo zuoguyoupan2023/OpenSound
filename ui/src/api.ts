@@ -212,14 +212,18 @@ export async function getDeviceProfile(): Promise<DeviceProfile> {
 }
 
 // ---------- 识别 ASR ----------
-// body 为 WAV/RAW PCM 16kHz 单声道；punct=true 时服务端识别后自动加标点；vad=true 时识别前过滤静音
+// body 为 WAV/RAW PCM 16kHz 单声道；punct=true 时服务端识别后自动加标点；vad=true 时识别前过滤静音；
+// lang 仅 whisper 生效（S11：'' = 自动检测；指定如 'zh'/'fr' 则按该语言识别，非法码服务端回退自动检测）
 export async function transcribe(
   wav: Blob,
   engine: string = "auto",
   punct: boolean = true,
-  vad: boolean = true
+  vad: boolean = true,
+  lang: string = ""
 ): Promise<{ text: string; engine: string }> {
-  const q = `/transcribe?engine=${encodeURIComponent(engine)}&punct=${punct ? "1" : "0"}&vad=${vad ? "1" : "0"}`;
+  const q = `/transcribe?engine=${encodeURIComponent(engine)}&punct=${punct ? "1" : "0"}&vad=${vad ? "1" : "0"}${
+    lang ? `&lang=${encodeURIComponent(lang)}` : ""
+  }`;
   const res = await fetch(
     `${getBaseUrl()}${q}`,
     authHeaders({

@@ -2,17 +2,45 @@
   "id": "whisper",
   "category": "asr",
   "label": "Whisper base（多语兜底）",
-  "sizeHint": "~150MB（q8，随 MODEL_SIZE 档位变化）",
-  "license": "MIT（OpenAI Whisper，onnx-community 转换版）",
-  "profile": { "diskGB": 0.5, "memNeedGB": null, "accel": "any", "tierRequired": "entry" },
+  "sizeHint": "~280MB（fp32 全精度，sherpa-onnx 导出版）",
+  "license": "MIT（OpenAI Whisper，sherpa-onnx 导出版）",
+  "profile": { "diskGB": 0.3, "memNeedGB": null, "accel": "any", "tierRequired": "entry" },
   "checks": [
-    { "type": "glob", "pattern": "models/hf/onnx-community/whisper-*" }
+    { "type": "file", "path": "models/sherpa-whisper/base-encoder.onnx", "bytes": 95087154, "note": "sherpa-onnx 官方导出（csukuangfj/sherpa-onnx-whisper-base，多语版 base，fp32）" },
+    { "type": "file", "path": "models/sherpa-whisper/base-decoder.onnx", "bytes": 196548998 },
+    { "type": "file", "path": "models/sherpa-whisper/base-tokens.txt", "bytes": 816730 }
   ],
   "runtime": [
-    { "kind": "path", "path": "node_modules/@huggingface/transformers/package.json", "label": "npm: @huggingface/transformers" }
+    { "kind": "path", "path": "node_modules/sherpa-onnx-node/package.json", "label": "npm: sherpa-onnx-node（与 SenseVoice 共用一套原生运行时，杜绝 onnxruntime DLL 冲突）" }
   ],
   "install": {
-    "kind": "hint",
-    "message": "Whisper 无独立下载脚本：首次识别时由 transformers.js 自动下载到 models/hf/（S1 已统一落盘）。"
+    "kind": "url-multi",
+    "files": [
+      {
+        "file": "models/sherpa-whisper/base-encoder.onnx",
+        "bytes": 95087154,
+        "mirrors": [
+          { "name": "hf-mirror", "url": "https://hf-mirror.com/csukuangfj/sherpa-onnx-whisper-base/resolve/main/base-encoder.onnx" },
+          { "name": "huggingface", "url": "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-base/resolve/main/base-encoder.onnx" }
+        ]
+      },
+      {
+        "file": "models/sherpa-whisper/base-decoder.onnx",
+        "bytes": 196548998,
+        "mirrors": [
+          { "name": "hf-mirror", "url": "https://hf-mirror.com/csukuangfj/sherpa-onnx-whisper-base/resolve/main/base-decoder.onnx" },
+          { "name": "huggingface", "url": "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-base/resolve/main/base-decoder.onnx" }
+        ]
+      },
+      {
+        "file": "models/sherpa-whisper/base-tokens.txt",
+        "bytes": 816730,
+        "mirrors": [
+          { "name": "hf-mirror", "url": "https://hf-mirror.com/csukuangfj/sherpa-onnx-whisper-base/resolve/main/base-tokens.txt" },
+          { "name": "huggingface", "url": "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-base/resolve/main/base-tokens.txt" }
+        ]
+      }
+    ],
+    "message": "Whisper base（sherpa 版）：点「补齐」= 下载 fp32 三件套（encoder 91MB + decoder 187MB + tokens 0.8MB，hf-mirror 多镜像 + 断点续传 + 字节校验）。语言可配：识别面板选引擎 Whisper 后可在「Whisper 语言」下拉指定语言（默认自动检测，已实测中文录音出中文）。"
   }
 }

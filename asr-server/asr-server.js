@@ -6,7 +6,8 @@
 //
 // 启动：cd asr-server && npm install && node asr-server.js [--port 9528]
 // 接口：
-//   POST /transcribe?engine=whisper|sensevoice   body = WAV/RAW PCM 音频 → { text, engine }
+//   POST /transcribe?engine=whisper|sensevoice&lang=zh   body = WAV/RAW PCM 音频 → { text, engine }
+//     其中 lang 仅 whisper 生效（'' = 自动检测；优先级 ?lang= > ASR_WHISPER_LANG > ''；非法码回退自动检测）
 //   POST /speak?engine=kokoro|qwen3             body = JSON { text, sid, speed, voice, language } → 帧流（octet-stream，每帧=4字节大端长度+WAV，逐句流式）
 //   GET  /models → { models: [{category, engine, label, size, installed}] }
 //   POST /install-model?engine=kokoro|sensevoice|llm|qwen3|whisper → NDJSON 安装进度
@@ -23,11 +24,12 @@ import { buildDeviceProfile } from './device-profile.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = parsePort(process.argv);
-const MODEL_SIZE = process.env.ASR_MODEL_SIZE || 'base'; // tiny | base | small | medium（whisper 兜底档位）
 const ASR_ENGINE = (process.env.ASR_ENGINE || 'auto').toLowerCase(); // auto | sensevoice | whisper —— 选择默认识别模型
+// S11：Whisper 指定语言的默认值（环境变量）；优先级：请求参数 ?lang= > ASR_WHISPER_LANG > ''（自动检测）
+const ASR_WHISPER_LANG = (process.env.ASR_WHISPER_LANG || '').toLowerCase().trim();
 // asr-server 架构版本：2.x = 含 sensevoice-original + VAD + 标点。
 // 供 start-all.js 探测时判断 9528 上是否旧进程（旧代码无此字段/不同版本 → 视为残留，终止后重启）。
-const SERVER_VERSION = '2.7.0'; // 2.4.0 = S4：cosyvoice-clone 全自举链；2.5.0 = S5：缺失权重自动下载；2.6.0 = S7：安全加固（仅本机回环 + 入站鉴权）；2.7.0 = S8：sensevoice-original 模型下载闭环（二段式安装器：venv + 模型三件套）
+const SERVER_VERSION = '2.10.0'; // 2.4.0 = S4：cosyvoice-clone 全自举链；2.5.0 = S5：缺失权重自动下载；2.6.0 = S7：安全加固（仅本机回环 + 入站鉴权）；2.7.0 = S8：sensevoice-original 模型下载闭环（二段式安装器：venv + 模型三件套）；2.8.0 = S9：056 Whisper 补齐安装器 + glob 检查跨平台修复（坑 U）+ mac site-packages 路径修复（坑 W）；2.9.0 = S10：Whisper 引擎换 sherpa-onnx（fp32 全精度 + 语言自动检测；与 SenseVoice 共用一套原生运行时，根治 onnxruntime-node DLL 冲突）；2.10.0 = S11：Whisper 指定语言配置（?lang= / ASR_WHISPER_LANG / 按语言识别器 Map 缓存 LRU≤3，非法语言回退自动检测不崩）
 // 031 跨平台：Win venv 可执行在 Scripts/ 而非 bin/（engineReadiness 的 runtime 检查据此判定）
 const IS_WIN = process.platform === 'win32';
 // 034 阶段3：uv 自举的受管 venv 落数据目录 venvs/（032 L3），引擎清单的 runtime.path 按此双位置判定：
@@ -45,7 +47,9 @@ function runtimePathExists(p) {
 }
 // 安全加固（S7）：入站鉴权 token —— Tauri 宿主注入；为空（手动 npm start 调试）时不校验
 const OPENSOUND_TOKEN = process.env.OPENSOUND_TOKEN || '';
-const WHISPER_MODEL = `onnx-community/whisper-${MODEL_SIZE}`;
+// S10：Whisper 用 sherpa-onnx 引擎（与 SenseVoice 共用同一套原生运行时，杜绝 onnxruntime-node DLL 冲突）。
+// 模型固定 base（fp32 全精度，sherpa 官方导出）。S11：语言可配——?lang= > ASR_WHISPER_LANG 环境变量 > ''（自动检测，已实测中文录音出中文）。
+// 路径常量见 CACHE_DIR 定义之后（SHERPA_WHISPER_DIR / WHISPER_FILES / WHISPER_LANGUAGES）。
 
 // 032 P3：数据目录 env 化——模型/缓存/音色等"用户数据"从 OPENSOUND_DATA_DIR 派生，
 // 不再写死在代码目录（asr-server 回归"代码"职责）；未设置（手动启动/老版本）时回退 __dirname。
@@ -59,6 +63,25 @@ function resolveData(p) {
 // 模型缓存目录（模型/权重统一落盘 <数据目录>/models）
 const CACHE_DIR = path.join(DATA_DIR, 'models');
 mkdirSync(CACHE_DIR, { recursive: true });
+
+// S10：Whisper（sherpa 版）模型目录与文件（fp32 全精度，官方导出；与 checks/安装器一致）
+const SHERPA_WHISPER_DIR = path.join(CACHE_DIR, 'sherpa-whisper');
+const WHISPER_FILES = ['base-encoder.onnx', 'base-decoder.onnx', 'base-tokens.txt'];
+
+// S11：Whisper 语言白名单——sherpa-onnx whisper 与 OpenAI Whisper tokenizer 同源的 99 语言代码
+// （对应加载日志 all_language_codes）。空串 = 自动检测；'auto' 等非法码一律回退自动检测（不崩，坑预案 1）。
+const WHISPER_LANGUAGES = new Set([
+  'en','zh','de','es','ru','ko','fr','ja','pt','tr','pl','ca','nl','ar','sv','it','id','hi','fi','vi',
+  'he','uk','el','ms','cs','ro','da','hu','ta','no','th','ur','hr','bg','lt','la','mi','ml','cy','sk',
+  'te','fa','lv','bn','sr','az','sl','kn','et','mk','br','eu','is','hy','ne','mn','bs','kk','sq','sw',
+  'gl','mr','pa','si','km','sn','yo','so','af','oc','ka','be','tg','sd','gu','am','yi','lo','uz','fo',
+  'ht','ps','tk','nn','mt','sa','lb','my','bo','tl','mg','as','tt','haw','ln','ha','ba','jw','su'
+]);
+// 规范化 + 白名单校验：非法（含 'auto'、空、未知码）→ ''（自动检测）
+function normalizeWhisperLang(lang) {
+  const l = String(lang || '').toLowerCase().trim();
+  return WHISPER_LANGUAGES.has(l) ? l : '';
+}
 
 const SENSEVOICE_MODEL = path.join(CACHE_DIR, 'sensevoice/model.int8.onnx');
 const SENSEVOICE_TOKENS = path.join(CACHE_DIR, 'sensevoice/tokens.txt');
@@ -177,20 +200,52 @@ function resampleTo16kMono(samples, rate, channels) {
   return out;
 }
 
-// ---------- Whisper（transformers.js node） ----------
-let whisperPipe = null;
-async function getWhisper() {
-  if (whisperPipe) return whisperPipe;
-  log('加载 Whisper(' + MODEL_SIZE + ', q8)…（首次会从 hf-mirror 下载模型，较慢）');
-  const { pipeline, env } = await import('@huggingface/transformers');
-  env.allowRemoteModels = true;
-  env.allowLocalModels = true;
-  env.remoteHost = 'https://hf-mirror.com/'; // 国内可达
-  env.cacheDir = path.join(CACHE_DIR, 'hf');
-  const p = await pipeline('automatic-speech-recognition', WHISPER_MODEL, { dtype: 'q8' });
-  whisperPipe = p;
-  log('Whisper 就绪');
-  return p;
+// ---------- Whisper（sherpa-onnx，S10：与 SenseVoice 共用同一套原生运行时） ----------
+// S11：识别器按语言缓存 Map<lang, rec>——查证 sherpa-onnx-node 1.13.4：OfflineWhisperModelConfig.language
+// 是创建期配置，实例仅有语义未文档化的 setConfig（不保证重建生效），故语言必须烘焙进创建配置、按语言建识别器。
+// LRU 上限 3：防止"多语言都试过"时识别器常驻内存膨胀（每个约 300–400MB）；超限淘汰最久未用（再次使用重载 1–2s）。
+const whisperRecs = new Map(); // key = 规范化语言码（'' = 自动检测）
+const WHISPER_MAX_CACHED = 3;
+async function getWhisper(lang) {
+  const key = normalizeWhisperLang(lang);
+  const cached = whisperRecs.get(key);
+  if (cached) {
+    // LRU：访问即置顶（Map 迭代序 = 插入序，删除再插入 = 移到末尾）
+    whisperRecs.delete(key);
+    whisperRecs.set(key, cached);
+    return cached;
+  }
+  log(`加载 Whisper(base, fp32)（sherpa-onnx${key ? '，语言=' + key : '，语言自动检测'}）…`);
+  let sherpa;
+  try { sherpa = (await import('sherpa-onnx')).default; } catch (e) {
+    throw new Error('未安装 sherpa-onnx，请 cd asr-server && npm i sherpa-onnx');
+  }
+  const missing = WHISPER_FILES.filter((f) => !existsSync(path.join(SHERPA_WHISPER_DIR, f)));
+  if (missing.length) {
+    throw new Error('Whisper 模型缺失：' + SHERPA_WHISPER_DIR + '（缺 ' + missing.join('、') + '）\n请在模型页点「补齐」下载');
+  }
+  const rec = sherpa.createOfflineRecognizer({
+    modelConfig: {
+      whisper: {
+        encoder: path.join(SHERPA_WHISPER_DIR, 'base-encoder.onnx'),
+        decoder: path.join(SHERPA_WHISPER_DIR, 'base-decoder.onnx'),
+        language: key, // S11：指定语言；'' = 自动检测（S10 已实测：中文录音出中文）；'auto' 会崩 → 已由白名单回退
+        task: 'transcribe',
+        tailPaddings: -1,
+      },
+      tokens: path.join(SHERPA_WHISPER_DIR, 'base-tokens.txt'),
+      numThreads: 2,
+      provider: 'cpu',
+    }
+  });
+  whisperRecs.set(key, rec);
+  if (whisperRecs.size > WHISPER_MAX_CACHED) {
+    const oldest = whisperRecs.keys().next().value;
+    whisperRecs.delete(oldest);
+    log(`Whisper 识别器缓存超限（>${WHISPER_MAX_CACHED}），已淘汰语言「${oldest || '自动检测'}」（下次使用需重新加载 1–2s）`);
+  }
+  log('Whisper 就绪' + (key ? '（语言=' + key + '）' : ''));
+  return rec;
 }
 
 // ---------- SenseVoice（sherpa-onnx 原生，可选） ----------
@@ -886,11 +941,11 @@ async function checkOllama() {
 }
 
 // ---------- 模型清单与安装（014 §5.2：/models + /install-model，服务端按名拉取） ----------
-// whisper 由 transformers.js 缓存到 models/hf/onnx-community/whisper-*（S2：与 engines/whisper.json 的 glob 校验同一路径）
+// S10：whisper 由 sherpa-onnx 加载 models/sherpa-whisper/ 三件套（与 engines/whisper.json 的 checks 同一路径与字节）
 function whisperInstalled() {
-  const base = path.join(CACHE_DIR, 'hf', 'onnx-community');
-  if (!existsSync(base)) return false;
-  try { return readdirSync(base).some((n) => n.includes('whisper')); } catch { return false; }
+  try {
+    return WHISPER_FILES.every((f) => existsSync(path.join(SHERPA_WHISPER_DIR, f)));
+  } catch { return false; }
 }
 
 const MODEL_ITEMS = [
@@ -899,7 +954,7 @@ const MODEL_ITEMS = [
   { category: 'tts', engine: 'cosyvoice-clone', label: 'CosyVoice3 语音克隆（0.5B · MPS）', size: '~9.1GB', installed: async () => (await checkCosyvoice()) === 'reachable' },
   { category: 'asr', engine: 'sensevoice', label: 'SenseVoice（中文/粤/日/韩最优）', size: '~228MB', installed: () => existsSync(SENSEVOICE_MODEL) },
   { category: 'asr', engine: 'sensevoice-original', label: 'SenseVoice 原始版（funasr · 高精度）', size: '~900MB', installed: async () => (await checkSenseVoiceOriginal()) === 'reachable' },
-  { category: 'asr', engine: 'whisper',    label: 'Whisper base（多语兜底）',        size: '~500MB', installed: () => whisperInstalled() },
+  { category: 'asr', engine: 'whisper',    label: 'Whisper base（多语兜底）',        size: '~280MB', installed: () => whisperInstalled() },
   { category: 'llm', engine: 'llm-0.5b',   label: 'Qwen2.5-0.5B-Instruct（默认 · 兜底）', size: '~469MB', installed: () => llmReady('llm-0.5b') },
   { category: 'llm', engine: 'llm-qwen3-8b', label: 'Qwen3-8B Q4_K_M（推荐 · 对话更强）', size: '~4.9GB', installed: () => llmReady('llm-qwen3-8b') },
 ];
@@ -985,9 +1040,11 @@ try {
   console.error('[device-profile] 设备探测失败（/device-profile 将返回 503）:', e.message);
 }
 
-// 最小 glob：仅支持「目录/*」一段通配（够 whisper 场景）
+// 最小 glob：仅支持「目录/*」一段通配（够 whisper 场景）。
+// 056 坑 U 修复：必须与 file/dir 型 checkEntry 同一套路径解析（resolveData → 数据目录），
+// 此前 `path.join(__dirname, pattern)` 走代码目录，与 transformers.js 落盘的数据目录不一致 → whisper 永远「无匹配」。
 function globExists(pattern) {
-  const abs = path.join(__dirname, pattern);
+  const abs = resolveData(pattern);
   if (!pattern.includes('*')) return existsSync(abs);
   const sep = abs.lastIndexOf(path.sep, abs.indexOf('*'));
   const baseDir = abs.slice(0, sep);
@@ -1262,7 +1319,8 @@ function downloadOneFile(fileSpec, ctx, opts = {}) {
 function manifestUrlMultiInstaller(mf) {
   return async (ctx, opts = {}) => {
     for (const f of mf.install.files || []) {
-      const target = path.join(__dirname, f.file);
+      // 坑 U 同族（S9 修复）：跳过检查必须与 downloadOneFile 同一套路径解析（resolveData → 数据目录）
+      const target = resolveData(f.file);
       if (existsSync(target)) {
         ctx.nd({ type: 'log', message: `已存在，跳过：${f.file}` });
         continue;
@@ -1358,6 +1416,20 @@ const venvDirOf = (name) => path.join(DATA_DIR, 'venvs', name);
 const venvPyOf = (name) => (IS_WIN
   ? path.join(venvDirOf(name), 'Scripts', 'python.exe')
   : path.join(venvDirOf(name), 'bin', 'python3'));
+// 055 mac 兼容（坑 W）：venv site-packages 路径 Win=`Lib/site-packages`，mac/Linux=`lib/python3.x/site-packages`。
+// uv 受管 CPython 固定 3.11，但按 lib/ 下实际 python3*/site-packages 扫描更稳（版本升级不破）；找不到兜底 3.11。
+function venvSpOf(name) {
+  const vd = venvDirOf(name);
+  if (IS_WIN) return path.join(vd, 'Lib', 'site-packages');
+  const lib = path.join(vd, 'lib');
+  try {
+    for (const d of readdirSync(lib)) {
+      const sp = path.join(lib, d, 'site-packages');
+      if (existsSync(sp)) return sp;
+    }
+  } catch {}
+  return path.join(lib, 'python3.11', 'site-packages');
+}
 // 034 防空壳假就绪：每个 python 引擎的关键依赖包名（engineReadiness 据此判定 venv 是否"真就绪"）
 const VENV_KEY_PKG = {
   'qwen3': 'qwen_tts',
@@ -1368,14 +1440,14 @@ const VENV_KEY_PKG = {
 function venvKeyPkgOk(name, keyPkg) {
   const py = venvPyOf(name);
   if (!existsSync(py)) return false;
-  const sp = path.join(venvDirOf(name), 'Lib', 'site-packages', keyPkg);
+  const sp = path.join(venvSpOf(name), keyPkg);
   return existsSync(sp) && (() => { try { return statSync(sp).isDirectory(); } catch { return false; } })();
 }
 // 2026-08-28：防空壳检查的宽容版（运行时依赖用）——「包目录」或「单文件模块」或「dist-info」任一命中即视为已装。
 // 原因：soundfile 0.14.0 以 soundfile.py 单文件形态安装（无 site-packages/soundfile/ 目录），
 // 纯目录判定会把它误报为缺失（2026-08-28 实测：App 补装后报「仍缺 soundfile」，实际 import 正常）。
 function venvPkgPresent(name, pkg) {
-  const sp = path.join(venvDirOf(name), 'Lib', 'site-packages');
+  const sp = venvSpOf(name);
   try {
     if (existsSync(path.join(sp, pkg)) && statSync(path.join(sp, pkg)).isDirectory()) return true;
     if (existsSync(path.join(sp, pkg + '.py'))) return true;
@@ -1473,7 +1545,7 @@ function torchIndexList() {
 // venv 内 torch 是否为 CPU 版：site-packages 里 torch-*.dist-info 目录名
 //   +cu126/+cu128 等 = CUDA 版；纯版本号或 +cpu = CPU 版（PyPI 默认在 Win 无 CUDA）
 function torchBuildTag(venvName) {
-  const sp = path.join(venvDirOf(venvName), 'Lib', 'site-packages');
+  const sp = venvSpOf(venvName);
   try {
     const d = readdirSync(sp).find((x) => /^torch-\d/.test(x));
     if (!d) return null;
@@ -1784,7 +1856,9 @@ const INSTALLERS = {
     label: 'SenseVoice 原始版',
     estGB: 2.5,
   })),
-  whisper: (ctx) => ctx.nd({ type: 'done', message: 'Whisper 无独立下载脚本：首次识别时由 transformers.js 自动下载。' }),
+  // S10：Whisper 安装器改走 engines/whisper.json 的 url-multi（manifestUrlMultiInstaller 自动注册）——
+  // fp32 三件套（sherpa 官方导出）多镜像下载。此前 transformers.js 预下载脚本（download-whisper.js）已废弃。
+  // （此处不再显式注册 whisper，避免覆盖 json 驱动的 url-multi 安装器）
   // CosyVoice3 克隆：双依赖检查——① 9GB 模型（005 手动预下载，缺失时不自动下，避免误触大流量）；
   // ② CosyVoice 源码仓库（cosyvoice 包 + Matcha-TTS 子模块，运行时 import 必需），缺失则自动浅克隆补齐。
   // 完成后若 8003 未监听，需托盘「重启服务」拉起（模型加载约数分钟）。
@@ -2441,6 +2515,8 @@ const server = http.createServer(async (req, res) => {
   if (!['sensevoice', 'sensevoice-original', 'whisper'].includes(engine)) {
     return send(400, { error: '未知引擎: ' + engine + '（支持 sensevoice / sensevoice-original / whisper）' });
   }
+  // S11：Whisper 指定语言：?lang= > ASR_WHISPER_LANG 环境变量 > ''（自动检测）；非法码已由白名单回退
+  const whisperLang = normalizeWhisperLang(url.searchParams.get('lang') || ASR_WHISPER_LANG);
 
   const chunks = [];
   for await (const c of req) chunks.push(c);
@@ -2468,7 +2544,7 @@ const server = http.createServer(async (req, res) => {
     let text;
     if (engine === 'sensevoice') text = await transcribeSenseVoice(infer);
     else if (engine === 'sensevoice-original') text = await transcribeSenseVoiceOriginal(infer);
-    else text = await whisperTranscribe(infer);
+    else text = await whisperTranscribe(infer, whisperLang);
     const wantPunc = PUNCTUATION && url.searchParams.get('punct') !== '0' || url.searchParams.get('punct') === '1';
     if (wantPunc) text = await punctuate(text);
     send(200, { text, engine, durationSec: Math.round(dur * 10) / 10, rms: Math.round(rms * 10000) / 10000 });
@@ -2478,10 +2554,13 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-async function whisperTranscribe(pcm16) {
-  const p = await getWhisper();
-  const out = await p(pcm16, { return_timestamps: false });
-  return String(out && out.text || '').trim();
+async function whisperTranscribe(pcm16, lang) {
+  const rec = await getWhisper(lang);
+  const stream = rec.createStream();
+  stream.acceptWaveform(16000, pcm16);
+  rec.decode(stream);
+  const res = rec.getResult(stream);
+  return String(res.text || '').trim();
 }
 
 server.listen(PORT, '127.0.0.1', () => log('OpenSound 本地语音服务已启动: http://127.0.0.1:' + PORT + '（仅本机回环；/transcribe 识别，/speak 朗读）'));

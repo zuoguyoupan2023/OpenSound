@@ -94,7 +94,7 @@ const SKIP_COSYVOICE = ['1', 'true', 'yes'].includes(String(process.env.OPENSOUN
 const SKIP_SENSE_ORIGINAL = ['1', 'true', 'yes'].includes(String(process.env.OPENSOUND_SKIP_SENSEVOICE_ORIGINAL || '').toLowerCase());
 // 期望的 asr-server 架构版本（须与 asr-server.js 的 SERVER_VERSION 一致）：
 // 若 9528 上的服务 version 与之不符 → 判定为旧进程残留 → 终止后重启。
-const EXPECTED_VERSION = '2.7.0';
+const EXPECTED_VERSION = '2.10.0';
 
 function run(cmd, args, name, env = {}) {
   const p = spawn(cmd, args, { stdio: 'inherit', cwd: __dirname, env: { ...process.env, ...MANAGED_ENV, ...env } });

@@ -477,6 +477,12 @@ textarea:focus,
   color: var(--muted);
 }
 
+/* S11：Whisper 语言下拉的提示行 */
+.asr-control .whisper-lang .hint {
+  font-size: 11px;
+  opacity: 0.75;
+}
+
 /* ===== 朗读 ===== */
 .toolbar {
   display: flex;

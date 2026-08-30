@@ -9,9 +9,34 @@ import { showToast } from "../toast";
 
 type State = "idle" | "recording" | "processing" | "done";
 
+// S11：Whisper 语言选项（20 项常用；'' = 自动检测。服务端白名单 99 码，非法码回退自动检测）
+const WHISPER_LANG_OPTIONS = [
+  { value: "", label: "自动检测（默认）" },
+  { value: "zh", label: "中文 zh" },
+  { value: "en", label: "英文 en" },
+  { value: "fr", label: "法语 fr" },
+  { value: "ja", label: "日语 ja" },
+  { value: "ko", label: "韩语 ko" },
+  { value: "es", label: "西班牙语 es" },
+  { value: "de", label: "德语 de" },
+  { value: "ru", label: "俄语 ru" },
+  { value: "it", label: "意大利语 it" },
+  { value: "pt", label: "葡萄牙语 pt" },
+  { value: "ar", label: "阿拉伯语 ar" },
+  { value: "th", label: "泰语 th" },
+  { value: "vi", label: "越南语 vi" },
+  { value: "id", label: "印尼语 id" },
+  { value: "tr", label: "土耳其语 tr" },
+  { value: "nl", label: "荷兰语 nl" },
+  { value: "pl", label: "波兰语 pl" },
+  { value: "uk", label: "乌克兰语 uk" },
+  { value: "hi", label: "印地语 hi" },
+];
+
 export default function AsrPanel(props: PanelProps) {
   const [state, setState] = useState<State>("idle");
   const [engine, setEngine] = useState<string>("auto");
+  const [whisperLang, setWhisperLang] = useState<string>("");
   const [punc, setPunc] = useState<boolean>(false);
   const [vad, setVad] = useState<boolean>(false);
   const [text, setText] = useState("");
@@ -65,7 +90,7 @@ export default function AsrPanel(props: PanelProps) {
       recRef.current = null;
       const t0 = Date.now();
       try {
-        const r = await transcribe(wav, engine, punc, vad);
+        const r = await transcribe(wav, engine, punc, vad, engine === "whisper" ? whisperLang : "");
         // 顺手保存录音到音频库（不阻塞）
         saveRecording(wav, engine, r.text, { source: "asr" }).catch((e) =>
           console.error("保存录音失败:", e)
@@ -157,6 +182,13 @@ export default function AsrPanel(props: PanelProps) {
             ]}
           />
         </label>
+        {engine === "whisper" && (
+          <label className="whisper-lang">
+            Whisper 语言
+            <Select value={whisperLang} onChange={setWhisperLang} options={WHISPER_LANG_OPTIONS} />
+            <span className="hint">语言请与所说语言一致（如说法语选「法语 fr」）</span>
+          </label>
+        )}
         <label className="punc-toggle">
           <input
             type="checkbox"

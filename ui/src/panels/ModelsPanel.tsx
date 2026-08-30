@@ -397,7 +397,10 @@ export default function ModelsPanel(props: PanelProps) {
               </div>
 
               <div className="model-action">
-                {/* 035：N 卡 + torch CPU 版 → 升级 GPU 加速（重新装 CUDA torch，走二次确认） */}
+                {/* ── 发布版暂隐藏「升级 GPU 加速」按钮（2026-08-31，055 §五）──
+                    原因：CUDA torch 升级属「优化非必需」，发布前降风险；
+                    后端 gpuUpgrade 标志与 uvVenvInstaller 的 torchCpuHere 分支均保留未删。
+                    恢复方法：取消下方注释块 → 重建 exe（坑 M）→ 模型页按钮回归。
                 {m.gpuUpgrade && !busyHere && (
                   <Button
                     className="gpu-upgrade"
@@ -409,6 +412,7 @@ export default function ModelsPanel(props: PanelProps) {
                     升级 GPU 加速
                   </Button>
                 )}
+                */}
 
                 {/* 镜像切换：仅 url-multi 且未装好时显示 */}
                 {(m.install?.mirrors?.length || 0) > 1 && needFix(m) && (
