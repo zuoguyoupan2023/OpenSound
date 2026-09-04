@@ -46,6 +46,8 @@ const ACCEL_LABEL: Record<string, string> = {
 };
 // 入门档默认推荐的轻量组合（000-device-vs-model.md 4.3-③：SenseVoice + Kokoro + 轻量 LLM）
 const STARTER_ENGINES = ["sensevoice", "kokoro", "llm-0.5b"];
+// 000-plan：torch 系引擎（Python venv + torch）支持 CPU/GPU 版"安装即选择"
+const TORCH_ENGINES = new Set(["qwen3", "cosyvoice-clone", "sensevoice-original"]);
 
 // 五态 → 徽标文案与样式类（P1：unknown = 服务未启动时的本地清单占位）
 const STATE_META: Record<string, { label: string; cls: string; icon: string }> = {
@@ -97,7 +99,7 @@ export default function ModelsPanel(props: PanelProps) {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
   }, [progress.length]);
 
-  const install = async (m: ModelInfo, confirmBigDownload = false) => {
+  const install = async (m: ModelInfo, confirmBigDownload = false, torchOverride?: "cuda" | "cpu") => {
     if (installing) return;
     setInstalling(m.engine);
     setProgress([]);
@@ -112,7 +114,7 @@ export default function ModelsPanel(props: PanelProps) {
       }
     };
     try {
-      await installModel(m.engine, onProgress, { mirror: mirrorPick[m.engine], confirmBigDownload });
+      await installModel(m.engine, onProgress, { mirror: mirrorPick[m.engine], confirmBigDownload, torch: torchOverride || "auto" });
       await props.refresh();
     } catch (e) {
       const msg = String(e);
@@ -484,19 +486,61 @@ export default function ModelsPanel(props: PanelProps) {
               </div>
 
               <div className="model-action">
-                {/* 升级 GPU 加速（000-install 坑 E/G/O/P 全套：N 卡 + venv torch 为 CPU 版 → 出此按钮；
-                    uvVenvInstaller torchCpuHere 分支自动停占用引擎 → aliyun cu128 wheel → 校验 +cu。
-                    2026-08-31 曾因发布策略暂隐藏；2026-09-05 恢复（源码验证阶段需要可见，055 §五） */}
-                {m.gpuUpgrade && !busyHere && (
-                  <Button
-                    className="gpu-upgrade"
-                    onClick={() => install(m)}
-                    disabled={!!installing}
-                    title="当前引擎的 torch 为 CPU 版，无法用显卡加速。升级为 CUDA 版（约 2.5GB，aliyun/官方镜像自动探测）后推理大幅提速。"
-                  >
-                    <Icon icon="lucide:zap" width={14} height={14} />
-                    升级 GPU 加速
-                  </Button>
+                {/* 「升级 GPU 加速」按钮：发布策略继续隐藏（2026-09-05 用户拍板）——
+                    方向改为「安装时按本机有无 CUDA 二选一（GPU版/CPU版），换卡 = 卸载/重装」，不做"升级"专用链路；
+                    后端 gpuUpgrade 标志 / uvVenvInstaller torchCpuHere 分支暂保留未删（后续改造为首次安装直选时接管）。
+                */}
+                {/* 000-plan：torch 系引擎「安装即选择」——本机有 N 卡时显示「GPU 版 / CPU 版」双按钮：
+                    当前已装版本 = 高亮置灰（已是该版，不可再点）；另一版本可点 = 点击即换装
+                    （后端只重建 venv 的 torch，模型文件不重下；换装后需重启服务）。
+                    未安装时两按钮都可点 = 直接按所选版本安装。无 N 卡 → 只显示 CPU 版（禁用态，走通用按钮）。 */}
+                {TORCH_ENGINES.has(m.engine) && !busyHere && (
+                  <div className="torch-ver-row">
+                    {device?.gpu?.vramGB ? (
+                      <>
+                        <button
+                          className={`torch-ver ${m.accelTag?.kind === "cuda" ? "cur" : "alt"}`}
+                          disabled={busyHere || m.accelTag?.kind === "cuda"}
+                          title={
+                            m.accelTag?.kind === "cuda"
+                              ? "当前已安装 GPU（CUDA）版"
+                              : "换装/安装 GPU（CUDA）版：只重建 venv 的 torch，模型不重下；无缓存时约 2.5GB"
+                          }
+                          onClick={() => install(m, false, "cuda")}
+                        >
+                          <Icon icon="lucide:gpu" width={13} height={13} />
+                          {m.accelTag?.kind === "cuda" ? "GPU 版 · 已装" : m.installed ? "换 GPU 版" : "装 GPU 版"}
+                        </button>
+                        <button
+                          className={`torch-ver ${m.accelTag?.kind === "cpu" ? "cur" : "alt"}`}
+                          disabled={busyHere || m.accelTag?.kind === "cpu"}
+                          title={
+                            m.accelTag?.kind === "cpu"
+                              ? "当前已安装 CPU 版"
+                              : "换装/安装 CPU 版：只重建 venv 的 torch，模型不重下"
+                          }
+                          onClick={() => install(m, false, "cpu")}
+                        >
+                          <Icon icon="lucide:cpu" width={13} height={13} />
+                          {m.accelTag?.kind === "cpu" ? "CPU 版 · 已装" : m.installed ? "换 CPU 版" : "装 CPU 版"}
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        className={`torch-ver ${m.accelTag?.kind === "cpu" ? "cur" : "alt"}`}
+                        disabled={busyHere || m.accelTag?.kind === "cpu"}
+                        title={
+                          m.accelTag?.kind === "cpu"
+                            ? "当前已安装 CPU 版（本机无 NVIDIA 显卡，只有 CPU 版）"
+                            : "安装 CPU 版（本机未检测到 NVIDIA 显卡）"
+                        }
+                        onClick={() => install(m, false, "cpu")}
+                      >
+                        <Icon icon="lucide:cpu" width={13} height={13} />
+                        {m.accelTag?.kind === "cpu" ? "CPU 版 · 已装" : "装 CPU 版"}
+                      </button>
+                    )}
+                  </div>
                 )}
 
                 {/* 下载源选择（2026-08-31：所有引擎生效）：默认自动 = 官方优先 + 失败/无进展/低速自动切换；可指定源 */}

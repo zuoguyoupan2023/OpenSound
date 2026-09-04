@@ -1650,4 +1650,11 @@ textarea:focus,
 .mode-radio.m-disabled { opacity: 0.55; }
 .settings-sub-hint { font-size: 13px; color: #334155; margin: 10px 0 2px; font-weight: 500; }
 .settings-sub-hint b { color: #0f172a; }
+/* 000-plan：模型卡 torch 版本双按钮（GPU 版 / CPU 版 · 安装即选择/换装） */
+.torch-ver-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 6px; }
+.torch-ver { display: inline-flex; align-items: center; gap: 4px; font-size: 12.5px; padding: 4px 10px; border-radius: 6px; border: 1px solid #cbd5e1; cursor: pointer; }
+.torch-ver.cur { background: #dcfce7; border-color: #86efac; color: #15803d; cursor: default; }
+.torch-ver.alt { background: #fff; color: #1e40af; }
+.torch-ver.alt:hover { background: #eef2ff; border-color: #a5b4fc; }
+.torch-ver:disabled { opacity: 0.75; cursor: default; }
 

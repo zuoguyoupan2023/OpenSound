@@ -468,15 +468,16 @@ export async function voiceChat(
   };
 }
 
-// ---------- 模型安装（NDJSON 进度流；S3：支持镜像切换与取消） ----------
+// ---------- 模型安装（NDJSON 进度流；S3：支持镜像切换与取消；torch=auto|cuda|cpu 安装即选择） ----------
 export async function installModel(
   engine: string,
   onProgress: (p: InstallProgress) => void,
-  opts?: { mirror?: string; signal?: AbortSignal; confirmBigDownload?: boolean }
+  opts?: { mirror?: string; signal?: AbortSignal; confirmBigDownload?: boolean; torch?: "auto" | "cuda" | "cpu" }
 ): Promise<void> {
   const q = new URLSearchParams({ engine });
   if (opts?.mirror) q.set("mirror", opts.mirror);
   if (opts?.confirmBigDownload) q.set("confirm", "1"); // S5：大流量下载的二次确认回执
+  if (opts?.torch && opts.torch !== "auto") q.set("torch", opts.torch); // 000-plan：torch 系引擎 CPU/GPU 版选择
   const res = await fetch(
     `${getBaseUrl()}/install-model?${q.toString()}`,
     authHeaders({ method: "POST", signal: opts?.signal })
