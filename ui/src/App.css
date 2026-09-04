@@ -761,6 +761,18 @@ textarea:focus,
   gap: 12px;
 }
 
+/* 信息列占满剩余宽度；状态标签行在模型信息下方（2026-09-05 布局调整） */
+.model-info {
+  flex: 1;
+  min-width: 0;
+}
+.pill-line {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .model-name {
   font-size: 14px;
   font-weight: 500;

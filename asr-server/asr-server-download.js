@@ -88,6 +88,11 @@ async function fetchWithProgress(url, dest, file) {
   }
 }
 
+// 2026-09-05 智能换源（同 kokoro 判死逻辑）：本 run 内某源失败一次即判死，后续文件直接走剩余健康源，
+// 不再逐文件先白等官方源超时（官方源整体不可达时每个文件都 ~10s 试错）。
+const deadSources = new Set();
+let deadInfoShown = false;
+
 for (const file of FILES) {
   const dest = path.join(DIR, file);
   if (existsSync(dest)) {
@@ -105,7 +110,9 @@ for (const file of FILES) {
   }
   const order = mirrorOrder();
   let ok = false;
-  for (const name of order) {
+  const cands = order.filter((name) => !deadSources.has(name));
+  if (!cands.length && !deadSources.size) cands.push(order[0]); // 空守卫（正常不会发生）
+  for (const name of cands) {
     const url = MIRRORS[name] + '/' + file;
     console.log(`下载 ${file} ← ${name}${argMirror === name ? '（用户指定）' : ''} …`);
     try {
@@ -114,7 +121,13 @@ for (const file of FILES) {
       break;
     } catch (e) {
       rmSync(dest, { force: true });
-      console.log(`⚠️ 源 ${name} 失败（${e.message.split('\n')[0]}），切换下一源…`);
+      deadSources.add(name);
+      if (!deadInfoShown) {
+        deadInfoShown = true;
+        console.log(`⚡ 源 ${name} 判死（${e.message.split('\n')[0]}）——本 run 剩余文件自动跳过该源（重新安装恢复官方优先）`);
+      } else {
+        console.log(`⚠️ 源 ${name} 失败（${e.message.split('\n')[0]}）→ 判死，本 run 不再尝试`);
+      }
     }
   }
   if (!ok) throw new Error('全部源失败: ' + file);

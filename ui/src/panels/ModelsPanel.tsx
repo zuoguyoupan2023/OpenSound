@@ -438,25 +438,6 @@ export default function ModelsPanel(props: PanelProps) {
     );
   };
 
-  const fitNote = (m: ModelInfo) => {
-    const fit = device?.fits?.[m.engine];
-    if (!fit) return null;
-    if (fit.can) {
-      return fit.isSlow ? (
-        <span className="badge fit-slow" title={fit.slowNote || "可安装，但在当前加速器上较慢"}>
-          可装 · 慢速
-        </span>
-      ) : (
-        <span className="badge fit-ok" title="本机满足该模型的磁盘/内存/加速要求">可安装</span>
-      );
-    }
-    return (
-      <span className="badge fit-no" title={(fit.blocks || []).map((b) => b.message).join("；") || "设备不满足"}>
-        设备不满足
-      </span>
-    );
-  };
-
   // ================= 渲染 =================
   return (
     <Panel
@@ -526,6 +507,9 @@ export default function ModelsPanel(props: PanelProps) {
                         </span>
                       )}
                     </div>
+                    {/* 状态标签放在左侧模型信息下方（有缺失时可点击展开明细） */}
+                    <div className="pill-line">{statePill(m)}</div>
+                    {openMiss[m.engine] && renderMissingDetail(m)}
                     {busy && pct && pct.total > 0 && (
                       <div className="dl-wrap">
                         <div className="dl-bar">
@@ -536,18 +520,14 @@ export default function ModelsPanel(props: PanelProps) {
                         </span>
                       </div>
                     )}
-                    {openMiss[m.engine] && renderMissingDetail(m)}
                   </div>
 
                   <div className="model-action">
-                    <div className="model-action-row">
-                      {statePill(m)}
-                      {needsRestart && (
-                        <Button onClick={() => restartServiceNow(m)} disabled={!!installing || uninstalling}>
-                          <Icon icon="lucide:power" width={13} height={13} /> 重启服务
-                        </Button>
-                      )}
-                    </div>
+                    {needsRestart && (
+                      <Button onClick={() => restartServiceNow(m)} disabled={!!installing || uninstalling}>
+                        <Icon icon="lucide:power" width={13} height={13} /> 重启服务
+                      </Button>
+                    )}
                     {renderTorch(m, busy)}
                     <div className="model-action-row">
                       {st === "unknown" ? (
@@ -631,7 +611,7 @@ export default function ModelsPanel(props: PanelProps) {
         </>
       )}
 
-      {/* ================= 「详情」页签：展示性 ================= */}
+      {/* ================= 「详情」页签：纯展示（资源表为核心，不与「模型」页签重复列引擎） ================= */}
       {view === "detail" && (
         <>
           {device && (
@@ -646,46 +626,8 @@ export default function ModelsPanel(props: PanelProps) {
             </div>
           )}
 
-          {/* 核心：按类别资源表（含节能每类启用选择） */}
+          {/* 核心：按类别资源表（含节能每类启用选择；主文件/磁盘/内存/状态一览） */}
           <EcoResourceTables models={props.models} refresh={props.refresh} />
-
-          <div className="models-list">
-            {props.models.map((m) => {
-              const srcs = (m.install?.mirrors?.length || 0)
-                ? m.install!.mirrors.map((x) => MIRROR_LABEL[x] || x).join(" → ")
-                : null;
-              return (
-                <div key={m.engine} className="model-row">
-                  <div className="model-info">
-                    <div className="model-name">
-                      {m.label}
-                      {m.license && (
-                        <span className="badge lic" title={`许可证：${m.license}`}>
-                          <Icon icon="lucide:scale" width={11} height={11} />{" "}
-                          {m.license.split("/")[0].trim()}
-                        </span>
-                      )}
-                    </div>
-                    <div className="model-meta">
-                      <span className="model-cat">{catLabel[m.category] || m.category}</span>
-                      <span className="model-engine">{m.engine}</span>
-                      <span className="model-size">{m.size}</span>
-                      {accelBadge(m)}
-                      {fitNote(m)}
-                    </div>
-                    {srcs && <div className="model-meta"><span className="model-cat">下载源</span>{srcs}</div>}
-                    {openMiss[m.engine] && renderMissingDetail(m)}
-                  </div>
-                  <div className="model-action">
-                    {statePill(m)}
-                  </div>
-                </div>
-              );
-            })}
-            {props.models.length === 0 && (
-              <div className="empty">暂无模型数据（请确认服务已启动）</div>
-            )}
-          </div>
         </>
       )}
 

@@ -104,6 +104,12 @@ async function fetchWithProgress(url, dest, rel) {
   }
 }
 
+// 2026-09-05 智能换源（用户实测：官方 huggingface 整体不可达时，375 个文件每个都先白等 ~10s 试官方再切镜像，
+// 浪费数十分钟）——某源在一次下载失败即在本 run 判死：后续文件直接从剩余健康源开始；
+// 仅当用户指定了单一源（或全部源判死）时才继续尝试该源。
+const deadSources = new Set();
+let deadInfoShown = false;
+
 async function downloadFile(rel, dest) {
   // 032：已存在但大小不符 → 视为损坏，删掉重下（此前会跳过 → 永远修不好）
   if (existsSync(dest)) {
@@ -119,11 +125,14 @@ async function downloadFile(rel, dest) {
       return;
     }
   }
-  // 多源顺序下载（官方优先 → hf-mirror）：失败/无进展/低速自动切换；429 退避重试
+  // 多源顺序下载（官方优先 → hf-mirror）：失败/无进展/低速自动切换；429 退避重试；
+  // 失败过的源在本 run 判死跳过（见上方说明）。
   const order = mirrorOrder();
   const lastErr = [];
-  for (let attempt = 0; attempt < 2; attempt++) { // 整体两轮（429 限流退避后重试一轮）
-    for (const name of order) {
+  for (let attempt = 0; attempt < order.length + 1; attempt++) {
+    const cands = order.filter((name) => !deadSources.has(name));
+    if (!cands.length) break; // 全部判死 → 该文件放弃（整体错误信息见 throw）
+    for (const name of cands) {
       mkdirSync(path.dirname(dest), { recursive: true });
       const url = mirrorUrl(name, rel);
       try {
@@ -131,9 +140,16 @@ async function downloadFile(rel, dest) {
         await fetchWithProgress(url, dest, rel);
         return; // 成功
       } catch (e) {
-        lastErr.push(name + ': ' + e.message.split('\n')[0]);
+        const msg = e.message.split('\n')[0];
+        lastErr.push(name + ': ' + msg);
         rmSync(dest, { force: true });
-        log(`⚠️ 源 ${name} 失败（${e.message.split('\n')[0]}），切换下一源…`);
+        deadSources.add(name);
+        if (!deadInfoShown) {
+          deadInfoShown = true;
+          log(`⚡ 源 ${name} 判死（${msg}）——本 run 后续文件自动跳过该源，只走剩余健康源（重新安装会恢复官方优先）`);
+        } else {
+          log(`⚠️ 源 ${name} 失败（${msg}）→ 判死，本 run 不再尝试`);
+        }
         if (/HTTP 429/.test(e.message)) await new Promise((r) => setTimeout(r, 3000 * (attempt + 1)));
       }
     }

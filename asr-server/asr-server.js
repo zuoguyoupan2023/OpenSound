@@ -1332,6 +1332,9 @@ function downloadOneFile(fileSpec, ctx, opts = {}) {
       if (mi > 0) mirrors.unshift(...mirrors.splice(mi, 1));
       else if (mi === -1) ctx.nd({ type: 'log', message: `⚠️ 镜像 ${opts.mirror} 不在清单中，按默认顺序下载` });
     }
+    // 2026-09-05 智能换源：一次安装请求内某源失败即判死，后续文件自动跳过该源（如官方源整体不可达时，
+    // 不再逐文件先白等 10s+ 再切镜像）。判死集合挂在本次请求的 ctx 上，下次安装自动恢复官方优先。
+    const deadRun = ctx.deadMirrors || (ctx.deadMirrors = new Set());
     const part = target + '.part';
     const total = fileSpec.bytes || 0;
     let finished = false;
@@ -1355,16 +1358,22 @@ function downloadOneFile(fileSpec, ctx, opts = {}) {
       } catch {}
     }, 800);
     const finish = (fn, arg) => { finished = true; clearInterval(timer); ACTIVE_DOWNLOAD.proc = null; fn(arg); };
-    let i = 0;
     const tryMirror = () => {
       if (ACTIVE_DOWNLOAD.cancelled) {
         ACTIVE_DOWNLOAD.cancelled = false;
         return finish(reject, new Error('已取消（保留 .part，可重新安装续传）'));
       }
-      if (i >= mirrors.length) {
-        return finish(reject, new Error(`所有镜像均失败：${fileSpec.file}（已保留 .part，可重试续传）`));
+      // 跳过已判死源（本请求内其余文件不再尝试）；全部判死/无镜像 → 直接失败（保留 .part 续传）
+      const alive = mirrors.filter((mm) => !deadRun.has(mm.name));
+      if (!alive.length) {
+        return finish(reject, new Error(`所有镜像均已失败/判死：${fileSpec.file}（已保留 .part，可重试续传）`));
       }
-      const m = mirrors[i++];
+      if (alive.length !== mirrors.length && !ctx._deadInfoShown) {
+        ctx._deadInfoShown = true;
+        const deadNames = mirrors.filter((mm) => deadRun.has(mm.name)).map((mm) => mm.name).join('、');
+        ctx.nd({ type: 'log', message: `⚡ ${deadNames} 已判死——本次安装剩余文件自动跳过该源（下次安装恢复官方优先）` });
+      }
+      const m = alive[0];
       ctx.nd({ type: 'log', message: `下载 ${path.basename(fileSpec.file)} ← ${m.name}${opts.mirror === m.name ? '（用户指定）' : ''} …` });
       // -sS：静默 curl 进度动画（+cu 下载时 % Total 表头刷日志是坑），但保留真实错误输出；
       // 进度由下方每 800ms 读 .part 大小发 type:'progress'（App 进度条），不靠 curl 打印。
@@ -1395,8 +1404,9 @@ function downloadOneFile(fileSpec, ctx, opts = {}) {
           try { renameSync(part, target); } catch (e) { return finish(reject, new Error('改名失败：' + e.message)); }
           return finish(resolve, target);
         }
-        // 失败保留 .part 供断点续传，自动换下一个镜像
-        ctx.nd({ type: 'log', message: `镜像 ${m.name} 失败（exit=${code}），尝试下一镜像…` });
+        // 失败保留 .part 供断点续传；该源本请求内判死，自动换下一个健康镜像
+        deadRun.add(m.name);
+        ctx.nd({ type: 'log', message: `镜像 ${m.name} 失败（exit=${code}）${alive.length > 1 ? '→ 判死，改走剩余源' : '，全部源均失败'}…` });
         tryMirror();
       });
     };
