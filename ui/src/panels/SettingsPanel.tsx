@@ -582,21 +582,26 @@ export default function SettingsPanel(props: PanelProps) {
                 四档由轻到重：清理缓存 → 卸载全部模型 → 卸载全部环境 → 恢复出厂。每档执行前会停止服务，完成后不自动重启（启动时按需重新下载/重建）。单引擎卸载在<b>模型管理页</b>卡片上。
               </p>
               {clearConfirm && (
-                <div className="install-confirm">
-                  <div className="install-confirm-text">
-                    <div>
+                <div className="confirm-overlay" onClick={() => setClearConfirm(null)}>
+                  <div className="confirm-modal" onClick={(e) => e.stopPropagation()}>
+                    <div className="confirm-title">
+                      <Icon icon="lucide:trash-2" width={16} height={16} /> 确认清理
+                    </div>
+                    <div className="confirm-text">
                       「{CLEAR_OPTS.find((o) => o.scope === clearConfirm.scope)?.label}」将释放约{" "}
                       <b>{fmtBytes(clearConfirm.est)}</b>。
+                      <div className="confirm-hint" style={{ marginTop: 4 }}>
+                        {CLEAR_CONFIRM_TEXT[clearConfirm.scope]}
+                      </div>
                     </div>
-                    <div>{CLEAR_CONFIRM_TEXT[clearConfirm.scope]}</div>
-                  </div>
-                  <div className="install-confirm-actions">
-                    <Button onClick={confirmClear} disabled={!!clearing}>
-                      <Icon icon="lucide:trash-2" width={13} height={13} /> 确认清理
-                    </Button>
-                    <Button variant="ghost" onClick={() => setClearConfirm(null)}>
-                      取消
-                    </Button>
+                    <div className="confirm-actions">
+                      <Button variant="ghost" onClick={() => setClearConfirm(null)}>
+                        取消
+                      </Button>
+                      <Button variant="danger" onClick={confirmClear} disabled={!!clearing}>
+                        <Icon icon="lucide:trash-2" width={13} height={13} /> 确认清理
+                      </Button>
+                    </div>
                   </div>
                 </div>
               )}

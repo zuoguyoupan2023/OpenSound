@@ -965,19 +965,61 @@ textarea:focus,
   color: var(--fail);
 }
 
-/* 033 修复：大流量下载二次确认（内嵌确认行，替代 WebView2 会被吞的 window.confirm） */
-.install-confirm {
-  background: #fff7e6;
-  border: 1px solid #f0c36d;
-  border-radius: 8px;
-  padding: 10px 12px;
-  margin-bottom: 8px;
+/* 033/2026-09-05：下载/卸载二次确认 —— 固定居中浮层弹窗（原内嵌在面板最底部，下载区在上方时
+   必须滚动到最底才能看到确认按钮，极易漏点/误以为没反应；且旧样式是浅黄底深色字，在深色主题里突兀） */
+.confirm-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(2, 6, 23, 0.62);
   display: flex;
-  flex-direction: column;
-  gap: 8px;
+  align-items: center;
+  justify-content: center;
+  z-index: 900;
+  padding: 24px;
 }
-.install-confirm-text { color: #8a6d3b; font-size: 12px; line-height: 1.5; }
-.install-confirm-actions { display: flex; gap: 8px; }
+.confirm-modal {
+  background: var(--card);
+  border: 1px solid rgba(240, 195, 109, 0.5);
+  border-radius: 12px;
+  padding: 18px 20px;
+  max-width: 540px;
+  width: 100%;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+}
+.confirm-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  font-size: 14px;
+  color: #fbbf24;
+  margin-bottom: 8px;
+}
+.confirm-text {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.65;
+}
+.confirm-text b {
+  color: #fbbf24;
+}
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+.confirm-warn {
+  color: #fca5a5;
+  font-size: 12px;
+  line-height: 1.55;
+  margin-top: 6px;
+}
+.confirm-hint {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 6px;
+}
 
 /* 阶段1：单引擎卸载——操作区横排（徽标/启动按钮 + 卸载按钮） */
 .model-action-row {
@@ -992,12 +1034,6 @@ textarea:focus,
 }
 .uninstall-btn.btn-ghost:hover {
   background: rgba(229, 72, 77, 0.08);
-}
-.uninstall-warn {
-  color: #c0392b;
-  font-size: 12px;
-  line-height: 1.5;
-  margin-top: 4px;
 }
 
 /* ===== 音频库 ===== */
@@ -1592,9 +1628,11 @@ textarea:focus,
 /* ---------- 032 运行时自举引导条 ---------- */
 .runtime-banner { background: linear-gradient(135deg, #fff7e6, #fff); border: 1px solid #f0c36d; border-radius: 10px; padding: 12px 16px; margin-bottom: 14px; display: flex; flex-direction: column; gap: 10px; }
 .runtime-banner.busy { background: #f6f8fb; border-color: #b8c4d4; }
-.rb-main { display: flex; align-items: center; gap: 12px; }
+/* 2026-09-05 修复：App 为深色主题（body 文字近白 var(--text)），而引导条是浅色底——
+   .rb-title/图标若不显式给颜色会继承近白 → 白底白字几乎看不见。浅底上必须显式深字。 */
+.rb-main { display: flex; align-items: center; gap: 12px; color: #92400e; }
 .rb-text { flex: 1; min-width: 0; }
-.rb-title { font-weight: 600; font-size: 14px; }
+.rb-title { color: #78350f; font-weight: 600; font-size: 14px; }
 .rb-sub { color: #8a6d3b; font-size: 12px; margin-top: 2px; }
 .rb-btn { display: inline-flex; align-items: center; gap: 6px; background: #d97706; color: #fff; border: none; border-radius: 8px; padding: 8px 16px; font-size: 13px; cursor: pointer; font-weight: 600; white-space: nowrap; }
 .rb-btn:hover { background: #b45309; }

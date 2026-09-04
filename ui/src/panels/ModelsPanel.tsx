@@ -600,7 +600,7 @@ export default function ModelsPanel(props: PanelProps) {
                       <>
                         <button
                           className={`torch-ver ${m.accelTag?.kind === "cuda" ? "cur" : "alt"}`}
-                          disabled={busyHere || m.accelTag?.kind === "cuda"}
+                          disabled={busyHere || !!installing || m.accelTag?.kind === "cuda"}
                           title={
                             m.accelTag?.kind === "cuda"
                               ? "当前已安装 GPU（CUDA）版"
@@ -613,7 +613,7 @@ export default function ModelsPanel(props: PanelProps) {
                         </button>
                         <button
                           className={`torch-ver ${m.accelTag?.kind === "cpu" ? "cur" : "alt"}`}
-                          disabled={busyHere || m.accelTag?.kind === "cpu"}
+                          disabled={busyHere || !!installing || m.accelTag?.kind === "cpu"}
                           title={
                             m.accelTag?.kind === "cpu"
                               ? "当前已安装 CPU 版"
@@ -628,7 +628,7 @@ export default function ModelsPanel(props: PanelProps) {
                     ) : (
                       <button
                         className={`torch-ver ${m.accelTag?.kind === "cpu" ? "cur" : "alt"}`}
-                        disabled={busyHere || m.accelTag?.kind === "cpu"}
+                        disabled={busyHere || !!installing || m.accelTag?.kind === "cpu"}
                         title={
                           m.accelTag?.kind === "cpu"
                             ? "当前已安装 CPU 版（本机无 NVIDIA 显卡，只有 CPU 版）"
@@ -713,8 +713,14 @@ export default function ModelsPanel(props: PanelProps) {
                   </Button>
                 ) : (
                   <div className="model-action-row">
-                    <Button onClick={() => install(m)} disabled={!!installing}>
-                      {installing ? (
+                    {/* 2026-09-05 修复：仅"正在装的这张卡"显示转圈/取消；
+                        其它卡片在安装期间只置灰（不再每个按钮都转圈，误导成都在下载） */}
+                    <Button
+                      onClick={() => install(m)}
+                      disabled={!!installing}
+                      title={installing && !busyHere ? "已有模型正在安装，其它卡片暂时置灰；完成后即可点" : undefined}
+                    >
+                      {busyHere ? (
                         <Spinner />
                       ) : (
                         <>
@@ -755,50 +761,66 @@ export default function ModelsPanel(props: PanelProps) {
         )}
       </div>
 
-      {/* 033 修复：大流量二次确认行独立渲染——之前放在 install-log 内（progress>0 才显示），
-          BIG_DOWNLOAD_CONFIRM 分支不推 progress → 整块不渲染 → 用户点「检测/修复」只见按钮晃一下 */}
+      {/* 033/2026-09-05：大流量下载二次确认——改为浮层弹窗。
+          原实现在面板最底部渲染确认行：下载区在上方时看不到确认按钮、极易漏点/误以为没反应；
+          现在固定居中浮层 + 半透明遮罩，任何滚动位置都可见。卸载确认（下方同款）一并浮层化。 */}
       {bigConfirm && (
-        <div className="install-confirm">
-          <div className="install-confirm-text">
-            「{bigConfirm.label}」需下载约 <b>{bigConfirm.gb}</b>（视网速可能耗时较长），确认开始？
-          </div>
-          <div className="install-confirm-actions">
-            <Button
-              onClick={async () => {
-                const m = props.models.find((x) => x.engine === bigConfirm.engine);
-                if (!m) {
-                  setBigConfirm(null);
-                  return;
-                }
+        <div className="confirm-overlay" onClick={() => {
+          setBigConfirm(null);
+          setProgress((prev) => [
+            ...prev,
+            { type: "log", message: "已取消大流量安装；可稍后重试或按模型文档手动处理。" },
+          ]);
+        }}>
+          <div className="confirm-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="confirm-title">
+              <Icon icon="lucide:database-download" width={16} height={16} /> 确认下载模型
+            </div>
+            <div className="confirm-text">
+              「<b>{bigConfirm.label}</b>」需下载约 <b>{bigConfirm.gb}</b>
+              （视网速可能耗时较长），确认开始？
+            </div>
+            <div className="confirm-actions">
+              <Button variant="ghost" onClick={() => {
+                setBigConfirm(null);
                 setProgress((prev) => [
                   ...prev,
-                  { type: "log", message: `已确认，开始下载（约 ${bigConfirm.gb}）…` },
+                  { type: "log", message: "已取消大流量安装；可稍后重试或按模型文档手动处理。" },
                 ]);
-                setBigConfirm(null);
-                await install(m, true); // 二次确认后带 confirm=1 重试
-              }}
-              disabled={!!installing}
-            >
-              <Icon icon="lucide:download" width={14} height={14} /> 确认下载 {bigConfirm.gb}
-            </Button>
-            <Button variant="ghost" onClick={() => {
-              setBigConfirm(null);
-              setProgress((prev) => [
-                ...prev,
-                { type: "log", message: "已取消大流量安装；可稍后重试或按模型文档手动处理。" },
-              ]);
-            }}>
-              取消
-            </Button>
+              }}>
+                取消
+              </Button>
+              <Button
+                onClick={async () => {
+                  const m = props.models.find((x) => x.engine === bigConfirm.engine);
+                  if (!m) {
+                    setBigConfirm(null);
+                    return;
+                  }
+                  setProgress((prev) => [
+                    ...prev,
+                    { type: "log", message: `已确认，开始下载（约 ${bigConfirm.gb}）…` },
+                  ]);
+                  setBigConfirm(null);
+                  await install(m, true); // 二次确认后带 confirm=1 重试
+                }}
+                disabled={!!installing}
+              >
+                <Icon icon="lucide:download" width={14} height={14} /> 确认下载 {bigConfirm.gb}
+              </Button>
+            </div>
           </div>
         </div>
       )}
 
-      {/* 阶段1：单引擎卸载确认行（与 bigConfirm 同款内嵌确认，替代 window.confirm） */}
+      {/* 阶段1：单引擎卸载确认（浮层弹窗，与下载确认同款） */}
       {uninstallConfirm && (
-        <div className="install-confirm">
-          <div className="install-confirm-text">
-            <div>
+        <div className="confirm-overlay" onClick={() => setUninstallConfirm(null)}>
+          <div className="confirm-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="confirm-title">
+              <Icon icon="lucide:trash-2" width={16} height={16} /> 确认卸载
+            </div>
+            <div className="confirm-text">
               卸载「<b>{uninstallConfirm.label}</b>」将删除该引擎的模型文件与运行环境
               {uninstallConfirm.estBytes ? (
                 <>
@@ -807,21 +829,21 @@ export default function ModelsPanel(props: PanelProps) {
               ) : (
                 <>（约 {uninstallConfirm.sizeHint}）。</>
               )}
+              {uninstallConfirm.stopWarn && (
+                <div className="confirm-warn">
+                  ⚠️ 该引擎服务正在运行，卸载将先停止本地服务、删除完成后自动重启，其它引擎恢复可用（仅该引擎需重新下载）。
+                </div>
+              )}
+              <div className="confirm-hint">仅删除该引擎数据，不影响其它引擎、共享运行环境与音色库。</div>
             </div>
-            {uninstallConfirm.stopWarn && (
-              <div className="uninstall-warn">
-                ⚠️ 该引擎服务正在运行，卸载将先停止本地服务、删除完成后自动重启，其它引擎恢复可用（仅该引擎需重新下载）。
-              </div>
-            )}
-            <div className="missing-item hint">仅删除该引擎数据，不影响其它引擎、共享运行环境与音色库。</div>
-          </div>
-          <div className="install-confirm-actions">
-            <Button onClick={confirmUninstall} disabled={!!installing || uninstalling}>
-              <Icon icon="lucide:trash-2" width={14} height={14} /> 确认卸载
-            </Button>
-            <Button variant="ghost" onClick={() => setUninstallConfirm(null)}>
-              取消
-            </Button>
+            <div className="confirm-actions">
+              <Button variant="ghost" onClick={() => setUninstallConfirm(null)}>
+                取消
+              </Button>
+              <Button variant="danger" onClick={confirmUninstall} disabled={!!installing || uninstalling}>
+                <Icon icon="lucide:trash-2" width={14} height={14} /> 确认卸载
+              </Button>
+            </div>
           </div>
         </div>
       )}
