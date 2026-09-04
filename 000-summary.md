@@ -117,14 +117,14 @@
 
 | 面板 | 文件 | 功能 |
 |---|---|---|
-| 语音工作台 | `HomePanel.tsx` | 说→想→读 一键闭环 |
+| 语音工作台 | `HomePanel.tsx` | 说→想→读 一键闭环；LLM 可选本地 llama-cpp/Ollama 或**云端 DeepSeek / 智谱 GLM**（Key 未填有前置拦截提示） |
 | 朗读 | `ReadPanel.tsx` | 文本→TTS，引擎/音色/语速；内嵌「朗读历史」区块（最近 20 条可重听/删除） |
 | 识别 | `AsrPanel.tsx` | 录音→文本；引擎选择 + 标点/VAD 开关 |
-| 对话 | `ChatPanel.tsx` | 文字/语音→LLM→朗读；顶部「新会话 / 历史▾」，每轮自动保存、跨重启恢复 |
-| 模型管理 | `ModelsPanel.tsx` | 查看/下载模型（`/models`+`/install-model`） |
+| 对话 | `ChatPanel.tsx` | 文字/语音→LLM→朗读；LLM = 本地（llama-cpp 档位/Ollama）或**云端 DeepSeek/智谱 GLM（模型下拉）**；顶部「新会话 / 历史▾」，每轮自动保存、跨重启恢复 |
+| 模型管理 | `ModelsPanel.tsx` | 查看/下载模型（`/models`+`/install-model`）；**2026-09-05 双页签：「模型」（功能性：下载/补齐/检测修复/GPU·CPU 换装/重启服务/卸载 + 进度条 + 实时日志；状态/缺失标签在引擎信息下方）「详情」（纯展示：设备摘要 + 按类别资源表为核心，不再重复列引擎）**；文件/环境缺失给简洁标签（文件缺失 / 环境缺失），**点标签展开具体缺失明细**；torch 系引擎安装即选 GPU/CPU 版 |
 | 音频库 | `AudioLibraryPanel.tsx` | 我的录音 / 朗读历史，来源角标（识别/朗读/对话/工作台/实时/导入）、播放/删除/导出/标记样本 |
-| 音色管理 | `VoicePanel.tsx` | **克隆音色**：新建（音频库样本 / 导入音频+ASR 识别）、生成、试听（秒开）、改名/删除 |
-| 设置 | `SettingsPanel.tsx` | 服务地址/asr-server 路径/Token/云端 API Key——修改后防抖自动保存+toast；「打开数据文件夹」入口 |
+| 音色管理 | `VoicePanel.tsx` | **克隆音色**：新建（音频库样本 / 导入音频+ASR 识别）、生成、试听（秒开）、改名/删除；**2026-09-05 按创建日期归档分组、可展开/折叠、默认展开最近一天** |
+| 设置 | `SettingsPanel.tsx` | 服务地址/asr-server 路径/Token/云端 API Key（DeepSeek/智谱）——修改后防抖自动保存+toast；「打开数据文件夹」入口 |
 
 ---
 
@@ -133,6 +133,10 @@
 - 本地 ASR：SenseVoice（量化 + 原始两档）、Whisper、VAD 过滤、自动标点。
 - 本地 TTS：Kokoro、Qwen3-TTS（流式）；云端 OpenAI 兼容 / Azure / CosyVoice 云端。
 - 本地 LLM：llama-cpp + Ollama。
+- **云端 LLM（2026-09-05 核对 commit 后补录）**：对话与语音工作台均可切换 **DeepSeek / 智谱 GLM（云）**，Key 存 config.json ui 节（`deepseek_key`/`zhipu_key`），未填 Key 下拉标注「未填Key」+ 使用前拦截提示。
+- **服务资源模式（030/000-plan-3）**：全能 / 节能；节能 = 每类同时仅启用 1 个模型（TTS 类 kokoro/qwen3/CosyVoice 克隆、ASR 类 SenseVoice/Whisper/原始版、LLM 档位），选择持久化 config；模型页「按类别 · 模型资源表」点选切换。
+- **torch 系引擎「安装即选择」（2026-09-05）**：qwen3 / cosyvoice-clone / sensevoice-原始 在有 N 卡时安装可选「GPU 版(CUDA) / CPU 版」；N 卡首装自动换装 CUDA wheel；装完自动重启服务启用（"下完即用"）；设备画像拉取失败自动重试，不会误显示成无显卡。
+- **模型管理双页签 + 音色按日期归档（2026-09-05）**：模型页分「模型 / 详情」两页签（功能操作 vs 资源表展示，文件/环境缺失给简洁标签）；音色管理按创建日期分组折叠、默认展开最近一天。
 - 全链路 voice-chat、语音工作台。
 - **语音克隆（006 T1）**：CosyVoice3 本地克隆——音色管理面板新建（音频库样本或**导入音频+ASR 识别文本**）、生成音色、预生成试听音频秒开试听、改名/删除；朗读/对话引擎可选「克隆音色」。
 - 录音链路（macOS cpal + CORS 修复）、音频库落盘/播放/删除/导出；**来源角标 + 元数据快照 + 坏头自愈（011 P1/P2）**；朗读面板内嵌历史区块、停止语义（中断合成、已截断入库）。
@@ -217,6 +221,16 @@ GUI 新建音色 ──▶ 参考音频(base64) + 参考文本 ──▶ asr-ser
 - **解决（现行实现）**：合并函数改为绝对偏移写头 + **从首帧读真实采样率/声道/位深**；时长估算同样按头解析（base64 只解前缀）；Rust `audio_get_dir` 打开面板时两级幂等自愈——①坏头重建（按记录的 engine 取真实采样率）②错标 16kHz 的 24k TTS 文件改回并同步纠正索引时长。
 - **教训**：二进制格式拼装一律用绝对偏移；采样率/声道等参数永远从头里读、不写死；排查组合拳 = `xxd -l 48 file.wav` 看头 + `afinfo file.wav` 验证系统能否解码。
 
+### 7.8 安装/换装后卡片无限「启动中」（假启动）与同批 UI 问题（2026-09-05 阶段 D）
+- **现象①（用户实测）**：装最后一个引擎 sensevoice-原始（funasr，8002）后，"自动启动"永远转「启动中…」，等 10 分钟不动；手动「停止所有服务→再开」约 40 秒就好了。
+  - **根因**：8001/8002/8003 进程型引擎**只有 start-all 冷启动才会被拉起**；torch 换装 CUDA 会 `stopEnginesOnPorts` 停掉全部引擎（安装器文案已提示"完成后请重启服务"），但**没有任何代码在安装成功后重启服务**；而前端把"文件就绪 + 服务没在听"一律显示「启动中…」（9-05 早些时候"启动中显示回归"改动引入）→ 纯假转圈，用户只能白等。
+  - **修复（UI）**：引入**服务启动意图**——`restartService()` 统一入口（首页启动 / 设置页重启×3 / 节能表应用 / 模型页）+ 4 分钟宽限期：真发起过启动才显示「启动中…」，否则如实显示「就绪 · 未运行」+ **「重启服务」按钮**；进程型引擎安装/换装**真做了事**（下载/建 venv/换 torch/补依赖）→ 装完**自动重启服务**启用（下完即用，符合 S5 接入约定）。相关面板徽标（computeStarting）同步接入启动意图，不再谎报。
+- **现象②（同批，4070 Ti 实测）**：qwen3 卡片只有「装 CPU 版」按钮。
+  - **根因**：ModelsPanel 只在挂载时拉一次 `/device-profile`，失败即静默置 null **从不重试**——重装环境撞上服务重启窗口 → `device=null` → GPU 双按钮判定 `device?.gpu?.vramGB` 为假 → 降级成"无显卡"视图（服务端探测实际是 cuda + 12GB，已实测核实）。
+  - **修复**：device 拉取失败每 6s 自动重试直到成功；探测结果**未知**时双按钮照常显示（后端 uvVenvInstaller 有守卫：无 N 卡选 GPU 版会自动改装 CPU 并提示）+ 透明说明。
+- **现象③④（同批 UI）**：顶部 node/py 安装引导条**白底近白字**几乎看不见（深色主题正文近白，引导条却是浅色渐变底，`.rb-title` 继承近白）；下载/清理**二次确认固定在页面最底部**（下载区在上方时必须滚动到最底才看到按钮）；一个模型下载时**其它卡片下载按钮全部转圈**（应置灰不可点）。
+  - **修复**：引导条浅色底显式深字；三类确认（下载二次确认 / 单引擎卸载 / 全局清理）改为**固定居中浮层弹窗**（遮罩点击=取消，深色主题配色）；仅正在安装的卡片显示转圈/「取消」，其余卡片按钮置灰 + hover 提示"已有模型正在安装"。
+
 ---
 
 ## 八、启动方式
@@ -241,10 +255,34 @@ npm run all          # 一键拉起 asr-server(9528) + qwen3(8001) + sensevoice-
 - **删除范围**：引擎专属目录**整目录删除**（覆盖清单外残留，如 funasr 的 `bpe.model`、cosyvoice 的 `README.md/.gitattributes`）+ 受管 venv（`.venv-qwen3`/`.venv-funasr`/`.venv-cosyvoice`）；共享目录（`models/llm` 两个 LLM 共用）回退逐文件 + `.part`；共享 runtime/node_modules/voices/config 不动。
 - **全局清理（已实现 2026-08-31）**：设置页「环境与运行时」→「清理与卸载（全局）」四档——① 清理缓存 `cache/` ② 卸载全部模型 `models/` ③ 卸载全部环境 `venvs/`+`runtime/` ④ 恢复出厂（全部 + voices/data + config.json 重置 + 便携 node）。先停服务 → 删 → **不自动重启**（qwen3 启动会自动重下模型）；预览显示将释放空间，内嵌二次确认。
 - **已知残留登记（2026-08-31 全量卸载实测）**：`venvs/.venv-indextts`（4.2GB，无引擎卡片）、`models/hf/onnx-community/whisper-base/`（≈75MB，废弃 transformers.js whisper）——由设置页档位③②覆盖；indextts 代码残留（vendor/index-tts + 2 个 py）已删除（用户授权，041 加回时重新 clone）。
-- **节能模式（030）**：节能 = 9528 最小集（SenseVoice 量化 + Kokoro + Whisper + llm-0.5b）+ `eco_big` 单开一个 Python 大模型；**8B 节能禁用**（`OPENSOUND_SKIP_LLM_8B` 后端双保险，对话面板置灰，仅全能模式可用）。
+- **节能模式（030/000-plan-3，2026-09-04 语义修正）**：节能 = **每个类别同时仅启用 1 个模型**（无"禁用"）——每类选择存 config（`ui.ecoTts`/`ui.ecoAsr`/`ui.llm_model`）：TTS 类 kokoro/qwen3/CosyVoice 克隆、ASR 类 SenseVoice/Whisper/原始版、LLM 类 0.5B/8B；默认各类已装最小，用户自选持久化。Python 大模型按类真停进程，轻量引擎（9528 内）前端停用。**模型管理页顶部「按类别 · 模型资源表」**：每类一张动态表（模型/主文件/磁盘/内存/当前启用），点选切换启用、一键应用默认。
 
 ---
 
-## 十、后续任务（详见 006 / 011）
+## 十、下载源原则（2026-08-31 用户拍板，AGENTS 铁律 F）
+
+**官方源优先 + 失败/无进展/低速自动切换 + 用户可自选源。**
+
+- **统一判据**：连接 15s 无响应 / **无进展 30s**（字节不增长）/ **低速 <100KB/s 持续 60s** → 自动换下一源；失败（HTTP 错误/退出非 0）立即换源。断点续传（.part）+ 字节校验全程有效。
+- **2026-09-05 智能换源增强**：同一安装任务内某源失败一次即**判死**（kokoro / sensevoice 脚本进程级；asr-server.js downloadOneFile 请求级 ctx），后续文件直接从剩余健康源下载——官方源整体不可达时不再"375 个文件每个都白等 ~10s"；**下次安装自动恢复官方优先**（判死不跨任务持久）。
+- **源清单（engines/*.json `install.mirrors` 结构化，官方优先顺序）**：
+
+| 引擎 | 可用源（官方优先） | 说明 |
+|---|---|---|
+| llm-0.5b | huggingface（官方）→ hf-mirror | url-multi，通用下载器 |
+| llm-qwen3-8b | huggingface（官方）→ **modelscope（官方魔搭）** → hf-mirror | Qwen 官方双仓库；魔搭源 2026-08-31 加（字节校验兜底，待实测确认文件一致） |
+| whisper | huggingface（官方）→ hf-mirror | url-multi |
+| sensevoice（sherpa） | huggingface（官方）→ hf-mirror | 脚本型，已补官方源 |
+| kokoro | huggingface（官方）→ hf-mirror → GitHub tar 整体 | 脚本型；espeak-ng-data 数百小文件 |
+| sensevoice-原始 | modelscope（官方）→ hf-mirror | 主模型组两源；fsmn-vad/punc 仅 modelscope |
+| qwen3 | huggingface（官方）→ hf-mirror | huggingface_hub 端点切换（无内置低速检测，靠失败切换） |
+| cosyvoice-clone | modelscope（官方）→ hf-mirror → huggingface | 动态清单 + 字节校验 |
+
+- **UI**：模型页每引擎在未装好时显示下载源下拉——默认「自动（官方优先 · 自动切换）」，普通用户可手动指定某一源（如网络受限时直接选 hf-mirror/modelscope）。
+- **服务启动时自动拉取**（qwen3 首次启动）默认 hf-mirror（无监督场景用可靠源，避免启动卡死）；模型页主动安装走官方优先 + 自动切换。
+
+---
+
+## 十一、后续任务（详见 006 / 011）
 Realtime 实时语音（T3）、CI 三平台打包（T4）、本地 LLM 增强（T5）、音频库增强（T6）；克隆阶段C 剩余「音色与原始录音解耦」（可删录音保留音色）。
 011 遗留候选（本期明确不立项）：「按原参数重读」按钮（元数据快照已备好）、「预读缓冲」抹平句间卡顿、对话消息点击重听当轮回答（`tts_audio_id` 关联已埋点）。
