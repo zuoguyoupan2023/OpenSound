@@ -1,7 +1,7 @@
 import { useRef, useState, useEffect } from "react";
 import type { PanelProps } from "../App";
 import { Icon } from "@iconify/react";
-import { chat, transcribe, speakStream, getCloudApiKey, getPersistedSettings, switchEcoBig, type EcoBig } from "../api";
+import { chat, transcribe, speakStream, getCloudApiKey, getPersistedSettings, updateSettings, switchEcoBig, type EcoBig } from "../api";
 import { createRecorder, type Recorder, createFramePlayer, stopAudio } from "../audio";
 import { saveRecording, teeCollect, mergeWavFrames, saveTts } from "../audioStore";
 import {
@@ -51,17 +51,19 @@ export default function ChatPanel(props: PanelProps) {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [engine, setEngine] = useState<string>("llama-cpp");
-  const [llmModel, setLlmModel] = useState<string>("llm-qwen3-8b");
+  // 000-plan-3：初始档位 = 用户上次选择（config 持久化）；无保存值默认 8B（已装才生效，未装由下方回落 effect 校正）
+  const [llmModel, setLlmModel] = useState<string>(
+    () => getPersistedSettings().llmModel || "llm-qwen3-8b"
+  );
 
   // 030：节能模式在模型选择处直接切换（未启用 → 关旧启新）
-  // 2026-08-31 决策：节能模式 8B 彻底禁用（6–8GB 内存，仅全能模式可用）——不再自动切换启用
   const ecoSettings = getPersistedSettings();
-  const eco8bDisabled = ecoSettings.powerMode === "eco";
   const ecoChatQwenOff = ecoSettings.powerMode === "eco" && ecoSettings.ecoBig !== "qwen3";
   const ecoChatCloneOff = ecoSettings.powerMode === "eco" && ecoSettings.ecoBig !== "cosyvoice";
-  const pickLlmModel = async (v: string) => {
-    if (v === "llm-qwen3-8b" && eco8bDisabled) return; // 节能模式禁用（选项已灰，双保险）
+  // 000-plan-3：选档即持久化（节能 = 每类同时仅启用 1 个模型，LLM 类别无"禁用"；8B 可选）
+  const adoptLlm = (v: string) => {
     setLlmModel(v);
+    updateSettings({ llmModel: v }).catch((e) => console.error("保存 LLM 档位失败:", e));
   };
   const pickChatTts = async (v: "kokoro" | "qwen3" | "clone") => {
     const ecoKey = v === "clone" ? "cosyvoice" : v === "qwen3" ? "qwen3" : null;
@@ -85,13 +87,8 @@ export default function ChatPanel(props: PanelProps) {
     }
     setTtsEngine(v);
   };
-  // 2026-08-31：节能模式 8B 禁用——初始/遗留选中 8B 时自动回落 0.5B（避免直接对话被后端拦截报错）
-  useEffect(() => {
-    if (ecoSettings.powerMode === "eco" && llmModel === "llm-qwen3-8b") {
-      setLlmModel("llm-0.5b");
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ecoSettings.powerMode]);
+  // 000-plan-3：节能 = 每类同时仅启用 1 个模型（LLM 无"禁用"，8B 可选）——旧"eco 强制 8B→0.5B"逻辑已移除，
+  // 默认/回落统一由下方「当前档位未装 → 回落已装最小」effect 处理。
   const [cloudModel, setCloudModel] = useState<string>("deepseek-v4-flash");
   const [ttsEngine, setTtsEngine] = useState<"kokoro" | "qwen3" | "clone">("kokoro");
   const [cloneVoices, setCloneVoices] = useState<CloneVoice[]>([]);
@@ -123,20 +120,26 @@ export default function ChatPanel(props: PanelProps) {
     (m) => m.category === "llm" && m.installed
   );
 
-  // 2026-09-04（复核更正）：当前选中模型未安装 → 自动回落到已安装档位（优先 0.5B，否则首个已装）。
-  // 根因：llmModel 初始写死 llm-qwen3-8b，仅 eco 模式有 8B→0.5B 回落；全能模式只装 0.5B 时
-  // 发送仍带 8B → 后端报「LLM 模型缺失」。此 effect 双模式生效；一个都没装则不回落（保留下载引导）。
+  // 000-plan-3（复核更正版）：当前选中档位未安装 → 自动回落到「用户已保存选择（若已装）→ 节能=已装最小 / 全能=8B 已装则 8B、否则已装最小」。
+  // 无禁用概念：8B 与任何档位一样，装了就可选。无任何已装则不回落（保留"未下载"引导）。
+  // 校正后同步持久化（adoptLlm），避免每次重开都先闪一次旧值。
   useEffect(() => {
     if (engine !== "llama-cpp") return;
     const installed = (props.models || []).filter(
       (m) => m.category === "llm" && m.installed
     );
     if (!installed.length) return;
-    if (installed.some((m) => m.engine === llmModel)) return;
-    const next = installed.some((m) => m.engine === "llm-0.5b")
-      ? "llm-0.5b"
-      : installed[0].engine;
-    setLlmModel(next);
+    const installedKeys = installed.map((m) => m.engine);
+    if (installedKeys.includes(llmModel)) return; // 当前档位已装：不动（含用户手选）
+    const sizeOf = (m: (typeof installed)[number]) => m.profile?.diskGB ?? Number.MAX_SAFE_INTEGER;
+    const minInstalled = [...installed].sort((a, b) => sizeOf(a) - sizeOf(b))[0].engine;
+    const settings = getPersistedSettings();
+    const saved = settings.llmModel;
+    let target = "";
+    if (saved && installedKeys.includes(saved)) target = saved;
+    else if (settings.powerMode === "eco") target = minInstalled;
+    else target = installedKeys.includes("llm-qwen3-8b") ? "llm-qwen3-8b" : minInstalled;
+    if (target) adoptLlm(target);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.models, engine, llmModel]);
 
@@ -488,21 +491,17 @@ export default function ChatPanel(props: PanelProps) {
         {engine === "llama-cpp" && (
           <Select
             value={llmModel}
-            onChange={pickLlmModel}
+            onChange={adoptLlm}
             options={
               installedLlmModels.length
                 ? installedLlmModels.map((m) => ({
                     value: m.engine,
-                    disabled: m.engine === "llm-qwen3-8b" && eco8bDisabled,
-                    label: `模型: ${m.label}${
-                      m.engine === "llm-qwen3-8b" && eco8bDisabled ? "（节能模式禁用）" : ""
-                    }`,
+                    label: `模型: ${m.label}`,
                   }))
                 : [
                     {
                       value: "llm-qwen3-8b",
-                      label: `模型: Qwen3-8B${eco8bDisabled ? "（节能模式禁用）" : "（未下载）"}`,
-                      disabled: eco8bDisabled,
+                      label: "模型: Qwen3-8B（未下载 · 请到模型页下载）",
                     },
                   ]
             }

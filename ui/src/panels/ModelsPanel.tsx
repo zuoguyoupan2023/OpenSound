@@ -325,12 +325,12 @@ export default function ModelsPanel(props: PanelProps) {
           const busyHere = installing === m.engine;
           // 030 启动中判定：文件就绪（state=ready）但服务应启动未 running → 冷启动加载中；
           // 节能模式下未选择的大模型 → 「未启用」而非缺文件/启动中
-          // 2026-08-31：节能模式 8B 也禁用 → llm-qwen3-8b 列入大引擎表（ecoBig 不再含 8b，节能下恒未启用）
+          // 000-plan-3：节能 = 每类同时仅启用 1 个模型，无"禁用"——LLM 档位（含 8B）由用户选择且
+          // 在 9528 进程内按请求换载，无独立进程 → 不列入大引擎表（不参与 eco_big/未启用徽标）
           const BIG_ENGINE_KEY: Record<string, string> = {
             qwen3: "qwen3",
             "cosyvoice-clone": "cosyvoice",
             "sensevoice-original": "sensevoice-original",
-            "llm-qwen3-8b": "llm-qwen3-8b",
           };
           const ecoBigKey = BIG_ENGINE_KEY[m.engine];
           const pm = getPersistedSettings();

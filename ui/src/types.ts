@@ -75,6 +75,13 @@ export interface ModelInfo {
   gpuUpgrade?: boolean;
   /** 036：加速版本标记（torch 为 CUDA 版 / CPU 版），前端徽标区分 GPU/CPU */
   accelTag?: { kind: "cuda" | "cpu"; label: string } | null;
+  /** 000-plan-3：引擎资源画像（engines/*.json 的 profile；主文件大小 diskGB / 内存需求 memNeedGB），节能默认"已装最小"排序依据 */
+  profile?: {
+    diskGB?: number;
+    memNeedGB?: number;
+    accel?: string;
+    tierRequired?: string;
+  } | null;
 }
 
 // 安装进度（NDJSON）

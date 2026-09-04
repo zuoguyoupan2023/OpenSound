@@ -31,10 +31,11 @@ function fmtBytes(n?: number | null): string {
   return `${v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
 }
 
-// 030 阶段一：节能模式下可启用的大模型（单开；none=最小集）。
-// 2026-08-31：8B 不再可选项——节能模式 8B 禁用（6–8GB 内存），仅全能模式可用。
+// 030 阶段一：节能模式下可启用的大 Python 模型（单开其一；none=都不开）。
+// 000-plan-3：节能 = 每类同时仅启用 1 个模型（无"禁用"）。Python 大模型（TTS/ASR 类）由 eco_big 单开其一；
+// LLM 档位（0.5B/8B）不在此列——在对话面板/工作台选择，默认已装最小（0.5B），用户可自选并持久化。
 const ECO_BIG_OPTS: { value: EcoBig; label: string; mem: string; wait: string }[] = [
-  { value: "none", label: "都不启用（仅最小集：SenseVoice 量化 + Kokoro + 0.5B 对话）", mem: "0", wait: "—" },
+  { value: "none", label: "都不启用（仅最小集：SenseVoice 量化 + Kokoro + LLM 默认 0.5B，可自行切换）", mem: "0", wait: "—" },
   { value: "qwen3", label: "Qwen3 TTS（高音质朗读）", mem: "2–4GB", wait: "数十秒" },
   { value: "cosyvoice", label: "CosyVoice 克隆（克隆音色朗读）", mem: "4–6GB", wait: "1–2 分钟" },
   { value: "sensevoice-original", label: "SenseVoice 原始版（高精度识别）", mem: "1.5–2.5GB", wait: "20–60s" },

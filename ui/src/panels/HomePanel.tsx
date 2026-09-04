@@ -14,7 +14,10 @@ export default function HomePanel(props: PanelProps) {
   const [stage, setStage] = useState<Stage>("idle");
   const [asrEngine, setAsrEngine] = useState<string>("auto");
   const [llmEngine, setLlmEngine] = useState<string>("llama-cpp");
-  const [llmModel, setLlmModel] = useState<string>("llm-qwen3-8b");
+  // 000-plan-3：初始档位 = 用户上次选择（config 持久化）；无保存值默认 8B（未装由回落 effect 校正）
+  const [llmModel, setLlmModel] = useState<string>(
+    () => getPersistedSettings().llmModel || "llm-qwen3-8b"
+  );
   const [ttsEngine, setTtsEngine] = useState<"kokoro" | "qwen3">("kokoro");
   const [result, setResult] = useState<{
     recognized: string;
@@ -33,7 +36,7 @@ export default function HomePanel(props: PanelProps) {
     if (m === powerMode) return;
     const ok = window.confirm(
       m === "eco"
-        ? "切换到节能模式：关闭全部大模型（Qwen3 TTS / 克隆 / 原始版），仅保留最小集（识别 + Kokoro 朗读 + 0.5B 对话）。需要重启本地服务，继续？"
+        ? "切换到节能模式：每类同时仅启用 1 个模型——关闭 Python 大模型（Qwen3 TTS / 克隆 / 原始版，可按需单开），LLM 默认用已装的最小档位（0.5B，可在面板自行切换）。需要重启本地服务，继续？"
         : "切换到全能模式：重新拉起全部模型（约占 12–16GB 内存）。需要重启本地服务，继续？"
     );
     if (!ok) return;
@@ -102,20 +105,32 @@ export default function HomePanel(props: PanelProps) {
     setStage("idle");
   };
 
-  // 2026-09-04（复核更正）：当前选中 LLM 未安装 → 自动回落到已安装档位（优先 0.5B，否则首个已装）。
-  // 与 ChatPanel 同款问题：llmModel 初始写死 llm-qwen3-8b，全能模式只装 0.5B 时 voiceChat 仍带 8B
-  // → 后端报「LLM 模型缺失」。此 effect 双模式生效；一个都没装则不回落（保留下载引导）。
+  // 000-plan-3：选档即持久化（节能 = 每类同时仅启用 1 个模型，LLM 类别无"禁用"；8B 可选）
+  const adoptLlm = (v: string) => {
+    setLlmModel(v);
+    updateSettings({ llmModel: v }).catch((e) => console.error("保存 LLM 档位失败:", e));
+  };
+
+  // 000-plan-3：当前选中档位未安装 → 自动回落到「用户已保存选择（若已装）→ 节能=已装最小 / 全能=8B 已装则 8B、否则已装最小」。
+  // 与 ChatPanel 同款：llmModel 初始 8B，全能只装 0.5B 时 voiceChat 仍带 8B → 后端报「LLM 模型缺失」。
+  // 无任何已装则不回落（保留"未下载"引导）；校正后同步持久化，避免每次重开闪旧值。
   useEffect(() => {
     if (llmEngine !== "llama-cpp") return;
     const installed = (props.models || []).filter(
       (m) => m.category === "llm" && m.installed
     );
     if (!installed.length) return;
-    if (installed.some((m) => m.engine === llmModel)) return;
-    const next = installed.some((m) => m.engine === "llm-0.5b")
-      ? "llm-0.5b"
-      : installed[0].engine;
-    setLlmModel(next);
+    const installedKeys = installed.map((m) => m.engine);
+    if (installedKeys.includes(llmModel)) return; // 当前档位已装：不动（含用户手选）
+    const sizeOf = (m: (typeof installed)[number]) => m.profile?.diskGB ?? Number.MAX_SAFE_INTEGER;
+    const minInstalled = [...installed].sort((a, b) => sizeOf(a) - sizeOf(b))[0].engine;
+    const settings = getPersistedSettings();
+    const saved = settings.llmModel;
+    let target = "";
+    if (saved && installedKeys.includes(saved)) target = saved;
+    else if (settings.powerMode === "eco") target = minInstalled;
+    else target = installedKeys.includes("llm-qwen3-8b") ? "llm-qwen3-8b" : minInstalled;
+    if (target) adoptLlm(target);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.models, llmEngine, llmModel]);
 
@@ -206,7 +221,7 @@ export default function HomePanel(props: PanelProps) {
             LLM 模型
             <Select
               value={llmModel}
-              onChange={setLlmModel}
+              onChange={adoptLlm}
               options={
                 (props.models || []).filter(
                   (m) => m.category === "llm" && m.installed

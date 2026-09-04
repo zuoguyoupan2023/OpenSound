@@ -5,9 +5,10 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 // 后端基地址（OpenSound 服务，端口约定 9528，与 Tabu-AI 一致）
 // 设置统一存放在 config.json 的 ui 节（Rust 侧），启动时载入内存缓存；
 // 旧版本（0.x）存 WebView localStorage(opensound_settings)，首次启动自动迁入并清除（011 §5.6 存储规范）；更早的 tabu_settings 一并迁移
-// 030 阶段一：服务资源模式（powerMode=全能/节能；ecoBig=节能下启用的大模型，单开）
+// 030 阶段一：服务资源模式（powerMode=全能/节能；ecoBig=节能下启用的大 Python 模型，单开）
 export type PowerMode = "full" | "eco";
-// 2026-08-31 决策：节能模式 8B 也禁用（占 6–8GB），不再作为 eco_big 可选项；8B 仅全能模式可用
+// 000-plan-3：节能 = 每类同时仅启用 1 个模型，无"禁用"概念；8B 等 LLM 档位由用户选择（llmModel，config 持久化），
+// LLM 类别天然同刻只加载一个 GGUF，无需也不存在 eco_big 化。
 export type EcoBig = "none" | "qwen3" | "cosyvoice" | "sensevoice-original";
 
 interface PersistedSettings {
@@ -17,6 +18,8 @@ interface PersistedSettings {
   zhipuKey?: string;
   powerMode?: PowerMode;
   ecoBig?: EcoBig;
+  /** 000-plan-3：用户选择的本地 LLM 档位（llama-cpp），持久化跨重启沿用 */
+  llmModel?: string;
 }
 
 const LS_KEY = "opensound_settings";
@@ -58,6 +61,7 @@ export async function initSettings(): Promise<void> {
       zhipu_key: string;
       power_mode: string;
       eco_big: string;
+      llm_model: string;
     }>("get_ui_settings");
     let s: PersistedSettings = {
       baseUrl: ui.base_url || "",
@@ -66,6 +70,7 @@ export async function initSettings(): Promise<void> {
       zhipuKey: ui.zhipu_key || "",
       powerMode: ui.power_mode === "eco" ? "eco" : "full",
       ecoBig: (ui.eco_big as EcoBig) || "none",
+      llmModel: ui.llm_model || "",
     };
     const legacy = readLegacyLocalStorage();
     const emptyInConfig =
@@ -137,6 +142,7 @@ export async function updateSettings(
     zhipuKey: partial.zhipuKey,
     powerMode: partial.powerMode,
     ecoBig: partial.ecoBig,
+    llmModel: partial.llmModel,
   });
 }
 
@@ -576,7 +582,8 @@ export function computeStarting(
       fileReady("sensevoice-original") &&
       !health?.models?.some((m) => m.engine === "sensevoice-original" && m.installed),
     shouldStart,
-    ecoDisabled: (s) => eco && (s === "qwen3" || s === "cosyvoice" || s === "sensevoice-original" || s === "llm-qwen3-8b") && s !== big,
+    ecoDisabled: (s) =>
+      eco && (s === "qwen3" || s === "cosyvoice" || s === "sensevoice-original") && s !== big,
   };
 }
 
