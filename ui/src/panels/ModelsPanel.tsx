@@ -4,6 +4,7 @@ import { Icon } from "@iconify/react";
 import { cancelInstall, getDisk, getDiskLocal, getDeviceProfile, installModel, getPersistedSettings, uninstallModel, uninstallPreview } from "../api";
 import type { DeviceProfile, EngineFit, InstallProgress, ModelInfo } from "../types";
 import { Panel, Button, Spinner } from "../components/ui";
+import EcoResourceTables from "./EcoResourceTables";
 
 // ---------- 工具 ----------
 function fmtBytes(n?: number | null): string {
@@ -299,6 +300,9 @@ export default function ModelsPanel(props: PanelProps) {
         </div>
       )}
 
+      {/* 000-plan-3：按类别资源表（顶部新增区块；节能每类单开的选择入口也在这里） */}
+      <EcoResourceTables models={props.models} refresh={props.refresh} />
+
       {/* 入门档默认推荐轻量组合，一键装齐即用（000-device-vs-model.md 4.3-③） */}
       {starterMissing.length > 0 && (
         <div className="entry-starter">
@@ -323,29 +327,25 @@ export default function ModelsPanel(props: PanelProps) {
         {props.models.map((m) => {
           const st = STATE_META[stateOf(m)] || STATE_META.ready;
           const busyHere = installing === m.engine;
-          // 030 启动中判定：文件就绪（state=ready）但服务应启动未 running → 冷启动加载中；
-          // 节能模式下未选择的大模型 → 「未启用」而非缺文件/启动中
-          // 000-plan-3：节能 = 每类同时仅启用 1 个模型，无"禁用"——LLM 档位（含 8B）由用户选择且
-          // 在 9528 进程内按请求换载，无独立进程 → 不列入大引擎表（不参与 eco_big/未启用徽标）
-          const BIG_ENGINE_KEY: Record<string, string> = {
-            qwen3: "qwen3",
-            "cosyvoice-clone": "cosyvoice",
-            "sensevoice-original": "sensevoice-original",
-          };
-          const ecoBigKey = BIG_ENGINE_KEY[m.engine];
+          // 000-plan-3：节能 = 每类同时仅启用 1 个模型（无"禁用"）。TTS/ASR 引擎是否为本类当前启用
+          //（LLM 档位在 9528 内按请求换载、无进程层"启用"，不在此列）。ecoTts/ecoAsr 未配置（旧 config）→ 该类全未启用。
           const pm = getPersistedSettings();
-          const bigShouldStart = ecoBigKey
-            ? pm.powerMode === "eco"
-              ? pm.ecoBig === ecoBigKey
-              : true
-            : true;
+          const isEco = pm.powerMode === "eco";
+          const ecoOn =
+            !isEco ||
+            (m.category !== "tts" && m.category !== "asr") ||
+            (m.category === "tts" ? pm.ecoTts === m.engine : pm.ecoAsr === m.engine);
           const readyNoRun = stateOf(m) === "ready";
           const running = stateOf(m) === "running";
+          // 进程型大引擎才有"节能未启用 → 未跑"的真实状态可标（Python 8001/8002/8003，可被 skip）；
+          // 9528 内轻量（kokoro/量化 sensevoice/whisper/LLM）常驻无进程可关 → 卡片显示真实运行状态，
+          // 节能停用只在前端（面板下拉 + 顶部资源表）表达。
+          const isProcessEngine = m.engine === "qwen3" || m.engine === "cosyvoice-clone" || m.engine === "sensevoice-original";
           // 表里如一：显示真实状态；模式期望（节能未选）与真实状态不符时明确提示，不隐瞒
-          const ecoNotSelected = !!ecoBigKey && !bigShouldStart; // 节能模式下未选择的大模型
+          const ecoNotSelected = isEco && isProcessEngine && !ecoOn && (readyNoRun || running); // 节能未启用的大模型
           const ecoMismatch = ecoNotSelected && running; // 期望关闭但实际仍在运行（模式已改未重启）
           const ecoIdle = ecoNotSelected && readyNoRun; // 期望关闭且实际确实没在跑
-          const launching = !ecoNotSelected && readyNoRun && bigShouldStart;
+          const launching = ecoOn && readyNoRun && isEco && isProcessEngine; // 节能应启用但进程未起（冷启动）
           return (
             <div key={m.engine} className={`model-row ${busyHere ? "busy" : ""}`}>
               <div className="model-info">
@@ -396,7 +396,7 @@ export default function ModelsPanel(props: PanelProps) {
                     fitOf(m)?.can ? (
                       <>
                         <Icon icon="lucide:check" width={13} height={13} /> 可用 · 未启用（节能模式）
-                        <span className="state-hint">可切换使用 → 设置 · 服务资源模式</span>
+                        <span className="state-hint">可切换使用 → 模型页顶部「按类别 · 模型资源表」点选启用</span>
                       </>
                     ) : (
                       <>

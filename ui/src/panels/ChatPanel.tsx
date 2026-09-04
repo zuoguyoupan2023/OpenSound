@@ -1,7 +1,7 @@
 import { useRef, useState, useEffect } from "react";
 import type { PanelProps } from "../App";
 import { Icon } from "@iconify/react";
-import { chat, transcribe, speakStream, getCloudApiKey, getPersistedSettings, updateSettings, switchEcoBig, type EcoBig } from "../api";
+import { chat, transcribe, speakStream, getCloudApiKey, getPersistedSettings, updateSettings, switchEcoEngine, engineDisabledInEco, TTS_PANEL_TO_ID, TTS_ID_TO_PANEL, type EcoTts } from "../api";
 import { createRecorder, type Recorder, createFramePlayer, stopAudio } from "../audio";
 import { saveRecording, teeCollect, mergeWavFrames, saveTts } from "../audioStore";
 import {
@@ -56,27 +56,30 @@ export default function ChatPanel(props: PanelProps) {
     () => getPersistedSettings().llmModel || "llm-qwen3-8b"
   );
 
-  // 030：节能模式在模型选择处直接切换（未启用 → 关旧启新）
+  // 000-plan-3：节能 = TTS 类同时仅启用 1 个模型。非启用引擎选项标「点选切换」，点选 = 确认切换并重启。
   const ecoSettings = getPersistedSettings();
-  const ecoChatQwenOff = ecoSettings.powerMode === "eco" && ecoSettings.ecoBig !== "qwen3";
-  const ecoChatCloneOff = ecoSettings.powerMode === "eco" && ecoSettings.ecoBig !== "cosyvoice";
   // 000-plan-3：选档即持久化（节能 = 每类同时仅启用 1 个模型，LLM 类别无"禁用"；8B 可选）
   const adoptLlm = (v: string) => {
     setLlmModel(v);
     updateSettings({ llmModel: v }).catch((e) => console.error("保存 LLM 档位失败:", e));
   };
+  const ecoActiveTts = ecoSettings.powerMode === "eco" ? (ecoSettings.ecoTts as EcoTts) : null;
+  const ttsOffLabel = (v: "kokoro" | "qwen3" | "clone") =>
+    ecoActiveTts && engineDisabledInEco("tts", TTS_PANEL_TO_ID[v], ecoSettings)
+      ? "（点选切换并启用）"
+      : "";
   const pickChatTts = async (v: "kokoro" | "qwen3" | "clone") => {
-    const ecoKey = v === "clone" ? "cosyvoice" : v === "qwen3" ? "qwen3" : null;
-    if (ecoKey && ecoSettings.powerMode === "eco" && ecoSettings.ecoBig !== ecoKey) {
-      const name = v === "clone" ? "CosyVoice 克隆" : "Qwen3 TTS";
+    const id = TTS_PANEL_TO_ID[v];
+    if (ecoSettings.powerMode === "eco" && ecoActiveTts && ecoActiveTts !== id) {
+      const name = v === "clone" ? "CosyVoice 克隆" : v === "qwen3" ? "Qwen3 TTS" : "Kokoro";
       if (
         !window.confirm(
-          `节能模式未启用「${name}」。切换将关闭当前启用的大模型并启动「${name}」（重启服务，冷启动需等待），继续？`
+          `节能模式未启用「${name}」。切换将把朗读类别改为「${name}」（关闭同类别当前引擎并重启服务，冷启动需等待），继续？`
         )
       )
         return;
       try {
-        await switchEcoBig(ecoKey as EcoBig);
+        await switchEcoEngine("tts", id);
         showToast(`已切换启用「${name}」，服务重启中…`);
         props.refresh();
         setTimeout(() => props.refresh(), 1500);
@@ -84,6 +87,9 @@ export default function ChatPanel(props: PanelProps) {
         showToast("切换失败: " + e);
         return;
       }
+    } else if (ecoSettings.powerMode === "eco" && !ecoSettings.ecoTts) {
+      showToast("节能模式朗读类别尚未配置——请到「模型管理」顶部资源表选择启用引擎");
+      return;
     }
     setTtsEngine(v);
   };
@@ -91,6 +97,15 @@ export default function ChatPanel(props: PanelProps) {
   // 默认/回落统一由下方「当前档位未装 → 回落已装最小」effect 处理。
   const [cloudModel, setCloudModel] = useState<string>("deepseek-v4-flash");
   const [ttsEngine, setTtsEngine] = useState<"kokoro" | "qwen3" | "clone">("kokoro");
+  // 000-plan-3：节能下当前朗读引擎不在启用集（如切到节能前停在 qwen3）→ 自动回落启用引擎
+  const ecoActivePanelTts = ecoActiveTts
+    ? (TTS_ID_TO_PANEL[ecoActiveTts] as "kokoro" | "qwen3" | "clone")
+    : null;
+  useEffect(() => {
+    if (!ecoActivePanelTts) return;
+    if (ttsEngine !== ecoActivePanelTts) setTtsEngine(ecoActivePanelTts);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ecoActiveTts, props.models]);
   const [cloneVoices, setCloneVoices] = useState<CloneVoice[]>([]);
   const [cloneVoiceId, setCloneVoiceId] = useState<string>("");
   const [busy, setBusy] = useState(false);
@@ -518,9 +533,9 @@ export default function ChatPanel(props: PanelProps) {
           value={ttsEngine}
           onChange={pickChatTts}
           options={[
-            { value: "kokoro", label: "朗读: Kokoro" },
-            { value: "qwen3", label: `朗读: Qwen3${ecoChatQwenOff ? "（点击切换并启用）" : ""}` },
-            { value: "clone", label: `朗读: 克隆音色${ecoChatCloneOff ? "（点击切换并启用）" : ""}` },
+            { value: "kokoro", label: `朗读: Kokoro${ttsOffLabel("kokoro")}` },
+            { value: "qwen3", label: `朗读: Qwen3${ttsOffLabel("qwen3")}` },
+            { value: "clone", label: `朗读: 克隆音色${ttsOffLabel("clone")}` },
           ]}
         />
         {ttsEngine === "clone" && (

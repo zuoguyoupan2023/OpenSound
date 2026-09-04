@@ -82,6 +82,8 @@ export interface ModelInfo {
     accel?: string;
     tierRequired?: string;
   } | null;
+  /** 000-plan-3：主文件清单（checks 里 file 型路径，含 models/ 前缀）——模型页「每类三表」主文件列 */
+  mainFiles?: string[];
 }
 
 // 安装进度（NDJSON）

@@ -1,7 +1,7 @@
 import { useRef, useState, useEffect } from "react";
 import type { PanelProps } from "../App";
 import { Icon } from "@iconify/react";
-import { voiceChat, updateSettings, getPersistedSettings, computeStarting, type PowerMode } from "../api";
+import { voiceChat, updateSettings, getPersistedSettings, computeStarting, applyEcoDefaults, switchEcoEngine, engineDisabledInEco, TTS_PANEL_TO_ID, type EcoTts, type EcoAsr, type PowerMode } from "../api";
 import { createRecorder, type Recorder, playWav, stopAudio } from "../audio";
 import { saveRecording, saveTts } from "../audioStore";
 import { Panel, Button, EngineBadge, Select, Spinner } from "../components/ui";
@@ -32,17 +32,27 @@ export default function HomePanel(props: PanelProps) {
   );
 
   // 030：切换节能/全能 → 持久化 + 重启服务生效
+  // 000-plan-3：切到节能时，若某类别尚无启用选择（ecoTts/ecoAsr/llmModel 空）→ 自动补「已装中主文件最小」，
+  // 服务重启即按该选择注入（Python 大模型真停/启）；已有用户选择不覆盖。
   const switchPowerMode = async (m: PowerMode) => {
     if (m === powerMode) return;
     const ok = window.confirm(
       m === "eco"
-        ? "切换到节能模式：每类同时仅启用 1 个模型——关闭 Python 大模型（Qwen3 TTS / 克隆 / 原始版，可按需单开），LLM 默认用已装的最小档位（0.5B，可在面板自行切换）。需要重启本地服务，继续？"
+        ? "切换到节能模式：每类同时仅启用 1 个模型——未选过的类别将自动启用「已装最小」档位（如 LLM 0.5B），你随时可在模型页资源表/各面板切换。需要重启本地服务，继续？"
         : "切换到全能模式：重新拉起全部模型（约占 12–16GB 内存）。需要重启本地服务，继续？"
     );
     if (!ok) return;
     setPowerMode(m);
     try {
-      await updateSettings({ powerMode: m });
+      const upd: Record<string, string> = { powerMode: m };
+      if (m === "eco") {
+        const cur = getPersistedSettings();
+        const defs = await applyEcoDefaults(props.models || []);
+        if (!cur.ecoTts && defs.ecoTts) upd.ecoTts = defs.ecoTts;
+        if (!cur.ecoAsr && defs.ecoAsr) upd.ecoAsr = defs.ecoAsr;
+        if (!cur.llmModel && defs.llmModel) upd.llmModel = defs.llmModel;
+      }
+      await updateSettings(upd as never);
       await invoke("start_service_cmd");
       showToast(`已切换到${m === "eco" ? "节能" : "全能"}模式，服务重启中…`);
       setTimeout(() => props.refresh(), 800);
@@ -50,6 +60,71 @@ export default function HomePanel(props: PanelProps) {
       showToast("切换失败: " + e);
     }
   };
+
+  // 000-plan-3：节能下 TTS/ASR 引擎下拉联动（非启用项标「点选切换」，点选即类别切换并重启）
+  const ecoSettings = getPersistedSettings();
+  const ecoActiveTts = ecoSettings.powerMode === "eco" ? (ecoSettings.ecoTts as EcoTts) : null;
+  const ecoActiveAsr = ecoSettings.powerMode === "eco" ? (ecoSettings.ecoAsr as EcoAsr) : null;
+  const ttsOffLabel = (v: "kokoro" | "qwen3") =>
+    ecoActiveTts && engineDisabledInEco("tts", TTS_PANEL_TO_ID[v], ecoSettings)
+      ? "（点选切换并启用）"
+      : "";
+  const asrOffLabel = (v: "sensevoice" | "whisper") =>
+    ecoActiveAsr && engineDisabledInEco("asr", v, ecoSettings) ? "（点选切换并启用）" : "";
+  const pickTtsHome = async (v: "kokoro" | "qwen3") => {
+    const id = TTS_PANEL_TO_ID[v];
+    if (ecoSettings.powerMode === "eco" && ecoActiveTts && ecoActiveTts !== id) {
+      if (
+        !window.confirm(
+          `节能模式未启用「${v === "qwen3" ? "Qwen3 TTS" : "Kokoro"}」。切换将把朗读类别改为该引擎并重启服务，继续？`
+        )
+      )
+        return;
+      try {
+        await switchEcoEngine("tts", id);
+        showToast("已切换朗读引擎，服务重启中…");
+        props.refresh();
+        setTimeout(() => props.refresh(), 1500);
+      } catch (e) {
+        showToast("切换失败: " + e);
+        return;
+      }
+    }
+    setTtsEngine(v);
+  };
+  const pickAsrHome = async (v: string) => {
+    if (ecoSettings.powerMode === "eco" && v !== "auto" && ecoActiveAsr && ecoActiveAsr !== v) {
+      if (!window.confirm(`节能模式未启用该识别引擎。切换将把识别类别改为该引擎并重启服务，继续？`)) return;
+      try {
+        await switchEcoEngine("asr", v);
+        showToast("已切换识别引擎，服务重启中…");
+        props.refresh();
+        setTimeout(() => props.refresh(), 1500);
+      } catch (e) {
+        showToast("切换失败: " + e);
+        return;
+      }
+    }
+    setAsrEngine(v);
+  };
+  // 000-plan-3：节能下当前引擎不在（面板可表达的）启用集 → 自动回落启用引擎
+  useEffect(() => {
+    if (!ecoSettings.powerMode || ecoSettings.powerMode !== "eco") return;
+    const s = getPersistedSettings();
+    const at = s.ecoTts as EcoTts | "";
+    const aa = s.ecoAsr as EcoAsr | "";
+    if (at === "kokoro" || at === "qwen3") {
+      if (ttsEngine !== at) setTtsEngine(at);
+    } else if (at === "cosyvoice-clone") {
+      setError("节能下朗读类别为克隆音色——请到「朗读/对话」面板使用（本工作台朗读仅 Kokoro/Qwen3）");
+    }
+    if (aa === "sensevoice" || aa === "whisper") {
+      if (asrEngine !== aa) setAsrEngine(aa);
+    } else if (aa === "sensevoice-original") {
+      setError("节能下识别类别为 SenseVoice 原始版——请到「识别」面板使用（本工作台识别仅量化版/Whisper）");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ecoSettings.powerMode, ecoActiveTts, ecoActiveAsr, props.models]);
 
   const kokoroReady = props.health?.tts.kokoro === "ready";
   const qwen3Ready = props.health?.tts.qwen3 === "reachable";
@@ -197,11 +272,11 @@ export default function HomePanel(props: PanelProps) {
           识别引擎
           <Select
             value={asrEngine}
-            onChange={setAsrEngine}
+            onChange={pickAsrHome}
             options={[
               { value: "auto", label: "自动（SenseVoice 优先）" },
-              { value: "sensevoice", label: "SenseVoice" },
-              { value: "whisper", label: "Whisper" },
+              { value: "sensevoice", label: `SenseVoice${asrOffLabel("sensevoice")}` },
+              { value: "whisper", label: `Whisper${asrOffLabel("whisper")}` },
             ]}
           />
         </label>
@@ -238,10 +313,10 @@ export default function HomePanel(props: PanelProps) {
           朗读引擎
           <Select
             value={ttsEngine}
-            onChange={setTtsEngine}
+            onChange={pickTtsHome}
             options={[
-              { value: "kokoro", label: "Kokoro（本地）" },
-              { value: "qwen3", label: "Qwen3（低延迟）" },
+              { value: "kokoro", label: `Kokoro（本地）${ttsOffLabel("kokoro")}` },
+              { value: "qwen3", label: `Qwen3（低延迟）${ttsOffLabel("qwen3")}` },
             ]}
           />
         </label>

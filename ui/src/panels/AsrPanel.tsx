@@ -1,7 +1,7 @@
-import { useRef, useState } from "react";
+import { useRef, useState, useEffect } from "react";
 import type { PanelProps } from "../App";
 import { Icon } from "@iconify/react";
-import { transcribe, computeStarting, getPersistedSettings, switchEcoBig, type EcoBig } from "../api";
+import { transcribe, computeStarting, getPersistedSettings, switchEcoEngine, engineDisabledInEco, type EcoAsr } from "../api";
 import { createRecorder, type Recorder } from "../audio";
 import { saveRecording } from "../audioStore";
 import { Panel, Button, Select, Spinner, EngineBadge } from "../components/ui";
@@ -57,29 +57,49 @@ export default function AsrPanel(props: PanelProps) {
     (m) => m.engine === "whisper" && (m.state === "ready" || m.state === "running")
   ) ?? false;
 
-  // 030：节能模式未启用原始版 → 选项加「（点击切换并启用）」，选中即关旧启新
+  // 000-plan-3：节能 = ASR 类同时仅启用 1 个模型（sensevoice / whisper / sensevoice-original 选一）。
+  // 非启用项标「点选切换」；点选 = 确认后 switchEcoEngine 重启（关旧启新）；auto 在节能下收敛到启用引擎。
   const ecoSettings = getPersistedSettings();
-  const ecoOrigOff = ecoSettings.powerMode === "eco" && ecoSettings.ecoBig !== "sensevoice-original";
+  const ecoActiveAsr = ecoSettings.powerMode === "eco" ? (ecoSettings.ecoAsr as EcoAsr) : null;
+  const asrOffLabel = (v: string) =>
+    v !== "auto" && ecoActiveAsr && engineDisabledInEco("asr", v, ecoSettings)
+      ? "（点选切换并启用）"
+      : "";
   const pickAsrEngine: (v: string) => Promise<void> = async (v) => {
-    if (v === "sensevoice-original" && ecoSettings.powerMode === "eco" && ecoSettings.ecoBig !== "sensevoice-original") {
-      if (
-        !window.confirm(
-          "节能模式未启用「SenseVoice 原始版」。切换将关闭当前启用的大模型并启动原始版（重启服务，冷启动约 20–60 秒），继续？"
+    if (ecoSettings.powerMode === "eco") {
+      if (!ecoSettings.ecoAsr) {
+        setError("节能模式识别类别尚未配置——请到「模型管理」顶部资源表选择启用引擎");
+        return;
+      }
+      if (v !== "auto" && ecoActiveAsr !== v) {
+        if (
+          !window.confirm(
+            `节能模式未启用「${
+              v === "sensevoice-original" ? "SenseVoice 原始版" : v === "whisper" ? "Whisper" : "SenseVoice"
+            }」。切换将把识别类别改为该引擎（关闭同类别当前引擎并重启服务，冷启动需等待），继续？`
+          )
         )
-      )
-        return;
-      try {
-        await switchEcoBig("sensevoice-original" as EcoBig);
-        showToast("已切换启用「SenseVoice 原始版」，服务重启中…");
-        props.refresh();
-        setTimeout(() => props.refresh(), 1500);
-      } catch (e) {
-        setError("切换失败: " + e);
-        return;
+          return;
+        try {
+          await switchEcoEngine("asr", v);
+          showToast("已切换识别引擎，服务重启中…");
+          props.refresh();
+          setTimeout(() => props.refresh(), 1500);
+        } catch (e) {
+          setError("切换失败: " + e);
+          return;
+        }
       }
     }
     setEngine(v);
   };
+
+  // 000-plan-3：节能下当前识别引擎不在启用集（含默认 auto 语义不明确）→ 自动回落启用引擎
+  useEffect(() => {
+    if (!ecoActiveAsr) return;
+    if (engine !== ecoActiveAsr) setEngine(ecoActiveAsr);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ecoActiveAsr, props.models]);
 
   const toggle = async () => {
     setError("");
@@ -173,12 +193,12 @@ export default function AsrPanel(props: PanelProps) {
             onChange={pickAsrEngine}
             options={[
               { value: "auto", label: "自动（SenseVoice 优先）" },
-              { value: "sensevoice", label: "SenseVoice 量化版（sherpa · 快）" },
+              { value: "sensevoice", label: `SenseVoice 量化版（sherpa · 快）${asrOffLabel("sensevoice")}` },
               {
                 value: "sensevoice-original",
-                label: `SenseVoice 原始版（funasr · 高精度）${ecoOrigOff ? "（点击切换并启用）" : ""}`,
+                label: `SenseVoice 原始版（funasr · 高精度）${asrOffLabel("sensevoice-original")}`,
               },
-              { value: "whisper", label: "Whisper" },
+              { value: "whisper", label: `Whisper${asrOffLabel("whisper")}` },
             ]}
           />
         </label>

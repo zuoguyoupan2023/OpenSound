@@ -13,7 +13,8 @@ import {
   clearDataPreview,
   type ClearScope,
   type PowerMode,
-  type EcoBig,
+  type EcoTts,
+  type EcoAsr,
 } from "../api";
 import { showToast } from "../toast";
 import { Panel, Button, Spinner } from "../components/ui";
@@ -31,14 +32,17 @@ function fmtBytes(n?: number | null): string {
   return `${v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
 }
 
-// 030 阶段一：节能模式下可启用的大 Python 模型（单开其一；none=都不开）。
-// 000-plan-3：节能 = 每类同时仅启用 1 个模型（无"禁用"）。Python 大模型（TTS/ASR 类）由 eco_big 单开其一；
-// LLM 档位（0.5B/8B）不在此列——在对话面板/工作台选择，默认已装最小（0.5B），用户可自选并持久化。
-const ECO_BIG_OPTS: { value: EcoBig; label: string; mem: string; wait: string }[] = [
-  { value: "none", label: "都不启用（仅最小集：SenseVoice 量化 + Kokoro + LLM 默认 0.5B，可自行切换）", mem: "0", wait: "—" },
-  { value: "qwen3", label: "Qwen3 TTS（高音质朗读）", mem: "2–4GB", wait: "数十秒" },
-  { value: "cosyvoice", label: "CosyVoice 克隆（克隆音色朗读）", mem: "4–6GB", wait: "1–2 分钟" },
-  { value: "sensevoice-original", label: "SenseVoice 原始版（高精度识别）", mem: "1.5–2.5GB", wait: "20–60s" },
+// 000-plan-3：节能 = 每类同时仅启用 1 个模型（无"禁用"）。三个类别各自的引擎选择项
+//（记忆等标注沿用 030 表口径；未下载的引擎在 UI 置灰并提示先到模型页下载）
+const ECO_TTS_OPTS: { value: EcoTts; label: string; mem: string; wait: string }[] = [
+  { value: "kokoro", label: "Kokoro（本地 · 轻量）", mem: "~0.3GB", wait: "秒级" },
+  { value: "qwen3", label: "Qwen3 TTS（高音质）", mem: "2–4GB", wait: "数十秒" },
+  { value: "cosyvoice-clone", label: "CosyVoice 克隆（克隆音色）", mem: "4–6GB", wait: "1–2 分钟" },
+];
+const ECO_ASR_OPTS: { value: EcoAsr; label: string; mem: string; wait: string }[] = [
+  { value: "sensevoice", label: "SenseVoice 量化版（sherpa · 快）", mem: "~0.3GB", wait: "秒级" },
+  { value: "whisper", label: "Whisper base（多语兜底）", mem: "~0.4GB", wait: "秒级" },
+  { value: "sensevoice-original", label: "SenseVoice 原始版（高精度）", mem: "1.5–2.5GB", wait: "20–60s" },
 ];
 
 export default function SettingsPanel(props: PanelProps) {
@@ -99,9 +103,10 @@ export default function SettingsPanel(props: PanelProps) {
   const [dataRootLoading, setDataRootLoading] = useState(true);
   const [dataRootBusy, setDataRootBusy] = useState(false);
   const [dataRootMsg, setDataRootMsg] = useState("");
-  // 030 阶段一：资源模式（节能/全能 + 节能下启用的大模型）
+  // 000-plan-3：资源模式（节能/全能；节能下每类启用引擎：TTS=ecoTts / ASR=ecoAsr / LLM=llm_model）
   const [powerMode, setPowerMode] = useState<PowerMode>("full");
-  const [ecoBig, setEcoBig] = useState<EcoBig>("none");
+  const [ecoTts, setEcoTts] = useState<EcoTts>("");
+  const [ecoAsr, setEcoAsr] = useState<EcoAsr>("");
   const [applyingMode, setApplyingMode] = useState(false);
   const [modeMsg, setModeMsg] = useState("");
 
@@ -135,7 +140,8 @@ export default function SettingsPanel(props: PanelProps) {
     setDeepseekKey(initial[2]);
     setZhipuKey(initial[3]);
     setPowerMode(s.powerMode || "full");
-    setEcoBig(s.ecoBig || "none");
+    setEcoTts((s.ecoTts as EcoTts) || "");
+    setEcoAsr((s.ecoAsr as EcoAsr) || "");
     savedSnapshotRef.current = JSON.stringify(initial);
     loadedRef.current = true;
     (async () => {
@@ -246,19 +252,19 @@ export default function SettingsPanel(props: PanelProps) {
     }
   };
 
-  // 030 阶段一：应用资源模式并重启服务（关闭/启用的模型下次启动生效）
+  // 000-plan-3：应用资源模式并重启服务（每类启用引擎持久化 → 注入 skip 生效）
   const applyPowerMode = async () => {
     setApplyingMode(true);
     setModeMsg("");
     try {
-      await updateSettings({ powerMode, ecoBig });
+      await updateSettings({ powerMode, ecoTts, ecoAsr });
       await invoke("start_service_cmd");
       setModeMsg(
-        powerMode === "eco"
-          ? `已保存并重启服务（节能模式：${
-              ecoBig === "none" ? "仅最小集" : "额外启用 " + (ECO_BIG_OPTS.find((o) => o.value === ecoBig)?.label || ecoBig)
-            }）`
-          : "已保存并重启服务（全能模式：全部模型拉起）"
+        powerMode === "full"
+          ? "已保存并重启服务（全能模式：全部模型拉起）"
+          : `已保存并重启服务（节能：朗读=${ecoTts || "未选（将按已装最小默认）"} · 识别=${
+              ecoAsr || "未选（将按已装最小默认）"
+            } · LLM=${getPersistedSettings().llmModel || "未选"}; 建议在模型页资源表查看/切换）`
       );
       setTimeout(() => props.refresh(), 800);
     } catch (e) {
@@ -303,7 +309,7 @@ export default function SettingsPanel(props: PanelProps) {
               />
               <span>
                 <b>节能模式</b>
-                <em>只保留最小集（SenseVoice 量化 + Kokoro 朗读 + 0.5B 对话），大模型按需单开；省 10GB+，切换需等待冷启动</em>
+                <em>每个类别同时仅启用 1 个模型（TTS/ASR/LLM 各一个，可自选）；省 10GB+，切换需等待冷启动</em>
               </span>
             </label>
           </div>
@@ -311,29 +317,83 @@ export default function SettingsPanel(props: PanelProps) {
           {powerMode === "eco" && (
             <>
               <p className="settings-hint">
-                节能模式下额外启用一个大模型（其余保持关闭，避免多模型同时常驻）：
+                节能模式 = <b>每个类别同时仅启用 1 个模型</b>（不是"禁用"）——选中的引擎启动/可用，
+                同类别其它引擎停用（Python 大模型关闭进程、轻量引擎前端停用）；未下载的引擎需先到模型页安装。
+                默认建议 = 各类「已装中主文件最小」（模型页顶部资源表可一键应用默认）。
+              </p>
+              <p className="settings-sub-hint">
+                朗读 TTS 类别 · 当前启用：<b>{ecoTts || "未选择"}</b>
               </p>
               <div className="mode-radio-row">
-                {ECO_BIG_OPTS.map((o) => (
-                  <label key={o.value} className="mode-radio">
-                    <input
-                      type="radio"
-                      name="ecoBig"
-                      checked={ecoBig === o.value}
-                      onChange={() => setEcoBig(o.value)}
-                    />
-                    <span>
-                      <b>{o.label}</b>
-                      <em>常驻 {o.mem} · 冷启动 {o.wait}</em>
-                    </span>
-                  </label>
-                ))}
+                {ECO_TTS_OPTS.map((o) => {
+                  const installed = props.models?.some(
+                    (m) => m.engine === o.value && m.installed
+                  );
+                  return (
+                    <label
+                      key={o.value}
+                      className={`mode-radio ${installed ? "" : "m-disabled"}`}
+                      title={installed ? undefined : "模型未下载，请到模型管理页安装后返回选择"}
+                    >
+                      <input
+                        type="radio"
+                        name="ecoTts"
+                        disabled={!installed}
+                        checked={ecoTts === o.value}
+                        onChange={() => setEcoTts(o.value)}
+                      />
+                      <span>
+                        <b>{o.label}</b>
+                        <em>
+                          {installed
+                            ? `常驻 ${o.mem} · 冷启动 ${o.wait}`
+                            : "未下载（需先到模型页安装）"}
+                        </em>
+                      </span>
+                    </label>
+                  );
+                })}
               </div>
-              {ecoBig !== "cosyvoice" && (
-                <p className="settings-hint warn">
-                  ⚠️ 节能模式下未启用克隆服务：使用<b>克隆音色朗读必须运行 CosyVoice</b>，请在上方选择「CosyVoice 克隆」并应用。
-                </p>
-              )}
+              <p className="settings-sub-hint">
+                识别 ASR 类别 · 当前启用：<b>{ecoAsr || "未选择"}</b>
+              </p>
+              <div className="mode-radio-row">
+                {ECO_ASR_OPTS.map((o) => {
+                  const installed = props.models?.some(
+                    (m) => m.engine === o.value && m.installed
+                  );
+                  return (
+                    <label
+                      key={o.value}
+                      className={`mode-radio ${installed ? "" : "m-disabled"}`}
+                      title={installed ? undefined : "模型未下载，请到模型管理页安装后返回选择"}
+                    >
+                      <input
+                        type="radio"
+                        name="ecoAsr"
+                        disabled={!installed}
+                        checked={ecoAsr === o.value}
+                        onChange={() => setEcoAsr(o.value)}
+                      />
+                      <span>
+                        <b>{o.label}</b>
+                        <em>
+                          {installed
+                            ? `常驻 ${o.mem} · 冷启动 ${o.wait}`
+                            : "未下载（需先到模型页安装）"}
+                        </em>
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+              <p className="settings-sub-hint">
+                对话 LLM 类别 · 当前档位：<b>{getPersistedSettings().llmModel || "未选择"}</b>
+              </p>
+              <p className="settings-hint">
+                LLM 档位（0.5B / 8B 等）在「对话面板 / 语音工作台」选择——同刻只加载一个 GGUF，即时生效并持久化；
+                默认按已装最小档位（未下载的档位自动回落），此处无需重复设置。
+              </p>
             </>
           )}
 

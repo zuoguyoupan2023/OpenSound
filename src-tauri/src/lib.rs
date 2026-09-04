@@ -1283,15 +1283,48 @@ struct UiSettings {
     #[serde(default)]
     zhipu_key: String,
     // 030 阶段一：服务资源模式
-    // power_mode = "full"（全能，全部拉起）| "eco"（节能，每类同时仅启用 1 个模型：Python 大模型由 eco_big 单开 + LLM 档位由 llm_model 决定）
-    // eco_big    = "none" | "qwen3" | "cosyvoice" | "sensevoice-original"（节能下启用的大 Python 模型，单开）
+    // power_mode = "full"（全能，全部拉起）| "eco"（节能，每类同时仅启用 1 个模型）
+    // eco_big（旧全局单开，仅兼容旧 config，新 UI 不再写；读取时回退推导 eco_tts/eco_asr）
     #[serde(default)]
     power_mode: String,
     #[serde(default)]
     eco_big: String,
+    /// 000-plan-3：节能下 TTS 类别当前启用引擎（kokoro / qwen3 / cosyvoice-clone，取 engines/*.json id）
+    #[serde(default)]
+    eco_tts: String,
+    /// 000-plan-3：节能下 ASR 类别当前启用引擎（sensevoice / sensevoice-original / whisper）
+    #[serde(default)]
+    eco_asr: String,
     /// 000-plan-3：用户选择的本地 LLM 档位（llama-cpp，如 llm-qwen3-8b / llm-0.5b），持久化跨重启沿用
     #[serde(default)]
     llm_model: String,
+}
+
+/// 000-plan-3：节能每类启用引擎的有效值——旧 eco_big config 回退推导：
+/// eco_big=qwen3 → eco_tts=qwen3；eco_big=cosyvoice → eco_tts=cosyvoice-clone；
+/// eco_big=sensevoice-original → eco_asr=sensevoice-original；其余（含 none）→ 空（Python 大模型全关）
+fn effective_eco(cfg: &PersistedConfig) -> (String, String) {
+    let ui = &cfg.ui;
+    if ui.power_mode != "eco" {
+        return (String::new(), String::new());
+    }
+    let tts = if !ui.eco_tts.is_empty() {
+        ui.eco_tts.clone()
+    } else {
+        match ui.eco_big.as_str() {
+            "qwen3" => "qwen3".to_string(),
+            "cosyvoice" => "cosyvoice-clone".to_string(),
+            _ => String::new(),
+        }
+    };
+    let asr = if !ui.eco_asr.is_empty() {
+        ui.eco_asr.clone()
+    } else if ui.eco_big == "sensevoice-original" {
+        "sensevoice-original".to_string()
+    } else {
+        String::new()
+    };
+    (tts, asr)
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
@@ -1475,6 +1508,8 @@ fn set_ui_settings(
     power_mode: Option<String>,
     eco_big: Option<String>,
     llm_model: Option<String>,
+    eco_tts: Option<String>,
+    eco_asr: Option<String>,
 ) -> Result<(), String> {
     let mut cfg = load_config(&app);
     if let Some(v) = base_url { cfg.ui.base_url = v; }
@@ -1484,6 +1519,8 @@ fn set_ui_settings(
     if let Some(v) = power_mode { cfg.ui.power_mode = v; }
     if let Some(v) = eco_big { cfg.ui.eco_big = v; }
     if let Some(v) = llm_model { cfg.ui.llm_model = v; }
+    if let Some(v) = eco_tts { cfg.ui.eco_tts = v; }
+    if let Some(v) = eco_asr { cfg.ui.eco_asr = v; }
     save_config(&app, &cfg)
 }
 
@@ -1604,10 +1641,9 @@ fn start_service(app: &tauri::AppHandle, state: &Arc<AppState>) -> Result<(), St
 
     // 安全加固②：入站鉴权 token —— config.json ui.token 为空时自动生成一次并持久化；
     // 同一 token 经 get_ui_settings 交给前端（api.ts jfetch 自动带 Bearer），并以 OPENSOUND_TOKEN 注入子进程校验。
-    // 030 阶段一：资源模式 → OPENSOUND_SKIP_*（节能=每类同时仅启用 1 个模型：
-    //   Python 大模型（qwen3/cosyvoice/sensevoice-原始）由 eco_big 单开一个，其余 SKIP；全能=全开）
-    // 000-plan-3：8B 不再"节能禁用"——LLM 类别在 9528 进程内同刻只加载一个 GGUF（llama-cpp 换模型重载），
-    //   档位选择（llm_model）由前端持久化并随请求下发，无独立进程可 skip，也无需注入任何 skip 变量。
+    // 030 阶段一：资源模式 → OPENSOUND_SKIP_*（000-plan-3：节能 = 每类同时仅启用 1 个模型）
+    //   仅 Python 大模型（qwen3→8001 / cosyvoice→8003 / sensevoice-原始→8002）有独立进程可 skip，
+    //   由 eco_tts（TTS 类启用）与 eco_asr（ASR 类启用）决定；9528 内轻量与 LLM 无独立进程不参与。
     let (token, skip_qwen3, skip_cosy, skip_sense_orig) = {
         let mut cfg = load_config(app);
         if cfg.ui.token.is_empty() {
@@ -1615,12 +1651,15 @@ fn start_service(app: &tauri::AppHandle, state: &Arc<AppState>) -> Result<(), St
             save_config(app, &cfg)?;
         }
         let is_eco = cfg.ui.power_mode.as_str() == "eco";
-        let skip = match (is_eco, cfg.ui.eco_big.as_str()) {
-            (true, "qwen3") => (false, true, true),
-            (true, "cosyvoice") => (true, false, true),
-            (true, "sensevoice-original") => (true, true, false),
-            (true, _) => (true, true, true), // 节能默认：Python 大模型全关，只留 9528 最小集
-            _ => (false, false, false),      // 全能默认：全部拉起
+        let skip = if !is_eco {
+            (false, false, false) // 全能：全部拉起
+        } else {
+            let (tts, asr) = effective_eco(&cfg); // 含旧 eco_big 回退
+            (
+                tts != "qwen3",                // 节能：仅 eco_tts=qwen3 时启 8001
+                tts != "cosyvoice-clone",      // 节能：仅 eco_tts=cosyvoice-clone 时启 8003
+                asr != "sensevoice-original",  // 节能：仅 eco_asr=sensevoice-original 时启 8002
+            )
         };
         (cfg.ui.token, skip.0, skip.1, skip.2)
     };

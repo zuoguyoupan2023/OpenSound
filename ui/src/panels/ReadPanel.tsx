@@ -1,7 +1,7 @@
 import { useRef, useState, useEffect } from "react";
 import type { PanelProps } from "../App";
 import { Icon } from "@iconify/react";
-import { speakStream, computeStarting, getPersistedSettings, switchEcoBig, type EcoBig } from "../api";
+import { speakStream, computeStarting, getPersistedSettings, switchEcoEngine, engineDisabledInEco, TTS_PANEL_TO_ID, TTS_ID_TO_PANEL, type EcoTts } from "../api";
 import { createFramePlayer, type FramePlayer, stopAudio, setAudioPlayErrorHandler } from "../audio";
 import {
   teeCollect,
@@ -58,22 +58,26 @@ export default function ReadPanel(props: PanelProps) {
   const qwen3Ready = props.health?.tts.qwen3 === "reachable";
   const cloneReady = props.health?.tts.cosyvoice === "reachable";
 
-  // 030：节能模式下未启用的大模型 → 选项加「（点击切换并启用）」，选中即关旧启新
+  // 000-plan-3：节能 = TTS 类同时仅启用 1 个模型。当前引擎非启用项 → 选项标「点选切换」；
+  // 点选任何非启用引擎 = 确认后切换类别启用并重启服务（关旧启新）；eco 未配置时提示去模型页资源表。
   const ecoSettings = getPersistedSettings();
-  const ecoQwenOff = ecoSettings.powerMode === "eco" && ecoSettings.ecoBig !== "qwen3";
-  const ecoCloneOff = ecoSettings.powerMode === "eco" && ecoSettings.ecoBig !== "cosyvoice";
+  const ecoActiveTts = ecoSettings.powerMode === "eco" ? (ecoSettings.ecoTts as EcoTts) : null;
+  const ttsOffLabel = (v: "kokoro" | "qwen3" | "clone") =>
+    ecoActiveTts && engineDisabledInEco("tts", TTS_PANEL_TO_ID[v], ecoSettings)
+      ? "（点选切换并启用）"
+      : "";
   const pickEngine: (v: string) => Promise<void> = async (v) => {
-    const ecoKey = v === "clone" ? "cosyvoice" : v === "qwen3" ? "qwen3" : null;
-    if (ecoKey && ecoSettings.powerMode === "eco" && ecoSettings.ecoBig !== ecoKey) {
-      const name = v === "clone" ? "CosyVoice 克隆" : "Qwen3 TTS";
+    const id = TTS_PANEL_TO_ID[v];
+    if (ecoSettings.powerMode === "eco" && ecoActiveTts && ecoActiveTts !== id) {
+      const name = v === "clone" ? "CosyVoice 克隆" : v === "qwen3" ? "Qwen3 TTS" : "Kokoro";
       if (
         !window.confirm(
-          `节能模式未启用「${name}」。切换将关闭当前启用的大模型并启动「${name}」（重启服务，冷启动需等待），继续？`
+          `节能模式未启用「${name}」。切换将把朗读类别改为「${name}」（关闭同类别当前引擎并重启服务，冷启动需等待），继续？`
         )
       )
         return;
       try {
-        await switchEcoBig(ecoKey as EcoBig);
+        await switchEcoEngine("tts", id);
         showToast(`已切换启用「${name}」，服务重启中…`);
         props.refresh();
         setTimeout(() => props.refresh(), 1500);
@@ -81,9 +85,20 @@ export default function ReadPanel(props: PanelProps) {
         showToast("切换失败: " + e);
         return;
       }
+    } else if (ecoSettings.powerMode === "eco" && !ecoSettings.ecoTts) {
+      showToast("节能模式朗读类别尚未配置——请到「模型管理」顶部资源表选择启用引擎");
+      return;
     }
     setEngine(v as typeof engine);
   };
+
+  // 000-plan-3：节能下当前朗读引擎不在启用集（如切到节能前停在 qwen3）→ 自动回落启用引擎
+  const ecoActivePanel = ecoActiveTts ? (TTS_ID_TO_PANEL[ecoActiveTts] as typeof engine) : null;
+  useEffect(() => {
+    if (!ecoActivePanel) return;
+    if (engine !== ecoActivePanel) setEngine(ecoActivePanel);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ecoActiveTts, props.models]);
 
   // 加载克隆音色列表（供朗读引擎选用）
   useEffect(() => {
@@ -220,14 +235,14 @@ export default function ReadPanel(props: PanelProps) {
           value={engine}
           onChange={pickEngine}
           options={[
-            { value: "kokoro", label: "Kokoro（本地，53 音色）" },
+            { value: "kokoro", label: `Kokoro（本地，53 音色）${ttsOffLabel("kokoro")}` },
             {
               value: "qwen3",
-              label: `Qwen3（低延迟）${ecoQwenOff ? "（点击切换并启用）" : ""}`,
+              label: `Qwen3（低延迟）${ttsOffLabel("qwen3")}`,
             },
             {
               value: "clone",
-              label: `克隆音色（CosyVoice）${ecoCloneOff ? "（点击切换并启用）" : ""}`,
+              label: `克隆音色（CosyVoice）${ttsOffLabel("clone")}`,
             },
           ]}
         />

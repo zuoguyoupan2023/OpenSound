@@ -987,6 +987,8 @@ async function collectModels() {
       // 000-plan-3：模型资源画像（主文件大小/内存需求等，engines/*.json 的 profile）——
       // 前端「节能默认启用已装最小模型」回落排序与后续「每类三表」均以此为依据
       profile: mf.profile || null,
+      // 000-plan-3：主文件清单（checks 里 file 型路径）——模型页「每类三表」主文件列数据源
+      mainFiles: (mf.checks || []).filter((c) => c.type === "file").map((c) => c.path),
       // 035：N 卡机器 + venv 依赖已就绪但 torch 为 CPU 版 → 前端显示「升级 GPU 加速」按钮
       gpuUpgrade: HAS_NVIDIA && !d.missingRuntime.length
         ? ((mf.runtime?.[0]?.path || '').split(/[\\/]/)[0] || '').startsWith('.venv')

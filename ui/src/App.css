@@ -1617,3 +1617,37 @@ textarea:focus,
 .runtime-log { margin-top: 10px; background: #0f172a; color: #e2e8f0; border-radius: 8px; padding: 8px 12px; font-size: 12px; max-height: 140px; overflow-y: auto; font-family: "Cascadia Code", Consolas, monospace; }
 .runtime-log-line { padding: 1px 0; white-space: pre-wrap; word-break: break-all; }
 .runtime-log-line.err { color: #fca5a5; }
+
+/* ---------- 000-plan-3：模型页「按类别 · 模型资源表」（EcoResourceTables） ---------- */
+.eco-resource { margin: 10px 0 4px; padding: 10px 12px 6px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; }
+.eco-resource-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.eco-resource-title { display: flex; align-items: center; gap: 6px; font-weight: 600; color: #0f172a; flex-wrap: wrap; }
+.eco-resource-title .muted { font-weight: 400; font-size: 12px; margin-left: 4px; }
+.eco-apply { font-size: 13px; padding: 5px 10px; border-radius: 6px; border: 1px solid #cbd5e1; background: #fff; cursor: pointer; color: #1e40af; }
+.eco-apply:hover { background: #eef2ff; }
+.eco-apply:disabled { opacity: 0.55; cursor: default; }
+.eco-msg { margin: 6px 0; }
+.eco-cat { margin: 6px 0 10px; background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px 10px; }
+.eco-cat-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+.eco-cat-head b { font-size: 14px; color: #0f172a; }
+.eco-cat-head .muted { font-size: 12px; margin-left: 6px; }
+.eco-active-note { font-size: 12px; color: #64748b; }
+.eco-active-note.on { color: #15803d; }
+.eco-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.eco-table th { text-align: left; color: #475569; font-weight: 600; padding: 4px 8px; border-bottom: 1px solid #e2e8f0; white-space: nowrap; }
+.eco-table td { padding: 5px 8px; border-bottom: 1px solid #f1f5f9; vertical-align: top; }
+.eco-table tr.active td { background: #ecfdf5; }
+.eco-table tr.active td:first-child { border-left: 3px solid #10b981; }
+.eco-model-name { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-weight: 500; color: #1e293b; }
+.eco-file { color: #64748b; font-size: 12px; word-break: break-all; max-width: 340px; font-family: "Cascadia Code", Consolas, monospace; }
+.badge.eco-on { background: #dcfce7; color: #15803d; }
+.badge.eco-off { background: #f1f5f9; color: #94a3b8; }
+.badge.eco-suggest { background: #fef9c3; color: #a16207; }
+.link-btn.eco-pick { font-size: 12.5px; }
+.eco-pick:disabled { opacity: 0.5; }
+.eco-tip { font-size: 12px; color: #475569; background: #fffbeb; border: 1px dashed #fcd34d; border-radius: 6px; padding: 6px 10px; margin: 4px 0 2px; }
+.eco-empty { font-size: 12.5px; padding: 6px 2px; }
+.mode-radio.m-disabled { opacity: 0.55; }
+.settings-sub-hint { font-size: 13px; color: #334155; margin: 10px 0 2px; font-weight: 500; }
+.settings-sub-hint b { color: #0f172a; }
+

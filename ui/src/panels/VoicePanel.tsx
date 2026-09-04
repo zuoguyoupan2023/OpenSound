@@ -228,9 +228,9 @@ export default function VoicePanel(props: PanelProps) {
 
   const selectedSample = samples.find((s) => s.id === sampleId);
 
-  // 030：节能模式下克隆引擎未启用时给出明确提示（克隆音色朗读必须切换克隆模型）
+  // 000-plan-3：节能模式下克隆引擎未启用时给出明确提示（TTS 类当前启用非 CosyVoice）
   const settings = getPersistedSettings();
-  const ecoNoClone = settings.powerMode === "eco" && settings.ecoBig !== "cosyvoice";
+  const ecoNoClone = settings.powerMode === "eco" && settings.ecoTts !== "cosyvoice-clone";
   const cosyReady = props.health?.tts.cosyvoice === "reachable";
 
   return (
@@ -247,17 +247,21 @@ export default function VoicePanel(props: PanelProps) {
         <div className="eco-clone-tip">
           <Icon icon="lucide:leaf" width={15} height={15} />
           <div>
-            <b>节能模式下未启用克隆引擎：克隆并使用自定义音色需要切换到下列模型：</b>
+            <b>节能模式下未启用克隆引擎（TTS 类别当前非 CosyVoice）：克隆并使用自定义音色需先启用它：</b>
             <ul>
               <li>
                 CosyVoice 克隆（Fun-CosyVoice3-0.5B · 常驻 4–6GB · 冷启动 1–2 分钟）
               </li>
             </ul>
             请到
+            <button className="link-btn" onClick={() => props.goPanel?.("models")}>
+              模型管理 → 按类别 · 模型资源表
+            </button>
+            或
             <button className="link-btn" onClick={() => props.goSettings?.("power-mode")}>
               设置 → 服务资源模式
             </button>
-            选择「CosyVoice 克隆」并应用。
+            在「朗读 TTS」类别选择 CosyVoice 克隆并应用（重启服务生效）。
           </div>
         </div>
       )}

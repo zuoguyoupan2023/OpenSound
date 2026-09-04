@@ -5,10 +5,14 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 // 后端基地址（OpenSound 服务，端口约定 9528，与 Tabu-AI 一致）
 // 设置统一存放在 config.json 的 ui 节（Rust 侧），启动时载入内存缓存；
 // 旧版本（0.x）存 WebView localStorage(opensound_settings)，首次启动自动迁入并清除（011 §5.6 存储规范）；更早的 tabu_settings 一并迁移
-// 030 阶段一：服务资源模式（powerMode=全能/节能；ecoBig=节能下启用的大 Python 模型，单开）
+// 030 阶段一：服务资源模式（powerMode=全能/节能）
+// 000-plan-3：节能 = 每类同时仅启用 1 个模型（无"禁用"）——每类别一个启用选择：
+//   TTS 类 ecoTts / ASR 类 ecoAsr（均取 engines/*.json 的引擎 id），LLM 类沿用 llmModel（对话档位）。
+//   eco_big 字段保留为旧版兼容（Rust 侧读取时回退推导，新 UI 不再写它）。
 export type PowerMode = "full" | "eco";
-// 000-plan-3：节能 = 每类同时仅启用 1 个模型，无"禁用"概念；8B 等 LLM 档位由用户选择（llmModel，config 持久化），
-// LLM 类别天然同刻只加载一个 GGUF，无需也不存在 eco_big 化。
+export type EcoTts = "" | "kokoro" | "qwen3" | "cosyvoice-clone";
+export type EcoAsr = "" | "sensevoice" | "sensevoice-original" | "whisper";
+/** @deprecated 000-plan-3：旧全局单开语义，仅兼容旧 config；新逻辑用 ecoTts/ecoAsr */
 export type EcoBig = "none" | "qwen3" | "cosyvoice" | "sensevoice-original";
 
 interface PersistedSettings {
@@ -20,6 +24,81 @@ interface PersistedSettings {
   ecoBig?: EcoBig;
   /** 000-plan-3：用户选择的本地 LLM 档位（llama-cpp），持久化跨重启沿用 */
   llmModel?: string;
+  /** 000-plan-3：节能下 TTS 类别当前启用引擎（空=未配置，按"已装最小"建议/自动补） */
+  ecoTts?: EcoTts;
+  /** 000-plan-3：节能下 ASR 类别当前启用引擎（空=未配置） */
+  ecoAsr?: EcoAsr;
+}
+
+/** 000-plan-3：引擎类别 → 节能启用选择字段 */
+export function ecoCategoryKey(cat: "tts" | "asr"): "ecoTts" | "ecoAsr" {
+  return cat === "tts" ? "ecoTts" : "ecoAsr";
+}
+
+/** 000-plan-3：节能下某类别当前启用的引擎 id；非节能 / 未配置 → null（全可用 / 未定） */
+export function ecoActiveEngine(cat: "tts" | "asr", s: PersistedSettings): string | null {
+  if (s.powerMode !== "eco") return null;
+  const v = cat === "tts" ? s.ecoTts : s.ecoAsr;
+  return v || null;
+}
+
+/** 000-plan-3：节能下引擎是否被停用（非该类启用选择）。full / LLM 类恒可用；ecoTts/ecoAsr 未配置 → 该类全部视为停用 */
+export function engineDisabledInEco(
+  cat: "tts" | "asr",
+  engine: string,
+  s: PersistedSettings
+): boolean {
+  if (s.powerMode !== "eco") return false;
+  const active = ecoActiveEngine(cat, s);
+  return active !== engine;
+}
+
+/** 引擎 id → 类别（面板联动/三表共用） */
+export const ENGINE_CAT_OF: Record<string, "tts" | "asr" | "llm"> = {
+  kokoro: "tts",
+  qwen3: "tts",
+  "cosyvoice-clone": "tts",
+  sensevoice: "asr",
+  whisper: "asr",
+  "sensevoice-original": "asr",
+  "llm-0.5b": "llm",
+  "llm-qwen3-8b": "llm",
+};
+
+/** 朗读面板值 ↔ 引擎 id（面板用 "clone"，引擎 id 是 "cosyvoice-clone"） */
+export const TTS_PANEL_TO_ID: Record<string, string> = {
+  kokoro: "kokoro",
+  qwen3: "qwen3",
+  clone: "cosyvoice-clone",
+};
+export const TTS_ID_TO_PANEL: Record<string, string> = {
+  kokoro: "kokoro",
+  qwen3: "qwen3",
+  "cosyvoice-clone": "clone",
+};
+
+/** 000-plan-3：某类别"已装中主文件最小"的引擎（节能默认建议依据）；无已装 → null */
+export function suggestMinEngine(models: ModelInfo[], cat: "tts" | "asr" | "llm"): string | null {
+  const list = models.filter((m) => m.category === cat && m.installed);
+  if (!list.length) return null;
+  const MAX = Number.MAX_SAFE_INTEGER;
+  return [...list].sort(
+    (a, b) => (a.profile?.diskGB ?? MAX) - (b.profile?.diskGB ?? MAX)
+  )[0].engine;
+}
+
+/** 000-plan-3：按当前已装给每类算"最小已装"默认选择（仅补空位由调用方决定写不写） */
+export async function applyEcoDefaults(
+  models: ModelInfo[]
+): Promise<Partial<PersistedSettings>> {
+  const upd: Partial<PersistedSettings> = {};
+  const t = suggestMinEngine(models, "tts");
+  if (t) upd.ecoTts = t as EcoTts;
+  const a = suggestMinEngine(models, "asr");
+  if (a) upd.ecoAsr = a as EcoAsr;
+  const l = suggestMinEngine(models, "llm");
+  if (l) upd.llmModel = l;
+  return upd;
 }
 
 const LS_KEY = "opensound_settings";
@@ -62,6 +141,8 @@ export async function initSettings(): Promise<void> {
       power_mode: string;
       eco_big: string;
       llm_model: string;
+      eco_tts: string;
+      eco_asr: string;
     }>("get_ui_settings");
     let s: PersistedSettings = {
       baseUrl: ui.base_url || "",
@@ -71,6 +152,19 @@ export async function initSettings(): Promise<void> {
       powerMode: ui.power_mode === "eco" ? "eco" : "full",
       ecoBig: (ui.eco_big as EcoBig) || "none",
       llmModel: ui.llm_model || "",
+      // 000-plan-3：ecoTts/ecoAsr 空时按旧 eco_big 回退（Rust 侧 get 原样返回、effective_eco 亦回退，双保险）
+      ecoTts:
+        (ui.eco_tts as EcoTts) ||
+        (ui.power_mode === "eco" && ui.eco_big === "qwen3"
+          ? "qwen3"
+          : ui.power_mode === "eco" && ui.eco_big === "cosyvoice"
+            ? "cosyvoice-clone"
+            : ""),
+      ecoAsr:
+        (ui.eco_asr as EcoAsr) ||
+        (ui.power_mode === "eco" && ui.eco_big === "sensevoice-original"
+          ? "sensevoice-original"
+          : ""),
     };
     const legacy = readLegacyLocalStorage();
     const emptyInConfig =
@@ -143,6 +237,8 @@ export async function updateSettings(
     powerMode: partial.powerMode,
     ecoBig: partial.ecoBig,
     llmModel: partial.llmModel,
+    ecoTts: partial.ecoTts,
+    ecoAsr: partial.ecoAsr,
   });
 }
 
@@ -547,26 +643,41 @@ export async function listenRuntimeProgress(
   return listen<RuntimeProgress>("runtime-progress", (e) => cb(e.payload));
 }
 
-// ---------- 启动中状态判定（030 资源模式：按模式+用户选择应启动，但服务尚未加载完成） ----------
+// ---------- 启动中状态判定（000-plan-3：节能 = 每类同时仅启用 1 个模型；Python 大模型按类启用起停） ----------
 export interface StartingMap {
   asr: boolean; // 9528 整体（最小集在 9528 内，进程未就绪 = 整体启动中）
   kokoro: boolean;
   qwen3: boolean;
   cosyvoice: boolean;
   sensevoiceOriginal: boolean;
-  /** 该大模型是否在"应启动集合"（全能=true；节能=仅 eco_big 选中的） */
+  /** 该大模型是否在"应启动集合"（全能=true；节能=TTS/ASR 类别按 ecoTts/ecoAsr 是否等于该引擎） */
   shouldStart: (key: string) => boolean;
   /** 节能模式下未启用的大模型（可用但未开，UI 显示黄"可切换使用"） */
   ecoDisabled: (key: string) => boolean;
 }
 
 export function computeStarting(
-  settings: { powerMode?: PowerMode; ecoBig?: EcoBig },
+  settings: { powerMode?: PowerMode; ecoBig?: EcoBig; ecoTts?: EcoTts; ecoAsr?: EcoAsr },
   health: HealthInfo | null
 ): StartingMap {
   const eco = settings.powerMode === "eco";
-  const big = settings.ecoBig || "none";
-  const shouldStart = (s: string) => (eco ? s === big : true); // 节能只开 eco_big；全能全开
+  // 000-plan-3：每类启用引擎；旧 eco_big 做前端兼容回退（Rust 侧同样回退映射，双保险）
+  const ecoTts =
+    settings.ecoTts ||
+    (eco && settings.ecoBig === "qwen3"
+      ? "qwen3"
+      : eco && settings.ecoBig === "cosyvoice"
+        ? "cosyvoice-clone"
+        : "");
+  const ecoAsr =
+    settings.ecoAsr || (eco && settings.ecoBig === "sensevoice-original" ? "sensevoice-original" : "");
+  const shouldStart = (s: string) => {
+    if (!eco) return true; // 全能全开
+    if (s === "qwen3") return ecoTts === "qwen3";
+    if (s === "cosyvoice") return ecoTts === "cosyvoice-clone";
+    if (s === "sensevoice-original") return ecoAsr === "sensevoice-original";
+    return true; // 9528 内轻量/LLM：无独立进程，恒可用
+  };
   // 032 修复：冷启动（启动中…）的前提是「模型文件+环境已就绪（state=ready/running），只差服务进程」；
   // 未下载/缺环境的引擎显示「未就绪」，不再无限转圈、误导以为在自动装模型。
   const fileReady = (engine: string) =>
@@ -582,12 +693,22 @@ export function computeStarting(
       fileReady("sensevoice-original") &&
       !health?.models?.some((m) => m.engine === "sensevoice-original" && m.installed),
     shouldStart,
-    ecoDisabled: (s) =>
-      eco && (s === "qwen3" || s === "cosyvoice" || s === "sensevoice-original") && s !== big,
+    ecoDisabled: (s) => eco && !shouldStart(s),
   };
 }
 
-// 节能模式下从模型选择处切换大模型：更新 ecoBig → 重启服务（关闭旧模型、启动新模型）
+// 节能模式下从模型/引擎选择处切换类别启用引擎：更新 ecoTts/ecoAsr → 重启服务（关闭旧引擎进程、启动新选引擎）
+export async function switchEcoEngine(
+  cat: "tts" | "asr",
+  engine: string,
+  powerMode: PowerMode = "eco"
+): Promise<void> {
+  const key = ecoCategoryKey(cat);
+  await updateSettings({ powerMode, [key]: engine } as Partial<PersistedSettings>);
+  await invoke("start_service_cmd");
+}
+
+/** @deprecated 000-plan-3：改用 switchEcoEngine(cat, engine) */
 export async function switchEcoBig(key: EcoBig, powerMode: PowerMode = "eco"): Promise<void> {
   await updateSettings({ powerMode, ecoBig: key });
   await invoke("start_service_cmd");
