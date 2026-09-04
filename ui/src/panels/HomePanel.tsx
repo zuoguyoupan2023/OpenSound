@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useRef, useState, useEffect } from "react";
 import type { PanelProps } from "../App";
 import { Icon } from "@iconify/react";
 import { voiceChat, updateSettings, getPersistedSettings, computeStarting, type PowerMode } from "../api";
@@ -101,6 +101,23 @@ export default function HomePanel(props: PanelProps) {
     stopAudio();
     setStage("idle");
   };
+
+  // 2026-09-04（复核更正）：当前选中 LLM 未安装 → 自动回落到已安装档位（优先 0.5B，否则首个已装）。
+  // 与 ChatPanel 同款问题：llmModel 初始写死 llm-qwen3-8b，全能模式只装 0.5B 时 voiceChat 仍带 8B
+  // → 后端报「LLM 模型缺失」。此 effect 双模式生效；一个都没装则不回落（保留下载引导）。
+  useEffect(() => {
+    if (llmEngine !== "llama-cpp") return;
+    const installed = (props.models || []).filter(
+      (m) => m.category === "llm" && m.installed
+    );
+    if (!installed.length) return;
+    if (installed.some((m) => m.engine === llmModel)) return;
+    const next = installed.some((m) => m.engine === "llm-0.5b")
+      ? "llm-0.5b"
+      : installed[0].engine;
+    setLlmModel(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.models, llmEngine, llmModel]);
 
   return (
     <Panel

@@ -123,6 +123,23 @@ export default function ChatPanel(props: PanelProps) {
     (m) => m.category === "llm" && m.installed
   );
 
+  // 2026-09-04（复核更正）：当前选中模型未安装 → 自动回落到已安装档位（优先 0.5B，否则首个已装）。
+  // 根因：llmModel 初始写死 llm-qwen3-8b，仅 eco 模式有 8B→0.5B 回落；全能模式只装 0.5B 时
+  // 发送仍带 8B → 后端报「LLM 模型缺失」。此 effect 双模式生效；一个都没装则不回落（保留下载引导）。
+  useEffect(() => {
+    if (engine !== "llama-cpp") return;
+    const installed = (props.models || []).filter(
+      (m) => m.category === "llm" && m.installed
+    );
+    if (!installed.length) return;
+    if (installed.some((m) => m.engine === llmModel)) return;
+    const next = installed.some((m) => m.engine === "llm-0.5b")
+      ? "llm-0.5b"
+      : installed[0].engine;
+    setLlmModel(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.models, engine, llmModel]);
+
   // 加载克隆音色（供对话朗读选用）
   useEffect(() => {
     listVoices()
