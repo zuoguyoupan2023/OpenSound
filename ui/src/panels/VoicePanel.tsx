@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PanelProps } from "../App";
 import { Icon } from "@iconify/react";
 import {
@@ -27,6 +27,23 @@ function fmtTime(ms: number): string {
 
 function truncate(s: string, n = 40): string {
   return s.length > n ? s.slice(0, n) + "…" : s;
+}
+
+// 2026-09-05：按创建日期归档（本地时区 YYYY-MM-DD），默认只展开最近一天
+function dayKey(ms: number): string {
+  const d = new Date(ms);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+function dayLabel(ms: number): string {
+  const key = dayKey(ms);
+  const today = dayKey(Date.now());
+  const yest = dayKey(Date.now() - 86400000);
+  if (key === today) return `今天（${key}）`;
+  if (key === yest) return `昨天（${key}）`;
+  const d = new Date(ms);
+  const week = ["日", "一", "二", "三", "四", "五", "六"][d.getDay()];
+  return `${key} · 星期${week}`;
 }
 
 // 克隆服务（8003）未就绪时给出可行动的提示，替代吓人的 "fetch failed"。
@@ -87,6 +104,37 @@ export default function VoicePanel(props: PanelProps) {
     elRef.current = null;
     stopAudio();
     setPlayingId(null);
+  };
+
+  // 2026-09-05：按创建日期分组（降序）；默认只展开最近一天，历史天可手动展开/收起
+  const groups = useMemo(() => {
+    const map = new Map<string, CloneVoice[]>();
+    for (const v of voices) {
+      const k = dayKey(v.created_at);
+      const arr = map.get(k) ?? [];
+      arr.push(v);
+      map.set(k, arr);
+    }
+    return [...map.entries()]
+      .map(
+        ([k, list]) =>
+          [k, [...list].sort((a, b) => b.created_at - a.created_at)] as [string, CloneVoice[]]
+      )
+      .sort((a, b) => b[0].localeCompare(a[0]));
+  }, [voices]);
+  const newestKey = groups.length ? groups[0][0] : "";
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const toggleDay = (key: string, open: boolean) =>
+    setCollapsed((prev) => ({ ...prev, [key]: open }));
+  const expandAllDays = () => {
+    const all: Record<string, boolean> = {};
+    for (const [k] of groups) all[k] = false;
+    setCollapsed(all);
+  };
+  const collapseAllDays = () => {
+    const all: Record<string, boolean> = {};
+    for (const [k] of groups) all[k] = true;
+    setCollapsed(all);
   };
 
   const openCreate = () => {
@@ -425,43 +473,79 @@ export default function VoicePanel(props: PanelProps) {
           还没有克隆音色。点「新建音色」，从已标记的录音样本生成一个。
         </div>
       ) : (
-        <div className="audio-list">
-          {voices.map((v) => (
-            <div key={v.id} className="audio-row">
-              <div className="audio-info">
-                <div className="audio-title">{v.name}</div>
-                <div className="model-meta">
-                  <span>{fmtTime(v.created_at)}</span>
-                  <span className="model-cat">CosyVoice3 克隆</span>
-                  {v.referenceText && <span>{truncate(v.referenceText, 24)}</span>}
-                </div>
+        <div className="audio-list voice-by-day">
+          <div className="voice-day-toolbar">
+            <span className="muted">共 {voices.length} 个克隆音色 · 按创建日期归档</span>
+            <span style={{ display: "inline-flex", gap: 6 }}>
+              <Button variant="ghost" onClick={expandAllDays}>
+                全部展开
+              </Button>
+              <Button variant="ghost" onClick={collapseAllDays}>
+                全部收起
+              </Button>
+            </span>
+          </div>
+          {groups.map(([key, list]) => {
+            // 默认：最近一天展开，历史天收起（用户手动开关后以记录为准）
+            const open = key === newestKey ? collapsed[key] !== true : collapsed[key] === false;
+            const firstMs = list[0]?.created_at ?? Date.now();
+            return (
+              <div key={key} className="voice-day-group">
+                <button className="voice-day-head" onClick={() => toggleDay(key, !open)}>
+                  <span className="voice-day-date">{dayLabel(firstMs)}</span>
+                  <span className="voice-day-count">{list.length} 个</span>
+                  {key === newestKey && <span className="badge fit-ok">最近</span>}
+                  <span className="voice-day-chev">
+                    <Icon
+                      icon={open ? "lucide:chevron-down" : "lucide:chevron-right"}
+                      width={15}
+                      height={15}
+                    />
+                  </span>
+                </button>
+                {open && (
+                  <div className="voice-day-body">
+                    {list.map((v) => (
+                      <div key={v.id} className="audio-row">
+                        <div className="audio-info">
+                          <div className="audio-title">{v.name}</div>
+                          <div className="model-meta">
+                            <span>{fmtTime(v.created_at)}</span>
+                            <span className="model-cat">CosyVoice3 克隆</span>
+                            {v.referenceText && <span>{truncate(v.referenceText, 24)}</span>}
+                          </div>
+                        </div>
+                        <div className="audio-actions">
+                          <Button
+                            variant="ghost"
+                            onClick={() => preview(v)}
+                            title="试听该克隆音色（用此音色合成一句）"
+                            disabled={playingId !== null && playingId !== v.id}
+                          >
+                            {playingId === v.id ? (
+                              <>
+                                <Icon icon="lucide:square" width={16} height={16} /> 停止
+                              </>
+                            ) : (
+                              <>
+                                <Icon icon="lucide:play" width={16} height={16} /> 试听
+                              </>
+                            )}
+                          </Button>
+                          <Button variant="ghost" onClick={() => onRename(v)} title="改名">
+                            <Icon icon="lucide:pencil" width={16} height={16} />
+                          </Button>
+                          <Button variant="danger" onClick={() => onDelete(v)}>
+                            <Icon icon="lucide:trash-2" width={16} height={16} />
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
-              <div className="audio-actions">
-                <Button
-                  variant="ghost"
-                  onClick={() => preview(v)}
-                  title="试听该克隆音色（用此音色合成一句）"
-                  disabled={playingId !== null && playingId !== v.id}
-                >
-                  {playingId === v.id ? (
-                    <>
-                      <Icon icon="lucide:square" width={16} height={16} /> 停止
-                    </>
-                  ) : (
-                    <>
-                      <Icon icon="lucide:play" width={16} height={16} /> 试听
-                    </>
-                  )}
-                </Button>
-                <Button variant="ghost" onClick={() => onRename(v)} title="改名">
-                  <Icon icon="lucide:pencil" width={16} height={16} />
-                </Button>
-                <Button variant="danger" onClick={() => onDelete(v)}>
-                  <Icon icon="lucide:trash-2" width={16} height={16} />
-                </Button>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </Panel>

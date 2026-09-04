@@ -1,11 +1,32 @@
 import { useRef, useState, useEffect } from "react";
 import type { PanelProps } from "../App";
 import { Icon } from "@iconify/react";
-import { voiceChat, updateSettings, getPersistedSettings, computeStarting, applyEcoDefaults, switchEcoEngine, engineDisabledInEco, restartService, TTS_PANEL_TO_ID, type EcoTts, type EcoAsr, type PowerMode } from "../api";
+import { voiceChat, updateSettings, getPersistedSettings, getCloudApiKey, computeStarting, applyEcoDefaults, switchEcoEngine, engineDisabledInEco, restartService, TTS_PANEL_TO_ID, type EcoTts, type EcoAsr, type PowerMode } from "../api";
 import { createRecorder, type Recorder, playWav, stopAudio } from "../audio";
 import { saveRecording, saveTts } from "../audioStore";
 import { Panel, Button, EngineBadge, Select, Spinner } from "../components/ui";
 import { showToast } from "../toast";
+
+// 2026-09-05：语音工作台接入云端 LLM（与对话面板同一套：DeepSeek / 智谱 GLM）——
+// 后端 /voice-chat 早已透传 llmEngine/llmModel/llmApiKey（见 asr-server.js），这里纯前端补引擎选项。
+const CLOUD_LLM_MODELS: Record<string, { value: string; label: string }[]> = {
+  deepseek: [
+    { value: "deepseek-v4-flash", label: "DeepSeek-V4-Flash（快·便宜）" },
+    { value: "deepseek-v4-pro", label: "DeepSeek-V4-Pro（更强）" },
+  ],
+  zhipu: [
+    { value: "glm-4.7", label: "GLM-4.7（最新）" },
+    { value: "glm-4.6", label: "GLM-4.6" },
+  ],
+};
+const CLOUD_DEFAULT_MODEL: Record<string, string> = {
+  deepseek: "deepseek-v4-flash",
+  zhipu: "glm-4.7",
+};
+const CLOUD_LABEL: Record<string, string> = {
+  deepseek: "DeepSeek",
+  zhipu: "智谱 GLM",
+};
 
 type Stage = "idle" | "recording" | "processing" | "speaking" | "done";
 
@@ -17,6 +38,8 @@ export default function HomePanel(props: PanelProps) {
   const [llmModel, setLlmModel] = useState<string>(
     () => getPersistedSettings().llmModel || "llm-qwen3-8b"
   );
+  // 2026-09-05：云端 LLM 档位（DeepSeek/智谱，与对话面板一致）
+  const [cloudModel, setCloudModel] = useState<string>("deepseek-v4-flash");
   const [ttsEngine, setTtsEngine] = useState<"kokoro" | "qwen3">("kokoro");
   const [result, setResult] = useState<{
     recognized: string;
@@ -141,7 +164,9 @@ export default function HomePanel(props: PanelProps) {
         const r = await voiceChat(wav, {
           asrEngine,
           llmEngine,
-          llmModel,
+          // 云端引擎：model 传云端档位；llama-cpp 传本地档位。云端无 Key 已在上方开始录音前拦截。
+          llmModel: CLOUD_LLM_MODELS[llmEngine] ? cloudModel : llmModel,
+          llmApiKey: CLOUD_LLM_MODELS[llmEngine] ? getCloudApiKey(llmEngine) : undefined,
           ttsEngine,
         });
         // 顺手保存录音 + 朗读结果到音频库（不阻塞）
@@ -160,6 +185,13 @@ export default function HomePanel(props: PanelProps) {
         setStage("done");
       }
     } else {
+      // 开始录音（云端引擎若未填 Key 提前拦截，避免录完白等）
+      if (CLOUD_LLM_MODELS[llmEngine] && !getCloudApiKey(llmEngine)) {
+        setError(
+          `未配置 ${CLOUD_LABEL[llmEngine]} 的 API Key——到「设置」面板填写后才能用云端回答（也可在下方 LLM 引擎切回本地）`
+        );
+        return;
+      }
       // 开始录音
       try {
         const rec = await createRecorder();
@@ -283,13 +315,30 @@ export default function HomePanel(props: PanelProps) {
           LLM 引擎
           <Select
             value={llmEngine}
-            onChange={setLlmEngine}
+            onChange={(v) => {
+              setLlmEngine(v);
+              if (CLOUD_DEFAULT_MODEL[v]) setCloudModel(CLOUD_DEFAULT_MODEL[v]);
+            }}
             options={[
               { value: "llama-cpp", label: "llama-cpp（本地）" },
               { value: "ollama", label: "Ollama（后备）" },
+              {
+                value: "deepseek",
+                label: `DeepSeek（云）${getCloudApiKey("deepseek") ? "" : " · 未填Key"}`,
+              },
+              {
+                value: "zhipu",
+                label: `智谱 GLM（云）${getCloudApiKey("zhipu") ? "" : " · 未填Key"}`,
+              },
             ]}
           />
         </label>
+        {CLOUD_LLM_MODELS[llmEngine] && (
+          <label>
+            云端模型
+            <Select value={cloudModel} onChange={setCloudModel} options={CLOUD_LLM_MODELS[llmEngine]} />
+          </label>
+        )}
         {llmEngine === "llama-cpp" && (
           <label>
             LLM 模型
@@ -357,7 +406,7 @@ export default function HomePanel(props: PanelProps) {
             <div className="result-text">{result.recognized}</div>
           </div>
           <div className="result-block">
-            <div className="result-label">本地回答</div>
+            <div className="result-label">回答</div>
             <div className="result-text">{result.answer}</div>
           </div>
           {stage === "done" && (

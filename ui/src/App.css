@@ -644,6 +644,107 @@ textarea:focus,
 }
 
 /* ===== 模型管理 ===== */
+/* 2026-09-05：模型管理双页签「信息 / 下载」（信息=浏览；下载=安装/修复/卸载与进度日志） */
+.mp-seg {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.mp-seg-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 8px 16px;
+  border-radius: 9px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+}
+.mp-seg-btn:hover {
+  border-color: var(--accent);
+}
+.mp-seg-btn.on {
+  background: var(--accent-2);
+  border-color: var(--accent-2);
+  color: #fff;
+}
+.mp-seg-sub {
+  font-weight: 400;
+  color: var(--muted);
+  font-size: 11px;
+}
+.mp-seg-btn.on .mp-seg-sub {
+  color: rgba(255, 255, 255, 0.8);
+}
+.mp-seg-count {
+  background: var(--fail);
+  color: #fff;
+  border-radius: 10px;
+  font-size: 11px;
+  line-height: 16px;
+  padding: 0 7px;
+}
+/* 信息页签只读卡片：无需操作但保持缺口可读；「下载」卡片动作列照旧 */
+.models-list.read-only .model-row {
+  cursor: default;
+}
+/* 音色管理：按日期分组头（2026-09-05） */
+.voice-day-group {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin-bottom: 10px;
+  overflow: hidden;
+}
+.voice-day-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: var(--card);
+  border: none;
+  color: var(--text);
+  padding: 10px 14px;
+  cursor: pointer;
+  font-size: 13px;
+  text-align: left;
+}
+.voice-day-head:hover {
+  background: var(--card-2);
+}
+.voice-day-date {
+  font-weight: 700;
+}
+.voice-day-count {
+  color: var(--muted);
+  font-size: 12px;
+}
+.voice-day-chev {
+  margin-left: auto;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+}
+.voice-day-body {
+  border-top: 1px solid var(--border);
+}
+.voice-day-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.voice-by-day .audio-row {
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+}
+.voice-by-day .audio-row:last-child {
+  border-bottom: none;
+}
+
 .models-list {
   display: flex;
   flex-direction: column;
@@ -742,6 +843,24 @@ textarea:focus,
 .model-state.st-info { color: var(--accent); }
 .model-state.st-warn { color: #f59e0b; }
 .model-state.st-fail { color: var(--fail); }
+
+/* 2026-09-05：缺失状态标签可点击展开/收起明细 */
+.badge.st-pill {
+  cursor: pointer;
+  user-select: none;
+}
+.badge.st-pill:hover {
+  filter: brightness(1.18);
+}
+.st-caret {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 2px;
+  transition: transform 0.15s ease;
+}
+.badge.st-pill.open .st-caret {
+  transform: rotate(180deg);
+}
 
 .state-hint {
   color: var(--muted);
@@ -1022,6 +1141,14 @@ textarea:focus,
 }
 
 /* 阶段1：单引擎卸载——操作区横排（徽标/启动按钮 + 卸载按钮） */
+/* 模型行右侧操作列（2026-09-05 重构：竖排、右对齐、内部横排再细分） */
+.model-action {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+
 .model-action-row {
   display: flex;
   align-items: center;
