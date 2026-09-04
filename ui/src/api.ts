@@ -707,9 +707,3 @@ export async function switchEcoEngine(
   await updateSettings({ powerMode, [key]: engine } as Partial<PersistedSettings>);
   await invoke("start_service_cmd");
 }
-
-/** @deprecated 000-plan-3：改用 switchEcoEngine(cat, engine) */
-export async function switchEcoBig(key: EcoBig, powerMode: PowerMode = "eco"): Promise<void> {
-  await updateSettings({ powerMode, ecoBig: key });
-  await invoke("start_service_cmd");
-}
