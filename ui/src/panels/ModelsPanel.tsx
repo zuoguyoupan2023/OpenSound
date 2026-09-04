@@ -355,7 +355,10 @@ export default function ModelsPanel(props: PanelProps) {
           const ecoNotSelected = isEco && isProcessEngine && !ecoOn && (readyNoRun || running); // 节能未启用的大模型
           const ecoMismatch = ecoNotSelected && running; // 期望关闭但实际仍在运行（模式已改未重启）
           const ecoIdle = ecoNotSelected && readyNoRun; // 期望关闭且实际确实没在跑
-          const launching = ecoOn && readyNoRun && isEco && isProcessEngine; // 节能应启用但进程未起（冷启动）
+          // 2026-09-05 修复：进程型引擎（Python 8001/8002/8003）文件就绪但服务未 listen → 显示「启动中…」
+          //（冷启动加载模型可能 1-2 分钟），不再裸显「就绪 · 未运行」让用户以为没启动。
+          // 全能模式恒应启动（ecoOn=true）；节能下仅当它是本类当前启用引擎才算"应启动"。
+          const launching = ecoOn && readyNoRun && isProcessEngine;
           return (
             <div key={m.engine} className={`model-row ${busyHere ? "busy" : ""}`}>
               <div className="model-info">
@@ -481,22 +484,20 @@ export default function ModelsPanel(props: PanelProps) {
               </div>
 
               <div className="model-action">
-                {/* ── 发布版暂隐藏「升级 GPU 加速」按钮（2026-08-31，055 §五）──
-                    原因：CUDA torch 升级属「优化非必需」，发布前降风险；
-                    后端 gpuUpgrade 标志与 uvVenvInstaller 的 torchCpuHere 分支均保留未删。
-                    恢复方法：取消下方注释块 → 重建 exe（坑 M）→ 模型页按钮回归。
+                {/* 升级 GPU 加速（000-install 坑 E/G/O/P 全套：N 卡 + venv torch 为 CPU 版 → 出此按钮；
+                    uvVenvInstaller torchCpuHere 分支自动停占用引擎 → aliyun cu128 wheel → 校验 +cu。
+                    2026-08-31 曾因发布策略暂隐藏；2026-09-05 恢复（源码验证阶段需要可见，055 §五） */}
                 {m.gpuUpgrade && !busyHere && (
                   <Button
                     className="gpu-upgrade"
                     onClick={() => install(m)}
                     disabled={!!installing}
-                    title="当前引擎的 torch 为 CPU 版，无法用显卡加速。升级为 CUDA 版（PyTorch 官方源，约 2.5GB）后推理大幅提速。"
+                    title="当前引擎的 torch 为 CPU 版，无法用显卡加速。升级为 CUDA 版（约 2.5GB，aliyun/官方镜像自动探测）后推理大幅提速。"
                   >
                     <Icon icon="lucide:zap" width={14} height={14} />
                     升级 GPU 加速
                   </Button>
                 )}
-                */}
 
                 {/* 下载源选择（2026-08-31：所有引擎生效）：默认自动 = 官方优先 + 失败/无进展/低速自动切换；可指定源 */}
                 {(m.install?.mirrors?.length || 0) > 1 && needFix(m) && (
