@@ -97,7 +97,35 @@ export default function ModelsPanel(props: PanelProps) {
           .then((d) => setDiskAvail(d.availBytes))
           .catch(() => {});
       });
-    getDeviceProfile().then(setDevice).catch(() => setDevice(null));
+  }, []);
+  // 2026-09-05 修复（用户实测：4070 Ti 机器上 qwen3 卡片只剩「装 CPU 版」）：
+  // 设备画像只在挂载时拉一次、失败即静默置 null 从不重试——安装/重装环境时 9528 正在重启，
+  // 撞上窗口期 → device=null → GPU 双按钮/顶部摘要/可安装徽标全部降级成"无显卡"视图，后端其实是 cuda+12GB。
+  // 改为：成功一次即停；失败（服务重启中/503）则每 6s 自动重试，面板存活期间不放弃。
+  const deviceLoadedRef = useRef(false);
+  useEffect(() => {
+    if (deviceLoadedRef.current) return;
+    let alive = true;
+    const tryLoad = () => {
+      if (deviceLoadedRef.current) return;
+      getDeviceProfile()
+        .then((d) => {
+          if (!alive) return;
+          deviceLoadedRef.current = true;
+          setDevice(d);
+        })
+        .catch(() => {
+          if (!alive) return;
+          // 服务可能在重启/刚启动探测未完成——保持 device=null（UI 按"未知"处理，不误报无显卡），下轮再试
+          setDevice(null);
+        });
+    };
+    tryLoad();
+    const iv = setInterval(tryLoad, 6000);
+    return () => {
+      alive = false;
+      clearInterval(iv);
+    };
   }, []);
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
@@ -565,7 +593,10 @@ export default function ModelsPanel(props: PanelProps) {
                     未安装时两按钮都可点 = 直接按所选版本安装。无 N 卡 → 只显示 CPU 版（禁用态，走通用按钮）。 */}
                 {TORCH_ENGINES.has(m.engine) && !busyHere && (
                   <div className="torch-ver-row">
-                    {device?.gpu?.vramGB ? (
+                    {/* 2026-09-05 修复：探测结果"未知"（device=null，服务刚启动/重启窗口期）时不再假装无显卡——
+                        双按钮照常显示（后端 uvVenvInstaller 有守卫：选了 GPU 版但无 N 卡会自动改装 CPU 并提示），
+                        并给一行透明说明；已知纯 CPU 机（device 有值且 vram 为空）才只给 CPU 版。 */}
+                    {!device || device?.gpu?.vramGB ? (
                       <>
                         <button
                           className={`torch-ver ${m.accelTag?.kind === "cuda" ? "cur" : "alt"}`}
@@ -608,6 +639,11 @@ export default function ModelsPanel(props: PanelProps) {
                         <Icon icon="lucide:cpu" width={13} height={13} />
                         {m.accelTag?.kind === "cpu" ? "CPU 版 · 已装" : "装 CPU 版"}
                       </button>
+                    )}
+                    {!device && (
+                      <span className="state-hint">
+                        显卡探测暂不可用（服务刚启动/重启？）——按钮先按有 N 卡显示；若本机确实无 NVIDIA 显卡，选 GPU 版会被后端自动改装 CPU 版。
+                      </span>
                     )}
                   </div>
                 )}
