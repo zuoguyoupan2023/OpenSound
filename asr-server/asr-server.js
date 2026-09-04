@@ -1085,6 +1085,19 @@ function countFilesDeep(dir, cap = 5000) {
   return n;
 }
 
+// 目录内总字节（递归；含子目录；不存在/读取失败返回 0）——qwen3 hub 缓存等目录型 checks 的 minBytes 用
+function bytesDeep(dir) {
+  let b = 0;
+  try {
+    for (const it of readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, it.name);
+      if (it.isDirectory()) b += bytesDeep(p);
+      else { try { b += statSync(p).size; } catch {} }
+    }
+  } catch {}
+  return b;
+}
+
 // 单项校验：null=通过；否则返回缺失描述
 function checkEntry(c) {
   if (c.type === 'file') {
@@ -1102,6 +1115,12 @@ function checkEntry(c) {
     const p = resolveData(c.path);
     if (!existsSync(p)) return { path: c.path, type: '缺目录', expectFiles: c.minFiles || 1 };
     if (c.minFiles && countFilesDeep(p) < c.minFiles) return { path: c.path, type: '目录不完整', expectFiles: c.minFiles };
+    // 2026-09-05：dir 型支持 minBytes——只数文件不够（如 qwen3 hub 缓存 10 个配置小文件≈1.6MB 也算"够 10 个"，
+    // 实际主权重没下）→ 递归总字节未达下限即视为不完整，直到权重真正落地
+    if (c.minBytes) {
+      const actual = bytesDeep(p);
+      if (actual < c.minBytes) return { path: c.path, type: '目录不完整（字节不足）', expectFiles: c.minBytes, actualBytes: actual };
+    }
     return null;
   }
   if (c.type === 'glob') return globExists(c.pattern) ? null : { path: c.pattern, type: '无匹配' };
@@ -1224,6 +1243,37 @@ function runCmdWithEnv(cmd, args, envAdd = {}, cwdOverride = __dirname, opts = {
             } catch {}
           }
           ctx.nd({ type: 'progress', received: bytes, total: (opts.progressTotal || 0) });
+        } catch {}
+      }, 800);
+    }
+    // 2026-09-05：watchDir = 监控某目录（如 huggingface_hub 快照缓存）递归字节发进度；
+    //   判据与下载源原则统一：连接/启动 15s 无任何字节 → 判死；之后无进展超过 noProgressMs（默认 30s）→ 判死。
+    //   被杀进程 exit 非 0 → 下方 reject → 调用方（qwen3 安装器端点循环）捕获后自动切换下一端点/镜像。
+    else if (opts.watchDir) {
+      const startedAt = Date.now();
+      let lastBytes = 0;
+      let lastGrowthAt = Date.now();
+      let gotAny = false;
+      const killNote = (why) => {
+        ctx.nd({ type: 'log', message: why + '，结束该端点尝试（将自动切换下一端点/镜像）…' });
+        try { p.kill(); } catch {}
+      };
+      progTimer = setInterval(() => {
+        try {
+          let bytes = 0;
+          try {
+            for (const it of readdirSync(opts.watchDir, { withFileTypes: true })) {
+              const full = path.join(opts.watchDir, it.name);
+              if (it.isDirectory()) bytes += bytesDeep(full);
+              else { try { bytes += statSync(full).size; } catch {} }
+            }
+          } catch {}
+          ctx.nd({ type: 'progress', received: bytes, total: (opts.progressTotal || 0) });
+          if (bytes > lastBytes) { lastBytes = bytes; lastGrowthAt = Date.now(); gotAny = true; }
+          const connStall = !gotAny && Date.now() - startedAt > 15_000;
+          const stall = Date.now() - lastGrowthAt > (opts.noProgressMs || DL_NO_PROGRESS_MS);
+          if (connStall) killNote('⚠️ 连接 ' + Math.round((Date.now() - startedAt) / 1000) + 's 无任何数据');
+          else if (stall) killNote(`⚠️ 无进展超过 ${(opts.noProgressMs || DL_NO_PROGRESS_MS) / 1000}s`);
         } catch {}
       }, 800);
     }
@@ -1774,9 +1824,15 @@ function qwen3ModelInstaller(venvInst) {
     for (const ep of endpoints) {
       ctx.nd({ type: 'log', message: `huggingface_hub ← ${ep} …` });
       try {
+        // 2026-09-05：watchDir 监控 hf hub 快照目录实时进度；官方直连连接挂起/无进展 15s/30s 自动判死 →
+        // 进程非 0 退出 → 捕获 → 切下一端点（此前无判据，官方被墙时永久挂起无输出）
+        const hubRepo = path.join(CACHE_DIR, 'hf', 'hub', 'models--Qwen--Qwen3-TTS-12Hz-0.6B-CustomVoice');
         await runCmdWithEnv(py, ['-c',
           "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice'))"],
-          { HF_HOME: path.join(CACHE_DIR, 'hf'), HF_ENDPOINT: ep })(ctx);
+          { HF_HOME: path.join(CACHE_DIR, 'hf'), HF_ENDPOINT: ep }, __dirname, {
+            watchDir: hubRepo,
+            progressTotal: Math.round((mf.profile?.diskGB || 2.3) * 1024 * 1024 * 1024),
+          })(ctx);
         lastErr = null;
         break;
       } catch (e) {
