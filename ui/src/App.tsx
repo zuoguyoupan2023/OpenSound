@@ -12,6 +12,8 @@ import {
   installRuntime,
   installPythonBase,
   listenRuntimeProgress,
+  restartService,
+  markServiceLaunchRequested,
   type RuntimeStatus,
   type RuntimeProgress,
 } from "./api";
@@ -156,6 +158,9 @@ function App() {
       try {
         const s = await invoke<ServiceStatus>("get_service_status");
         setStatus(s);
+        // 2026-09-05：Rust 侧在 App 启动就绪时会自动 start_service（冷启动全部引擎）——
+        // 播下启动意图，让「启动中…」在真实冷启动期显示、而不是被当成"假转圈"砍掉。
+        if (s.child_alive) markServiceLaunchRequested();
       } catch (err) {
         console.error("get_service_status 失败:", err);
       }
@@ -239,7 +244,7 @@ function App() {
 
   const doStart = async () => {
     try {
-      await invoke("start_service_cmd");
+      await restartService();
     } catch (err) {
       alert("启动失败: " + err);
     }

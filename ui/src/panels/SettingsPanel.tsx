@@ -11,6 +11,7 @@ import {
   migrateModelsToData,
   clearData,
   clearDataPreview,
+  restartService,
   type ClearScope,
   type PowerMode,
   type EcoTts,
@@ -174,7 +175,7 @@ export default function SettingsPanel(props: PanelProps) {
     setDataRootMsg("");
     try {
       await setDataRoot(modelDataRoot.trim());
-      await invoke("start_service_cmd");
+      await restartService();
       setDataRootMsg(`已保存并重启服务。模型/缓存/音色将落盘于：${modelDataRoot.trim() || "默认数据目录"}`);
       setTimeout(() => props.refresh(), 800);
     } catch (e) {
@@ -242,7 +243,7 @@ export default function SettingsPanel(props: PanelProps) {
     try {
       await invoke("set_server_path", { path: serverPath });
       // 重启服务使新路径生效
-      await invoke("start_service_cmd");
+      await restartService();
       setPathMsg("已保存并重启服务");
       setTimeout(() => props.refresh(), 500);
     } catch (e) {
@@ -258,7 +259,7 @@ export default function SettingsPanel(props: PanelProps) {
     setModeMsg("");
     try {
       await updateSettings({ powerMode, ecoTts, ecoAsr });
-      await invoke("start_service_cmd");
+      await restartService();
       setModeMsg(
         powerMode === "full"
           ? "已保存并重启服务（全能模式：全部模型拉起）"

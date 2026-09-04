@@ -1,12 +1,11 @@
 import { useRef, useState, useEffect } from "react";
 import type { PanelProps } from "../App";
 import { Icon } from "@iconify/react";
-import { voiceChat, updateSettings, getPersistedSettings, computeStarting, applyEcoDefaults, switchEcoEngine, engineDisabledInEco, TTS_PANEL_TO_ID, type EcoTts, type EcoAsr, type PowerMode } from "../api";
+import { voiceChat, updateSettings, getPersistedSettings, computeStarting, applyEcoDefaults, switchEcoEngine, engineDisabledInEco, restartService, TTS_PANEL_TO_ID, type EcoTts, type EcoAsr, type PowerMode } from "../api";
 import { createRecorder, type Recorder, playWav, stopAudio } from "../audio";
 import { saveRecording, saveTts } from "../audioStore";
 import { Panel, Button, EngineBadge, Select, Spinner } from "../components/ui";
 import { showToast } from "../toast";
-import { invoke } from "@tauri-apps/api/core";
 
 type Stage = "idle" | "recording" | "processing" | "speaking" | "done";
 
@@ -53,7 +52,7 @@ export default function HomePanel(props: PanelProps) {
         if (!cur.llmModel && defs.llmModel) upd.llmModel = defs.llmModel;
       }
       await updateSettings(upd as never);
-      await invoke("start_service_cmd");
+      await restartService();
       showToast(`已切换到${m === "eco" ? "节能" : "全能"}模式，服务重启中…`);
       setTimeout(() => props.refresh(), 800);
     } catch (e) {

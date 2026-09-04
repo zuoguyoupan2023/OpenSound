@@ -1,11 +1,11 @@
 import { useState, type ReactNode } from "react";
 import type { ModelInfo } from "../types";
 import { Icon } from "@iconify/react";
-import { invoke } from "@tauri-apps/api/core";
 import {
   ecoActiveEngine,
   ecoCategoryKey,
   getPersistedSettings,
+  restartService,
   switchEcoEngine,
   updateSettings,
 } from "../api";
@@ -111,7 +111,7 @@ export default function EcoResourceTables(props: {
     setBusy("*apply*");
     try {
       await updateSettings(upd as never);
-      await invoke("start_service_cmd");
+      await restartService();
       setMsg("已应用默认（每类主文件最小已装），服务重启中…");
       bump();
       props.refresh();

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { PanelProps } from "../App";
 import { Icon } from "@iconify/react";
-import { cancelInstall, getDisk, getDiskLocal, getDeviceProfile, installModel, getPersistedSettings, uninstallModel, uninstallPreview } from "../api";
+import { cancelInstall, getDisk, getDiskLocal, getDeviceProfile, installModel, getPersistedSettings, uninstallModel, uninstallPreview, isServiceLaunchPending, restartService } from "../api";
 import type { DeviceProfile, EngineFit, InstallProgress, ModelInfo } from "../types";
 import { Panel, Button, Spinner } from "../components/ui";
 import EcoResourceTables from "./EcoResourceTables";
@@ -48,6 +48,10 @@ const ACCEL_LABEL: Record<string, string> = {
 const STARTER_ENGINES = ["sensevoice", "kokoro", "llm-0.5b"];
 // 000-plan：torch 系引擎（Python venv + torch）支持 CPU/GPU 版"安装即选择"
 const TORCH_ENGINES = new Set(["qwen3", "cosyvoice-clone", "sensevoice-original"]);
+// 2026-09-05：装完自动重启的「真做了事」判据——安装器纯空跑（一切已就绪秒过）不自动重启打扰；
+// 出现过真实工作信号（建 venv / 装依赖 / 换 torch / 下载 / 补依赖 / 停引擎）才在成功后自动重启服务启用。
+const INSTALL_DID_WORK =
+  /(缺引擎环境|venv 创建|安装依赖|换装|wheel|下载|拉取|模型缺失|补齐|本地安装|重装|已停止端口|自动停止)/;
 
 // 五态 → 徽标文案与样式类（P1：unknown = 服务未启动时的本地清单占位）
 const STATE_META: Record<string, { label: string; cls: string; icon: string }> = {
@@ -104,18 +108,46 @@ export default function ModelsPanel(props: PanelProps) {
     setInstalling(m.engine);
     setProgress([]);
     setPct(null);
+    // 本趟安装产生的 log 行快照（用于判断安装器是否"真做了事"，状态更新是异步的不能读 progress state）
+    const lines: InstallProgress[] = [];
     const onProgress = (p: InstallProgress) => {
       if (p.type === "progress") {
         setPct({ received: p.received || 0, total: p.total || 0 });
       } else if (p.type === "log" && /已存在，跳过/.test(p.message || "")) {
         /* 静默跳过行不进日志 */
       } else {
+        lines.push(p);
         setProgress((prev) => [...prev, p]);
       }
     };
     try {
       await installModel(m.engine, onProgress, { mirror: mirrorPick[m.engine], confirmBigDownload, torch: torchOverride || "auto" });
       await props.refresh();
+      // 2026-09-05 修复（用户实测：装完 sensevoice-原始 卡片无限「启动中」，等 10 分钟不动，
+      // 手动全停再开才好）：8001/8002/8003 进程型引擎只有 start-all 冷启动才会被拉起；安装/换装
+      //（尤其 torch 换 CUDA 会停掉全部引擎）完成后必须重启一次服务，新引擎才真正启动。
+      // 仅当安装器"真做了事"才自动重启（纯空跑不打扰）；节能下未被本类启用的引擎不拉起（start-all 按 eco 选择跳过）。
+      const didWork = lines.some((l) => l.type === "log" && INSTALL_DID_WORK.test(l.message || ""));
+      if (didWork && TORCH_ENGINES.has(m.engine) && ecoOnFor(m)) {
+        setProgress((prev) => [
+          ...prev,
+          {
+            type: "log",
+            message: `「${m.label}」已就绪——自动重启服务以启用该引擎（其余进程型引擎一并拉起，冷启动需等待）…`,
+          },
+        ]);
+        await restartService();
+        setProgress((prev) => [
+          ...prev,
+          {
+            type: "log",
+            message: "已请求重启服务，等待引擎就绪…（本卡片此时显示「启动中」即真实加载中，约 1 分钟内转「运行中」）",
+          },
+        ]);
+        props.refresh();
+        setTimeout(() => props.refresh(), 8000);
+        setTimeout(() => props.refresh(), 24000);
+      }
     } catch (e) {
       const msg = String(e);
       // S5/033 修复：后端要求大流量下载二次确认（目前仅 cosyvoice-clone 的缺失权重）——
@@ -218,6 +250,39 @@ export default function ModelsPanel(props: PanelProps) {
   const needFix = (m: ModelInfo) => {
     const s = stateOf(m);
     return s === "partial-files" || s === "missing-runtime" || s === "incomplete";
+  };
+
+  // 000-plan-3：该引擎是否属于"当前应启动"（全能恒真；节能 = 本类启用引擎 或 非 TTS/ASR 类）
+  const ecoOnFor = (m: ModelInfo): boolean => {
+    const pm = getPersistedSettings();
+    if (pm.powerMode !== "eco") return true;
+    if (m.category !== "tts" && m.category !== "asr") return true;
+    return m.category === "tts" ? pm.ecoTts === m.engine : pm.ecoAsr === m.engine;
+  };
+
+  // 2026-09-05：「重启服务」按钮（安装/换装后或引擎掉线时拉起服务；全局启动，冷启动需等待）
+  const restartServiceNow = async (m: ModelInfo) => {
+    if (installing) return;
+    setProgress([]);
+    setProgress((prev) => [
+      ...prev,
+      {
+        type: "log",
+        message: `「${m.label}」请求重启本地服务（将重新拉起全部进程型引擎，冷启动需等待）…`,
+      },
+    ]);
+    try {
+      await restartService();
+      setProgress((prev) => [
+        ...prev,
+        { type: "log", message: "已请求重启服务，等待引擎就绪…（本卡片「启动中」即真实加载中，约 1 分钟内转「运行中」）" },
+      ]);
+    } catch (e) {
+      setProgress((prev) => [...prev, { type: "error", message: `重启服务失败：${e}（也可点侧边栏「启动」重试）` }]);
+    }
+    props.refresh();
+    setTimeout(() => props.refresh(), 8000);
+    setTimeout(() => props.refresh(), 24000);
   };
 
   // ---------- 设备匹配（4.3 验收①②）：✅ 可安装 / ⚙️ 可装但慢 / 🚫 设备不满足 ----------
@@ -339,28 +404,25 @@ export default function ModelsPanel(props: PanelProps) {
         {props.models.map((m) => {
           const st = STATE_META[stateOf(m)] || STATE_META.ready;
           const busyHere = installing === m.engine;
-          // 000-plan-3：节能 = 每类同时仅启用 1 个模型（无"禁用"）。TTS/ASR 引擎是否为本类当前启用
-          //（LLM 档位在 9528 内按请求换载、无进程层"启用"，不在此列）。ecoTts/ecoAsr 未配置（旧 config）→ 该类全未启用。
-          const pm = getPersistedSettings();
-          const isEco = pm.powerMode === "eco";
-          const ecoOn =
-            !isEco ||
-            (m.category !== "tts" && m.category !== "asr") ||
-            (m.category === "tts" ? pm.ecoTts === m.engine : pm.ecoAsr === m.engine);
+          const ecoOn = ecoOnFor(m);
           const readyNoRun = stateOf(m) === "ready";
           const running = stateOf(m) === "running";
-          // 进程型大引擎才有"节能未启用 → 未跑"的真实状态可标（Python 8001/8002/8003，可被 skip）；
+          // 进程型大引擎才有"应启动"的真实状态可标（Python 8001/8002/8003，可被 skip/换装停掉）；
           // 9528 内轻量（kokoro/量化 sensevoice/whisper/LLM）常驻无进程可关 → 卡片显示真实运行状态，
           // 节能停用只在前端（面板下拉 + 顶部资源表）表达。
-          const isProcessEngine = m.engine === "qwen3" || m.engine === "cosyvoice-clone" || m.engine === "sensevoice-original";
+          const isProcessEngine = TORCH_ENGINES.has(m.engine);
           // 表里如一：显示真实状态；模式期望（节能未选）与真实状态不符时明确提示，不隐瞒
-          const ecoNotSelected = isEco && isProcessEngine && !ecoOn && (readyNoRun || running); // 节能未启用的大模型
+          const ecoNotSelected =
+            getPersistedSettings().powerMode === "eco" && isProcessEngine && !ecoOn && (readyNoRun || running); // 节能未启用的大模型
           const ecoMismatch = ecoNotSelected && running; // 期望关闭但实际仍在运行（模式已改未重启）
           const ecoIdle = ecoNotSelected && readyNoRun; // 期望关闭且实际确实没在跑
-          // 2026-09-05 修复：进程型引擎（Python 8001/8002/8003）文件就绪但服务未 listen → 显示「启动中…」
-          //（冷启动加载模型可能 1-2 分钟），不再裸显「就绪 · 未运行」让用户以为没启动。
-          // 全能模式恒应启动（ecoOn=true）；节能下仅当它是本类当前启用引擎才算"应启动"。
-          const launching = ecoOn && readyNoRun && isProcessEngine;
+          // 2026-09-05 修复（装完 sensevoice-原始 卡片无限「启动中」的根因）：
+          // 「启动中…」只有在最近确实请求过一次服务启动（启动意图宽限期内）时才是真的——
+          // 文件就绪但没人启动（安装/换装后未重启、或上次启动失败）→ 如实显示「就绪 · 未运行」+「重启服务」按钮，
+          // 不再拿"就绪但没在听"假装"正在启动"让用户无限等待。
+          const launchPending = isServiceLaunchPending();
+          const launching = ecoOn && readyNoRun && isProcessEngine && launchPending;
+          const needsRestart = ecoOn && readyNoRun && isProcessEngine && !launchPending;
           return (
             <div key={m.engine} className={`model-row ${busyHere ? "busy" : ""}`}>
               <div className="model-info">
@@ -424,6 +486,13 @@ export default function ModelsPanel(props: PanelProps) {
                       <Icon icon={st.icon} width={13} height={13} /> {st.label}
                       <span className="state-hint mismatch-hint">
                         ⚠️ 节能模式已设置，此服务仍在运行（占用内存）——重启服务后关闭
+                      </span>
+                    </>
+                  ) : needsRestart ? (
+                    <>
+                      <Icon icon={st.icon} width={13} height={13} /> {st.label}
+                      <span className="state-hint">
+                        进程引擎未在运行（安装/换装后需重启服务，或上次启动失败）——点右侧「重启服务」拉起，冷启动约 1 分钟
                       </span>
                     </>
                   ) : (
@@ -579,9 +648,15 @@ export default function ModelsPanel(props: PanelProps) {
                   </div>
                 ) : !needFix(m) ? (
                   <div className="model-action-row">
-                    <span className={`badge ${st.cls}`}>
-                      <Icon icon={st.icon} width={13} height={13} /> {st.label}
-                    </span>
+                    {needsRestart ? (
+                      <Button onClick={() => restartServiceNow(m)} disabled={!!installing || uninstalling}>
+                        <Icon icon="lucide:power" width={14} height={14} /> 重启服务
+                      </Button>
+                    ) : (
+                      <span className={`badge ${st.cls}`}>
+                        <Icon icon={st.icon} width={13} height={13} /> {st.label}
+                      </span>
+                    )}
                     <Button
                       variant="ghost"
                       className="uninstall-btn"

@@ -679,6 +679,12 @@ export function computeStarting(
     if (s === "sensevoice-original") return ecoAsr === "sensevoice-original";
     return true; // 9528 内轻量/LLM：无独立进程，恒可用
   };
+  // 2026-09-05：「启动中…」必须对应一次真实的启动请求，否则就是假转圈（用户实测：
+  // 安装 sensevoice-原始 换 CUDA torch 时安装器停掉 8001/8003、又无人重启 8002 →
+  // 卡片无限「启动中」等到天荒地老，只有手动全停再开才好）。
+  // 启动意图 = 最近一次 restartService/启动入口的时间戳，宽限期（冷启动上限）内才算启动中；
+  // 过期仍"就绪未监听" → 显示「就绪 · 未运行」+ 「重启服务」按钮（不再假装在启动）。
+  const launching = isServiceLaunchPending();
   // 032 修复：冷启动（启动中…）的前提是「模型文件+环境已就绪（state=ready/running），只差服务进程」；
   // 未下载/缺环境的引擎显示「未就绪」，不再无限转圈、误导以为在自动装模型。
   const fileReady = (engine: string) =>
@@ -686,16 +692,43 @@ export function computeStarting(
   return {
     asr: health == null,
     kokoro: health == null,
-    qwen3: shouldStart("qwen3") && health?.tts.qwen3 !== "reachable" && fileReady("qwen3"),
+    qwen3: launching && shouldStart("qwen3") && health?.tts.qwen3 !== "reachable" && fileReady("qwen3"),
     cosyvoice:
-      shouldStart("cosyvoice") && health?.tts.cosyvoice !== "reachable" && fileReady("cosyvoice-clone"),
+      launching &&
+      shouldStart("cosyvoice") &&
+      health?.tts.cosyvoice !== "reachable" &&
+      fileReady("cosyvoice-clone"),
     sensevoiceOriginal:
+      launching &&
       shouldStart("sensevoice-original") &&
       fileReady("sensevoice-original") &&
       !health?.models?.some((m) => m.engine === "sensevoice-original" && m.installed),
     shouldStart,
     ecoDisabled: (s) => eco && !shouldStart(s),
   };
+}
+
+// ---------- 服务启动意图（2026-09-05：「启动中」诚实化 + 装完自动重启的统一入口） ----------
+// 「启动中…」只有在最近确实请求过一次服务启动（或 App 启动时自动拉起）时才是真的。
+// 所有会重启服务的入口必须走 restartService()（标记意图 + Rust start_service_cmd），
+// 否则 UI 会拿「文件就绪但服务没在听」当「正在启动」无限转圈。
+const LAUNCH_GRACE_MS = 4 * 60 * 1000; // 冷启动宽限 4 分钟（qwen3/funasr 约 40s、cosyvoice 9GB 模型 1–2 分钟+）
+let launchRequestedAt: number | null = null;
+
+/** 记录一次服务启动请求（任何入口：App 启动按钮 / 设置页重启 / 节能切换 / 模型页安装完成自动重启） */
+export function markServiceLaunchRequested(): void {
+  launchRequestedAt = Date.now();
+}
+
+/** 是否处于「刚请求启动、服务还在冷启动」的宽限窗口内 */
+export function isServiceLaunchPending(): boolean {
+  return launchRequestedAt != null && Date.now() - launchRequestedAt < LAUNCH_GRACE_MS;
+}
+
+/** 统一重启入口：标记启动意图 → Rust 停全部并冷启动 start-all（幂等：已运行的服务自动跳过） */
+export async function restartService(): Promise<void> {
+  markServiceLaunchRequested();
+  await invoke("start_service_cmd");
 }
 
 // 节能模式下从模型/引擎选择处切换类别启用引擎：更新 ecoTts/ecoAsr → 重启服务（关闭旧引擎进程、启动新选引擎）
@@ -706,5 +739,5 @@ export async function switchEcoEngine(
 ): Promise<void> {
   const key = ecoCategoryKey(cat);
   await updateSettings({ powerMode, [key]: engine } as Partial<PersistedSettings>);
-  await invoke("start_service_cmd");
+  await restartService();
 }
