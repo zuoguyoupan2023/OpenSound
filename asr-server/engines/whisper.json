@@ -20,24 +20,24 @@
         "file": "models/sherpa-whisper/base-encoder.onnx",
         "bytes": 95087154,
         "mirrors": [
-          { "name": "hf-mirror", "url": "https://hf-mirror.com/csukuangfj/sherpa-onnx-whisper-base/resolve/main/base-encoder.onnx" },
-          { "name": "huggingface", "url": "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-base/resolve/main/base-encoder.onnx" }
+          { "name": "huggingface", "url": "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-base/resolve/main/base-encoder.onnx" },
+          { "name": "hf-mirror", "url": "https://hf-mirror.com/csukuangfj/sherpa-onnx-whisper-base/resolve/main/base-encoder.onnx" }
         ]
       },
       {
         "file": "models/sherpa-whisper/base-decoder.onnx",
         "bytes": 196548998,
         "mirrors": [
-          { "name": "hf-mirror", "url": "https://hf-mirror.com/csukuangfj/sherpa-onnx-whisper-base/resolve/main/base-decoder.onnx" },
-          { "name": "huggingface", "url": "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-base/resolve/main/base-decoder.onnx" }
+          { "name": "huggingface", "url": "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-base/resolve/main/base-decoder.onnx" },
+          { "name": "hf-mirror", "url": "https://hf-mirror.com/csukuangfj/sherpa-onnx-whisper-base/resolve/main/base-decoder.onnx" }
         ]
       },
       {
         "file": "models/sherpa-whisper/base-tokens.txt",
         "bytes": 816730,
         "mirrors": [
-          { "name": "hf-mirror", "url": "https://hf-mirror.com/csukuangfj/sherpa-onnx-whisper-base/resolve/main/base-tokens.txt" },
-          { "name": "huggingface", "url": "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-base/resolve/main/base-tokens.txt" }
+          { "name": "huggingface", "url": "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-base/resolve/main/base-tokens.txt" },
+          { "name": "hf-mirror", "url": "https://hf-mirror.com/csukuangfj/sherpa-onnx-whisper-base/resolve/main/base-tokens.txt" }
         ]
       }
     ],

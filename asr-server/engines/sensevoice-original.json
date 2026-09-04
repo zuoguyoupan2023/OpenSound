@@ -27,6 +27,7 @@
   ],
   "install": {
     "kind": "env",
-    "message": "SenseVoice 原始版：① 安装引擎环境（.venv-funasr，含 funasr/torch/numpy/soundfile，约 2.5GB）点「检测/修复」+ 二次确认；② 模型权重三件套（主模型 ~900MB + fsmn-vad + punc-cn-en，合计约 2.1GB）二次确认后自动下载到 models/（ModelScope 多镜像 + 断点续传 + 字节校验）；装完重启服务即可用。"
+    "message": "SenseVoice 原始版：① 安装引擎环境（.venv-funasr，含 funasr/torch/numpy/soundfile，约 2.5GB）点「检测/修复」+ 二次确认；② 模型权重三件套（主模型 ~900MB + fsmn-vad + punc-cn-en，合计约 2.1GB）二次确认后自动下载到 models/（modelscope 官方优先 + hf-mirror 兜底，断点续传 + 字节校验）；装完重启服务即可用。",
+    "mirrors": ["modelscope", "hf-mirror"]
   }
 }

@@ -24,6 +24,13 @@ const catLabel: Record<string, string> = {
   llm: "对话 LLM",
 };
 
+// 2026-08-31：下载源显示名（官方/镜像区分；与 engines/*.json install.mirrors 同名）
+const MIRROR_LABEL: Record<string, string> = {
+  huggingface: "huggingface（官方）",
+  "hf-mirror": "hf-mirror（镜像）",
+  modelscope: "modelscope（官方）",
+};
+
 // ---------- 设备画像（000-device-vs-model.md §四 / 4.3 验收） ----------
 const TIER_LABEL: Record<string, string> = {
   entry: "入门档",
@@ -481,7 +488,7 @@ export default function ModelsPanel(props: PanelProps) {
                 )}
                 */}
 
-                {/* 镜像切换：仅 url-multi 且未装好时显示 */}
+                {/* 下载源选择（2026-08-31：所有引擎生效）：默认自动 = 官方优先 + 失败/无进展/低速自动切换；可指定源 */}
                 {(m.install?.mirrors?.length || 0) > 1 && needFix(m) && (
                   <select
                     className="mirror-sel"
@@ -489,12 +496,12 @@ export default function ModelsPanel(props: PanelProps) {
                     onChange={(e) =>
                       setMirrorPick((prev) => ({ ...prev, [m.engine]: e.target.value }))
                     }
-                    title="下载镜像源"
+                    title="下载源：默认「自动」（官方优先，失败/无进展 30s/低速 60s 自动切换镜像）；可手动指定某一源"
                   >
-                    <option value="">镜像：默认顺序</option>
+                    <option value="">自动（官方优先 · 自动切换）</option>
                     {m.install!.mirrors.map((x) => (
                       <option key={x} value={x}>
-                        镜像：{x}
+                        {MIRROR_LABEL[x] || x}
                       </option>
                     ))}
                   </select>

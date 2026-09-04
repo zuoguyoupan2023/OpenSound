@@ -32,6 +32,7 @@
   ],
   "install": {
     "kind": "legacy",
-    "note": "S4 全自举链：源码 vendored / clone 兜底 / venv 自建；2026-08-28 起**整仓全量下载**（modelscope→hf-mirror→huggingface 多镜像 + .part 续传；ModelScope FunAudioLLM/Fun-CosyVoice3-0.5B-2512 20 文件字节实录与 HF 一致、Range 206 续传，已列首选），不再维护\"必需子集\"；安装器同时自动补 vendor matcha/models（jsdelivr 全量，S4 漏拷）+ 旧锁漏装的运行时依赖"
+    "note": "S4 全自举链：源码 vendored / clone 兜底 / venv 自建；2026-08-28 起**整仓全量下载**（modelscope 官方优先 → hf-mirror → huggingface 多镜像自动切换 + .part 续传；ModelScope FunAudioLLM/Fun-CosyVoice3-0.5B-2512 20 文件字节实录与 HF 一致、Range 206 续传，已列首选），不再维护\"必需子集\"；安装器同时自动补 vendor matcha/models（jsdelivr 全量，S4 漏拷）+ 旧锁漏装的运行时依赖",
+    "mirrors": ["modelscope", "hf-mirror", "huggingface"]
   }
 }

@@ -14,6 +14,7 @@
   ],
   "install": {
     "kind": "env",
-    "message": "Qwen3-TTS：① 安装引擎环境（.venv-qwen3，含 qwen-tts/torch，约 2.5GB）点「检测/修复」+ 二次确认；② 模型在服务首次启动时自动下载到 models/hf/。"
+    "message": "Qwen3-TTS：① 安装引擎环境（.venv-qwen3，含 qwen-tts/torch，约 2.5GB）点「检测/修复」+ 二次确认；② 模型在二次确认后自动下载到 models/hf/（官方 huggingface.co 优先 → hf-mirror，失败自动切换）。",
+    "mirrors": ["huggingface", "hf-mirror"]
   }
 }

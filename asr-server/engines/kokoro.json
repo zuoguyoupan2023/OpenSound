@@ -21,5 +21,11 @@
   "runtime": [
     { "kind": "path", "path": "node_modules/sherpa-onnx-node/package.json", "label": "npm: sherpa-onnx-node" }
   ],
-  "install": { "kind": "script", "cmd": "node", "args": ["download-kokoro.js"], "note": "hf-mirror 清单化并发下载，GitHub tar 兜底" }
+  "install": {
+    "kind": "script",
+    "cmd": "node",
+    "args": ["download-kokoro.js"],
+    "note": "官方 huggingface 优先 → hf-mirror（失败/无进展 30s/低速 60s 自动切换）；GitHub releases tar 整体兜底",
+    "mirrors": ["huggingface", "hf-mirror"]
+  }
 }

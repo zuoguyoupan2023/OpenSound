@@ -146,6 +146,8 @@ struct EngineJson {
 struct EngineInstallJson {
     #[serde(default)] kind: String,
     #[serde(default)] files: Vec<EngineFileJson>,
+    // 2026-08-31：非 url-multi 型（script/env/legacy）的结构化镜像名列表（官方优先顺序）
+    #[serde(default)] mirrors: Vec<String>,
 }
 #[derive(serde::Deserialize, Clone)]
 struct EngineFileJson {
@@ -196,7 +198,9 @@ fn get_models_catalog(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) ->
                 kind: kind.clone(),
                 mirrors: if kind == "url-multi" {
                     i.files.first().map(|f| f.mirrors.iter().map(|m| m.name.clone()).collect()).unwrap_or_default()
-                } else { Vec::new() },
+                } else {
+                    i.mirrors.clone()
+                },
             }
         });
         out.push(CatalogModel {

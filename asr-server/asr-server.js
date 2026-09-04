@@ -17,7 +17,7 @@
 
 import http from 'node:http';
 import { execSync, spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, statfsSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, statfsSync, unlinkSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDeviceProfile } from './device-profile.js';
@@ -1007,11 +1007,12 @@ async function collectModels() {
         return { kind: 'cpu', label: 'CPU' };
       })(),
       // S3：安装方式与可选镜像名（UI 据此渲染镜像切换下拉）
+      // 2026-08-31：所有 install kind 都从清单读 mirrors（url-multi 取 files[0].mirrors，其余取 install.mirrors）
       install: mf.install ? {
         kind: mf.install.kind,
         mirrors: mf.install.kind === 'url-multi'
           ? (mf.install.files?.[0]?.mirrors || []).map((x) => x.name)
-          : []
+          : (mf.install.mirrors || [])
       } : null
     });
   }
@@ -1254,12 +1255,26 @@ const ACTIVE_DOWNLOAD = { proc: null, cancelled: false };
 
 // S2/S3 通用单文件多镜像下载器（manifest install.kind=url-multi 专用）：
 // .part 临时文件 → 完成后原子 rename；curl -C - 断点续传；
-// --speed-limit/--speed-time：速度低于阈值持续一段时间视为失败 → 自动换下一个镜像源；
-// opts.mirror：把指定镜像排到最前（UI 镜像切换）；
+// 下载源原则（2026-08-31 用户拍板，写进 000/AGENTS/043）：官方优先，失败立即换源；
+//   无进展（30s 无字节增长）换源；低速（<100KB/s 持续 60s）换源；
+// opts.mirror：指定镜像排到最前（UI 用户自选源；默认空 = 自动 = 官方优先顺序）；
 // 进度：每 800ms 读 .part 实际大小，发 NDJSON {type:'progress', received, total}。
+const DL_NO_PROGRESS_MS = 30_000;   // 无进展（字节不增长）超过该时长 → 杀 curl 换源
+const DL_SPEED_LIMIT = 102_400;     // 低速阈值：<100KB/s
+const DL_SPEED_TIME = 60;           // 持续该秒数 → 判死换源
 function downloadOneFile(fileSpec, ctx, opts = {}) {
   const target = resolveData(fileSpec.file);
-  mkdirSync(path.dirname(target), { recursive: true });
+  // 2026-08-31 防御：父路径被同名"文件"挡住（如动态清单目录条目被误下载成文件）→ 删掉重建目录，
+  // 否则 mkdir 抛 EEXIST（"file already exists, mkdir ..."）。磁盘残留也能自愈，无需用户手动删。
+  const parent = path.dirname(target);
+  try {
+    const st = statSync(parent);
+    if (!st.isDirectory()) {
+      ctx.nd({ type: 'log', message: `⚠️ 父路径 ${path.basename(parent)} 是文件（残留），删除后重建目录…` });
+      rmSync(parent, { force: true });
+    }
+  } catch {}
+  mkdirSync(parent, { recursive: true });
   return new Promise((resolve, reject) => {
     const mirrors = [...(fileSpec.mirrors || [])];
     if (opts.mirror) {
@@ -1270,11 +1285,23 @@ function downloadOneFile(fileSpec, ctx, opts = {}) {
     const part = target + '.part';
     const total = fileSpec.bytes || 0;
     let finished = false;
+    let lastSize = 0;
+    let lastGrowthAt = Date.now();
     const timer = setInterval(() => {
       if (finished) return;
       try {
         const s = statSync(part).size;
         ctx.nd({ type: 'progress', file: path.basename(fileSpec.file), received: s, total });
+        if (s > lastSize) {
+          lastSize = s;
+          lastGrowthAt = Date.now();
+        } else if (Date.now() - lastGrowthAt > DL_NO_PROGRESS_MS) {
+          // 无进展超时：杀当前 curl（exit 非 0 → 自动换下一镜像），保留 .part 续传
+          if (ACTIVE_DOWNLOAD.proc) { try { ACTIVE_DOWNLOAD.proc.kill(); } catch {} }
+          ctx.nd({ type: 'log', message: `⚠️ 无进展超过 ${DL_NO_PROGRESS_MS / 1000}s（${path.basename(fileSpec.file)} 无字节增长），切换下一镜像…` });
+          lastSize = s;
+          lastGrowthAt = Date.now(); // 重置，避免重复触发
+        }
       } catch {}
     }, 800);
     const finish = (fn, arg) => { finished = true; clearInterval(timer); ACTIVE_DOWNLOAD.proc = null; fn(arg); };
@@ -1288,11 +1315,11 @@ function downloadOneFile(fileSpec, ctx, opts = {}) {
         return finish(reject, new Error(`所有镜像均失败：${fileSpec.file}（已保留 .part，可重试续传）`));
       }
       const m = mirrors[i++];
-      ctx.nd({ type: 'log', message: `下载 ${path.basename(fileSpec.file)} ← ${m.name}${opts.mirror === m.name ? '（指定）' : ''} …` });
+      ctx.nd({ type: 'log', message: `下载 ${path.basename(fileSpec.file)} ← ${m.name}${opts.mirror === m.name ? '（用户指定）' : ''} …` });
       // -sS：静默 curl 进度动画（+cu 下载时 % Total 表头刷日志是坑），但保留真实错误输出；
       // 进度由下方每 800ms 读 .part 大小发 type:'progress'（App 进度条），不靠 curl 打印。
       const p = spawn('curl', ['-sS', '-L', '-C', '-', '--connect-timeout', '15', '--max-time', '14400',
-        '--speed-limit', '20480', '--speed-time', '90', // <20KB/s 持续 90s 判失败 → 换源
+        '--speed-limit', String(DL_SPEED_LIMIT), '--speed-time', String(DL_SPEED_TIME), // <100KB/s 持续 60s 判死 → 换源
         '-o', part, m.url], { cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'] });
       ACTIVE_DOWNLOAD.proc = p;
       let buf = '';
@@ -1333,9 +1360,24 @@ function manifestUrlMultiInstaller(mf) {
     for (const f of mf.install.files || []) {
       // 坑 U 同族（S9 修复）：跳过检查必须与 downloadOneFile 同一套路径解析（resolveData → 数据目录）
       const target = resolveData(f.file);
+      // 2026-08-31 修复：跳过判断加字节校验——存在但大小不符的损坏文件删掉重下（此前被"已存在"跳过 → 死循环）
       if (existsSync(target)) {
-        ctx.nd({ type: 'log', message: `已存在，跳过：${f.file}` });
-        continue;
+        if (f.bytes) {
+          try {
+            if (statSync(target).size !== f.bytes) {
+              ctx.nd({ type: 'log', message: `⚠️ ${f.file} 存在但大小不符（期望 ${f.bytes} / 实际 ${statSync(target).size}），删除重下…` });
+              rmSync(target, { force: true });
+            } else {
+              ctx.nd({ type: 'log', message: `已存在且完整，跳过：${f.file}` });
+              continue;
+            }
+          } catch {
+            rmSync(target, { force: true });
+          }
+        } else {
+          ctx.nd({ type: 'log', message: `已存在，跳过：${f.file}` });
+          continue;
+        }
       }
       await downloadOneFile(f, ctx, opts);
       if (f.bytes) {
@@ -1391,7 +1433,11 @@ const CV_COSMETIC_RE = /^(\.gitattributes|README\.md|asset\/)/;
 async function cosyVoiceManifest() {
   try {
     const d = JSON.parse(await fetchText('https://modelscope.cn/api/v1/models/FunAudioLLM/Fun-CosyVoice3-0.5B-2512/repo/files?Revision=master&Recursive=true', 20000));
-    const list = (d && d.Data && d.Data.Files || []).filter((f) => f.Path && !CV_COSMETIC_RE.test(f.Path));
+    // 2026-08-31 修复：过滤目录条目（如 'CosyVoice-BlankEN' 无扩展名）——此前目录被当文件下载，
+    // 磁盘生成同名"文件" → 后续 mkdir 父目录 EEXIST（"file already exists, mkdir ...CosyVoice-BlankEN"）。
+    // 只保留带扩展名的文件路径（排除 cosmetic：.gitattributes/README.md/asset/*）。
+    const list = (d && d.Data && d.Data.Files || []).filter((f) =>
+      f.Path && !CV_COSMETIC_RE.test(f.Path) && /[^/\\]+\.[A-Za-z0-9]+$/.test(f.Path));
     if (list.length) {
       const map = {};
       for (const f of list) map[f.Path] = { bytes: Number(f.Size) || 0 };
@@ -1403,9 +1449,12 @@ async function cosyVoiceManifest() {
   return CV_WEIGHTS;
 }
 
-const cvWeightSpec = (name) => ({
+const cvWeightSpec = (name, bytes) => ({
   file: `${CV_MODEL_SUBDIR}/${name}`,
-  bytes: CV_WEIGHTS[name].bytes,
+  // 2026-08-31 修复：bytes 由调用方传入（动态清单 weightsManifest[f]?.bytes）；
+  // 此前写死 CV_WEIGHTS[name].bytes——动态清单比静态清单多出的文件（整仓 20 vs 静态 16）
+  // 在 CV_WEIGHTS 里不存在 → undefined.bytes 崩溃（"Cannot read properties of undefined (reading 'bytes')"）。
+  bytes: Number(bytes) || (CV_WEIGHTS[name]?.bytes || 0),
   // 镜像顺序：modelscope 优先（2026-08-28 实测登记：`FunAudioLLM/Fun-CosyVoice3-0.5B-2512` 六项必需权重
   // 字节与 HF `Fun-CosyVoice3-0.5B` 完全一致（llm.pt 2024669519 / flow.pt 1329116148 / hift.pt 83202622 /
   // speech_tokenizer_v3.onnx 969451503 / campplus.onnx 28303423 / cosyvoice3.yaml 6934），国内直连快、
@@ -1695,7 +1744,9 @@ function uvVenvInstaller({ name, pkgs, lockRel, keyPkg, label, estGB }) {
 
 // qwen3 二段式安装器：① 引擎 venv（uvVenvInstaller，含大流量二次确认）
 // ② 模型文件 —— hf hub 快照缓存（models/hf/hub/models--Qwen--Qwen3-TTS-12Hz-0.6B-CustomVoice），
-//    由 .venv-qwen3 内 huggingface_hub snapshot_download 拉取（默认 hf-mirror，HF_ENDPOINT 可覆盖）。
+//    由 .venv-qwen3 内 huggingface_hub snapshot_download 拉取。
+//    下载源原则（2026-08-31）：官方 huggingface.co 优先，失败自动切 hf-mirror 重试；
+//    opts.mirror（用户自选源）→ 只用该端点。注：huggingface_hub 无内置低速检测，靠"失败切换"兜底。
 //    此前模型只能靠"重启服务时 qwen3-tts-server.py 顺带拉取"，点「补齐」会静默 done（用户实测"晃一下没反应"）。
 function qwen3ModelInstaller(venvInst) {
   return async (ctx, opts = {}) => {
@@ -1713,10 +1764,29 @@ function qwen3ModelInstaller(venvInst) {
     }
     const py = venvPyOf('.venv-qwen3');
     if (!existsSync(py)) throw new Error('.venv-qwen3 python 不存在，请先完成引擎环境安装');
-    ctx.nd({ type: 'log', message: '已确认，用 huggingface_hub 拉取模型（默认 hf-mirror，写入 models/hf/hub/）…' });
-    await runCmdWithEnv(py, ['-c',
-      "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice'))"],
-      { HF_HOME: path.join(CACHE_DIR, 'hf'), HF_ENDPOINT: process.env.HF_ENDPOINT || 'https://hf-mirror.com' })(ctx);
+    // 端点顺序：用户指定 > 环境变量 > 官方 huggingface.co → hf-mirror
+    const MIRROR_ENDPOINT = { huggingface: 'https://huggingface.co', 'hf-mirror': 'https://hf-mirror.com' };
+    const endpoints = opts.mirror
+      ? [MIRROR_ENDPOINT[opts.mirror]].filter(Boolean)
+      : [process.env.HF_ENDPOINT || 'https://huggingface.co', 'https://hf-mirror.com'];
+    ctx.nd({ type: 'log', message: `已确认，用 huggingface_hub 拉取模型（端点：${endpoints.join(' → ')}，写入 models/hf/hub/；失败自动切换）…` });
+    let lastErr = null;
+    for (const ep of endpoints) {
+      ctx.nd({ type: 'log', message: `huggingface_hub ← ${ep} …` });
+      try {
+        await runCmdWithEnv(py, ['-c',
+          "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice'))"],
+          { HF_HOME: path.join(CACHE_DIR, 'hf'), HF_ENDPOINT: ep })(ctx);
+        lastErr = null;
+        break;
+      } catch (e) {
+        lastErr = e;
+        ctx.nd({ type: 'log', message: `端点 ${ep} 失败（${e.message.split('\n')[0]}）${endpoints.length > 1 ? '，切换下一端点…' : ''}` });
+      }
+    }
+    if (lastErr && endpoints.length > 1) {
+      ctx.nd({ type: 'log', message: '所有端点均失败：' + lastErr.message.split('\n')[0] });
+    }
     const after = (mf?.checks || []).map(checkEntry).filter(Boolean);
     if (after.length) throw new Error('模型拉取后仍未就绪：' + after.map((r) => r.path).join('、') + '，查看上方日志');
     ctx.nd({ type: 'log', message: 'Qwen3 模型就绪 ✓，重启服务后引擎可用' });
@@ -1841,8 +1911,9 @@ function sensevoiceOriginalInstaller(venvInst) {
 //   5. 确有无法自动化的例外（体积超大/合规限制），须在 UI 明示原因并保留手动兜底指引。
 // ─────────────────────────────────────────────────────────────
 const INSTALLERS = {
-  kokoro: runDownload(process.execPath, ['download-kokoro.js']),
-  sensevoice: runDownload(process.execPath, ['asr-server-download.js']),
+  // 2026-08-31：脚本型安装器接收 --mirror（用户自选源）；默认自动 = 官方优先 + 失败/无进展/低速自动切换
+  kokoro: (ctx, opts = {}) => runDownload(process.execPath, ['download-kokoro.js', ...(opts.mirror ? ['--mirror', opts.mirror] : [])])(ctx),
+  sensevoice: (ctx, opts = {}) => runDownload(process.execPath, ['asr-server-download.js', ...(opts.mirror ? ['--mirror', opts.mirror] : [])])(ctx),
   // 多档位 LLM：S2 起由 engines/llm-*.json 驱动（install.kind=url-multi，多镜像自动换源 + 字节数校验）
   ...Object.fromEntries(
     ENGINE_MANIFESTS.filter((mf) => mf.install && mf.install.kind === 'url-multi')
@@ -1891,7 +1962,17 @@ const INSTALLERS = {
     // 元数据/展示文件（.gitattributes / README.md / asset/*）跨镜像不同且非运行必需：不下载不校验。
     const weightsManifest = await cosyVoiceManifest();
     const keyFiles = Object.keys(weightsManifest);
-    const missing = keyFiles.filter((f) => !existsSync(path.join(modelDir, f)));
+    // 2026-08-31 修复：缺失判断 = 不存在 **或 存在但大小不符**（与 engineReadiness 口径一致）——
+    // 此前只看 existsSync，损坏/中断的假文件会被"已存在"跳过 → 永远修不好（死循环）。
+    const missing = keyFiles.filter((f) => {
+      const p = path.join(modelDir, f);
+      if (!existsSync(p)) return true;
+      const expect = weightsManifest[f]?.bytes;
+      if (expect) {
+        try { if (statSync(p).size !== expect) return true; } catch { return true; }
+      }
+      return false;
+    });
     if (missing.length) {
       const totalBytes = missing.reduce((s, f) => s + (weightsManifest[f]?.bytes || 0), 0);
       const gb = (totalBytes / 1e9).toFixed(1);
@@ -1902,7 +1983,7 @@ const INSTALLERS = {
       }
       ctx.nd({ type: 'log', message: `已确认大流量下载（约 ${gb}GB），按动态清单拉取缺失 ${missing.length} 项…` });
       for (const f of missing) {
-        await downloadOneFile(cvWeightSpec(f), ctx, opts);
+        await downloadOneFile(cvWeightSpec(f, weightsManifest[f]?.bytes), ctx, opts);
         const got = statSync(path.join(modelDir, f)).size;
         const expect = weightsManifest[f]?.bytes || 0;
         if (expect && got !== expect) {
@@ -1910,7 +1991,7 @@ const INSTALLERS = {
           // 仍不符才报错（保留 .part / 文件，App 内可重试，无需用户手动删文件）。
           ctx.nd({ type: 'log', message: `⚠️ ${f} 大小不符（期望 ${expect} / 实际 ${got}）→ 自动换镜像重下一次…` });
           try { unlinkSync(path.join(modelDir, f)); } catch {}
-          try { await downloadOneFile(cvWeightSpec(f), ctx, { ...opts, mirror: 'hf-mirror' }); } catch (e) {
+          try { await downloadOneFile(cvWeightSpec(f, weightsManifest[f]?.bytes), ctx, { ...opts, mirror: 'hf-mirror' }); } catch (e) {
             throw new Error(`${f} 换镜像重下失败：${String((e && e.message) || e)}`);
           }
           const got2 = statSync(path.join(modelDir, f)).size;
@@ -1984,31 +2065,30 @@ const INSTALLERS = {
       if (!venvKeyPkgOk('.venv-cosyvoice', 'torch')) {
         throw new Error('.venv-cosyvoice 依赖安装后仍未就绪（缺 torch），查看上方日志');
       }
-      ctx.nd({ type: 'log', message: '.venv-cosyvoice 依赖就绪 ✓' });
-    } else {
-      // venv 已建且 torch 在（旧 venv）：仍要补查旧锁文件漏装的运行时依赖（坑 I 同族）——
-      // 2026-08-28 实测：锁文件原漏 modelscope（033 已补），还漏 onnxruntime（speech_tokenizer_v3.onnx /
-      // campplus.onnx 必需，缺则 vendor 源码 frontend.py `import onnxruntime` 崩 → 8003 秒退、UI 无限「启动中」）、
-      // omegaconf / librosa / soundfile / unidecode（Matcha-TTS 推理必需）。逐个查 site-packages，缺则 uv 补装（App 内可见进度）。
-      const cosyvoiceExtras = COSYVOICE_RUNTIME_DEPS;
-      const missingExtras = cosyvoiceExtras.filter((p) => !venvPkgPresent('.venv-cosyvoice', p));
+    }
+    // 2026-08-31 修复：运行时依赖查缺补漏从 else 分支提出来，**新建或已存在都统一执行**——
+    // 此前只在 venv 已存在时补（旧锁文件漏装，坑 I 同族：modelscope/onnxruntime/omegaconf/librosa/soundfile/unidecode，
+    // onnxruntime 缺则 vendor frontend.py `import onnxruntime` 崩 → 8003 秒退）。
+    // 锁文件本身漏 modelscope → 全新安装走"新建"分支只装锁文件 → 装完缺 modelscope → 就绪检查报缺环境 → 用户要再点一次才补。
+    {
+      const missingExtras = COSYVOICE_RUNTIME_DEPS.filter((p) => !venvPkgPresent('.venv-cosyvoice', p));
       if (missingExtras.length) {
         if (!existsSync(UV_EXE)) {
           throw new Error('未安装受管 Python 基础（uv）。请先在设置页/引导条点「安装 Python 基础」后重试。');
         }
-        ctx.nd({ type: 'log', message: `.venv-cosyvoice 缺运行时依赖：${missingExtras.join(' / ')}（旧锁文件漏装，坑 I 同族）→ 补装…` });
+        ctx.nd({ type: 'log', message: `.venv-cosyvoice 缺运行时依赖：${missingExtras.join(' / ')}（锁文件漏装，坑 I 同族）→ 补装…` });
         for (const p of missingExtras) {
           await runCmdWithEnv(UV_EXE, ['pip', 'install', '--python', venvPy, COSYVOICE_EXTRA_SPEC[p] || p],
             { UV_PYTHON_INSTALL_DIR: UV_PY_HOME, UV_INDEX_URL: UV_INDEX })(ctx);
         }
-        const stillMissing = cosyvoiceExtras.filter((p) => !venvPkgPresent('.venv-cosyvoice', p));
+        const stillMissing = COSYVOICE_RUNTIME_DEPS.filter((p) => !venvPkgPresent('.venv-cosyvoice', p));
         if (stillMissing.length) {
           throw new Error('.venv-cosyvoice 补装依赖失败（仍缺 ' + stillMissing.join(' / ') + '），查看上方日志');
         }
-        ctx.nd({ type: 'log', message: '.venv-cosyvoice 运行时依赖补装完成 ✓（' + cosyvoiceExtras.join(' / ') + '）' });
+        ctx.nd({ type: 'log', message: '.venv-cosyvoice 运行时依赖补装完成 ✓（' + COSYVOICE_RUNTIME_DEPS.join(' / ') + '）' });
       }
-      ctx.nd({ type: 'log', message: '.venv-cosyvoice 已存在且依赖就绪 ✓' });
     }
+    ctx.nd({ type: 'log', message: '.venv-cosyvoice 依赖就绪 ✓' });
 
     // ④ vendor Matcha-TTS 完整性修复（2026-08-28 实测）：
     //    vendored Matcha-TTS 缺 matcha/models（仅有 hifigan/text/utils）→ cosyvoice.flow.flow_matching / decoder

@@ -19,6 +19,7 @@
         "bytes": 5027783488,
         "mirrors": [
           { "name": "huggingface", "url": "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf" },
+          { "name": "modelscope", "url": "https://modelscope.cn/models/Qwen/Qwen3-8B-GGUF/resolve/master/Qwen3-8B-Q4_K_M.gguf" },
           { "name": "hf-mirror", "url": "https://hf-mirror.com/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf" }
         ]
       }
