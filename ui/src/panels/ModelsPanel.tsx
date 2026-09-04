@@ -125,6 +125,16 @@ export default function ModelsPanel(props: PanelProps) {
           { type: "log", message: `「${m.label}」需二次确认下载（约 ${mConfirm[1]}）…` },
         ]);
         setBigConfirm({ engine: m.engine, label: m.label, gb: mConfirm[1] });
+      } else if (/已有安装任务进行中/.test(msg)) {
+        // 2026-09-05：服务端 installLock 仍被占用（多为上次安装异常断开未释放）——给可操作提示而非裸错误
+        setProgress((prev) => [
+          ...prev,
+          {
+            type: "error",
+            message:
+              "服务端仍有安装任务在跑（可能上次下载未正常结束）——稍等几秒重试；若持续如此，到设置页「应用并重启服务」后再试",
+          },
+        ]);
       } else {
         setProgress((prev) => [...prev, { type: "error", message: msg }]);
       }

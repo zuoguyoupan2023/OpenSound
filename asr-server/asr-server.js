@@ -871,7 +871,10 @@ async function chatLlamaCpp(messages, opts = {}) {
     topP: opts.top_p ?? 0.9,
     maxTokens: opts.maxTokens ?? 256,
   });
-  return String(res || '').trim();
+  const out = String(res || '').trim();
+  // 2026-09-05：空返回日志钩子（voice-chat 偶发 LLM 空回答排查用）
+  if (!out) log('[llm] ⚠️ ' + path.basename(modelPath) + ' 返回空回答（prompt 前 80 字:' + full.slice(0, 80).replace(/\n/g, ' ') + '）');
+  return out;
 }
 
 async function chatOllama(messages, opts = {}) {
@@ -2482,10 +2485,23 @@ const server = http.createServer(async (req, res) => {
         { role: 'system', content: system },
         { role: 'user', content: (prompt ? prompt + '\n' : '') + recognized }
       ];
-      const answer = await llmChat(llmEngine, messages, {
-        model: url.searchParams.get('llmModel') || undefined,
+      const llmModelParam = url.searchParams.get('llmModel') || undefined;
+      // 2026-09-05 修复：LLM 首次返回空/空白 → 自动重试一次（冷启动/首次推理偶发，对话面板文字正常但语音链路偶发空）；
+      // 仍空则抛明确错误，不再把空文本喂给 TTS（否则 kokoro 报 "Failed to convert '' to token IDs"，误导成 TTS 故障）。
+      let answer = await llmChat(llmEngine, messages, {
+        model: llmModelParam,
         apiKey: url.searchParams.get('llmApiKey') || undefined
       });
+      if (!String(answer || '').trim()) {
+        log('voice-chat LLM 首次返回空（model=' + (llmModelParam || '默认') + '），自动重试一次…');
+        answer = await llmChat(llmEngine, messages, {
+          model: llmModelParam,
+          apiKey: url.searchParams.get('llmApiKey') || undefined
+        });
+      }
+      if (!String(answer || '').trim()) {
+        throw new Error('LLM 未返回内容（' + (llmModelParam || '默认模型') + ' 空回答，已重试一次）——请到对话面板换一个模型档位再试');
+      }
       log('voice-chat 识别:「' + recognized + '」→ LLM:「' + answer + '」');
       // ③ 朗读（qwen3 不可达时自动回退 kokoro，保证全链路始终可用）；经 TTS_ENGINES.wav() 统一（014 §5.2）
       let wav;
@@ -2562,6 +2578,18 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8' });
     res.flushHeaders();
     const ctx = { nd: (obj) => { try { res.write(JSON.stringify(obj) + '\n'); } catch (e) {} } };
+    // 2026-09-05 修复：客户端断开（页面关闭/切走/超时中止 fetch）时自动取消安装并释放锁——
+    // 否则 installer 可能继续跑（下载器不因连接断开而停），installLock 一直占用 → 后续安装全部 409
+    // （实测：逐引擎安装时 whisper 首次点"补齐"直接 409，重启服务才恢复）。
+    log('开始安装 ' + engine + (mirror ? '（源：' + mirror + '）' : '（自动切换源）'));
+    const onClientGone = () => {
+      if (!res.writableEnded) {
+        log('⚠️ 安装客户端连接已断开（engine=' + engine + '），自动取消安装以释放锁…');
+        ACTIVE_DOWNLOAD.cancelled = true;
+        if (ACTIVE_DOWNLOAD.proc) { try { ACTIVE_DOWNLOAD.proc.kill(); } catch {} }
+      }
+    };
+    res.on('close', onClientGone);
     try {
       await installer(ctx, { mirror, confirmBigDownload });
       // LLM 模型下载完成后清空加载缓存，下次对话无需重启即可直接加载新模型
@@ -2569,6 +2597,7 @@ const server = http.createServer(async (req, res) => {
     } catch (e) {
       ctx.nd({ type: 'error', message: String((e && e.message) || e) });
     } finally {
+      res.removeListener('close', onClientGone);
       installLock.active = false;
       try { res.end(); } catch (e2) {}
     }
