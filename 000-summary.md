@@ -50,6 +50,18 @@
 - **`src-tauri/`（Rust）**：桌面壳。窗口/托盘/系统集成；`start-all.js` 拉起守护服务；原生录音（cpal）；**本地数据统一持久化**——`audio_store.rs`（音频库：落盘/索引/导出/头部自愈）、`conversation_store.rs`（对话历史）、`config.json` 统一配置（启动项 + GUI 设置 `ui` 节：服务地址/token/云端 API Key）。
 - **`ui/`（React + Vite）**：GUI。`api.ts` 封装后端调用与设置缓存（启动时从 config.json 载入，含 localStorage 旧数据一次性迁移），`audio.ts` 统一录音/播放/帧流，`audioStore.ts` / `conversationStore.ts` 分别封装音频库与对话历史的存取，`toast.ts` 全局保存提示。
 
+### 2.1 运行时自举一览：node / py 环境从哪来、装到哪
+
+> 总则：**一切运行时（node、python、引擎 venv、模型）由 App 内按钮自举，不依赖系统环境**——普通用户全程只点按钮，不碰终端/sudo/CLT（设计见 `032`/`034`；完整细节与诊断见 `059-mac-受管py缺失原因与处理建议.md` §〇；两端平台差异清单见 `001-跨平台适配.md` §二）。
+
+- **三层自举、各自独立按钮**：
+  1. **Node + 服务端依赖**（引导条/设置页「安装 Node」）：检查链 = App 便携版 → **系统 node（≥18 直接捡现成用，显示其真实路径）** → 都没有则下载便携 Node v24.19.0（官方→npmmirror）到 App 私有目录；随后 npm ci 装 asr-server 依赖。
+  2. **受管 Python 基础**（引导条/设置页「安装 Python 基础」，可选装）：下载 **uv** → `uv python install 3.11`（受管 CPython，**不碰系统 python**）。
+  3. **引擎 venv + 模型**（模型管理页对应卡片）：uv 用受管 3.11 建 `venvs/.venv-*` + 下载权重；装完自动启用。
+- **落盘**：便携 node 在 App 数据目录 `runtime/node`；uv/CPython/venv/模型/音色/缓存默认在**数据根** `<HOME>/Downloads/opensound-download`（Win/Mac 一致；设置「模型存放目录」可改，`config.json data_dir` 持久化）。
+- **系统 python 的角色**：只在设置页"仅展示"一行；引擎**一律用受管 3.11**——两端一致（Windows 无系统 py）、可复现、不依赖 Xcode CLT、不污染系统。node 则允许捡现成（只跑 JS，≥18 等价），没有才自带——**node"有现成捡现成"、python"一律自带锁版本"** 是两者唯一的不对称（原因见 059 §7.2）。
+- **Win/Mac 差异仅收敛在**：node/uv 平台包名、venv 路径分隔（`Scripts/python.exe` ↔ `bin/python3`）、node 查找位置（nvm-windows/Program Files ↔ ~/.nvm/homebrew）、数据根默认取 `USERPROFILE`/`HOME`（详见 059 §〇 0.3）。
+
 ---
 
 ## 三、支持的技术路径（能力矩阵）
