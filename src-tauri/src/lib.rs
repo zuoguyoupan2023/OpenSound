@@ -811,8 +811,10 @@ fn find_node_under(dir: &std::path::Path) -> Option<std::path::PathBuf> {
     None
 }
 
-// 流式下载文件（reqwest），进度经 runtime-progress 事件上报
-async fn download_file(url: &str, dest: &std::path::Path, app: &tauri::AppHandle) -> Result<(), String> {
+// 流式下载文件（reqwest），进度经 runtime-progress 事件上报。
+// label = 下载对象显示名（node 便携版 / uv 工具…）；step = 进度事件分区（node-download / py…），
+// 避免"下载什么就报什么"串台（此前写死 node 文案导致装 py 时误显示"下载 node 运行环境"）。
+async fn download_file(url: &str, dest: &std::path::Path, app: &tauri::AppHandle, label: &str, step: &str) -> Result<(), String> {
     let resp = reqwest::Client::new().get(url).send().await.map_err(|e| format!("下载失败 {}：{e}", url))?;
     if !resp.status().is_success() { return Err(format!("下载失败 {}：HTTP {}", url, resp.status())); }
     let total = resp.content_length().unwrap_or(0);
@@ -826,7 +828,7 @@ async fn download_file(url: &str, dest: &std::path::Path, app: &tauri::AppHandle
         received += c.len() as u64;
         f.write_all(&c).await.map_err(|e| format!("写入失败：{e}"))?;
         let pct = if total > 0 { Some(((received * 100) / total) as u32) } else { None };
-        emit_progress(app, "node-download", &format!("下载 node 运行环境 {}/{}", received, total), pct);
+        emit_progress(app, step, &format!("下载 {label} {}/{}", received, total), pct);
     }
     f.flush().await.map_err(|e| format!("写入失败：{e}"))?;
     Ok(())
@@ -871,7 +873,7 @@ async fn ensure_node(app: &tauri::AppHandle, state: &Arc<AppState>) -> Result<St
     for base in NODE_MIRRORS {
         let url = format!("{base}/{RUNTIME_NODE_VERSION}/{zip_name}");
         emit_progress(app, "node-download", &format!("从 {base} 下载…"), None);
-        match download_file(&url, &zip_path, app).await {
+        match download_file(&url, &zip_path, app, "node 运行环境", "node-download").await {
             Ok(()) => { last_err.clear(); break; }
             Err(e) => {
                 last_err = format!("{e}");
@@ -1033,7 +1035,7 @@ async fn ensure_python_base(app: &tauri::AppHandle, data_root: &std::path::Path)
         for base in UV_MIRRORS {
             let url = format!("{base}/{zip_name}");
             emit_progress(app, "py", &format!("uv 下载源：{base}"), None);
-            match download_file(&url, &zip_path, app).await {
+            match download_file(&url, &zip_path, app, "uv 工具", "py").await {
                 Ok(()) => { last_err.clear(); break; }
                 Err(e) => { last_err = format!("{e}"); emit_progress(app, "py", &last_err, None); }
             }
@@ -1042,7 +1044,20 @@ async fn ensure_python_base(app: &tauri::AppHandle, data_root: &std::path::Path)
         emit_progress(app, "py", "解压 uv…", None);
         unzip_archive(&zip_path, &uv_dir)?;
         let found = find_uv_under(&uv_dir).ok_or("解压后未找到 uv 可执行文件")?;
-        emit_progress(app, "py", &format!("uv 就绪：{}", found.display()), Some(100));
+        // 收成扁平布局 runtime/uv/uv（或 uv.exe）：Windows zip 平铺无需处理；
+        // macOS tar.gz 带前缀目录（uv-aarch64-apple-darwin/uv），须复制到根下，
+        // 否则 run_uv / python_base_status 的扁平路径判断永远落空（"启动 uv 失败 ENOENT"的根因）。
+        let flat = uv_dir.join(if std::env::consts::OS == "windows" { "uv.exe" } else { "uv" });
+        if found != flat {
+            fs::copy(&found, &flat).map_err(|e| format!("uv 落位失败（{} → {}）：{e}", found.display(), flat.display()))?;
+            // 清理带前缀的残留目录，避免数据根里留重复副本
+            if let Some(parent) = found.parent() {
+                if parent != uv_dir { let _ = fs::remove_dir_all(parent); }
+            }
+        }
+        // 清理下载残留的压缩包
+        let _ = fs::remove_file(&zip_path);
+        emit_progress(app, "py", &format!("uv 就绪：{}", flat.display()), Some(100));
     } else {
         emit_progress(app, "py", "uv 已就绪 ✓", None);
     }

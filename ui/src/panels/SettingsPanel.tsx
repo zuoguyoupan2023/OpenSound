@@ -540,6 +540,11 @@ export default function SettingsPanel(props: PanelProps) {
               <Button
                 onClick={props.onInstallRuntime}
                 disabled={props.runtimeInstalling || !!(props.runtime?.node_ok && props.runtime?.deps_ready)}
+                title={
+                  !props.runtimeInstalling && props.runtime?.node_ok && props.runtime?.deps_ready
+                    ? "Node.js 与服务端依赖均已就绪，无需修复"
+                    : undefined
+                }
               >
                 {props.runtimeInstalling ? <Spinner /> : "安装 / 修复 Node 与依赖"}
               </Button>
