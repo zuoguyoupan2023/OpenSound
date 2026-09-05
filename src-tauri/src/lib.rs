@@ -1640,9 +1640,95 @@ fn gen_token() -> String {
 }
 
 // ---------- 拉起 / 停止服务 ----------
+// 残留监听进程自愈（2026-09-05 mac 实测）：旧数据目录/上一会话遗留的进程占着 9528 时，
+// start-all 探测到同版本指纹会"已在运行，跳过"，导致 App 的启动/停止按钮对真实服务失效、
+// 引擎安装请求也落到旧数据目录进程上（uv/venv 路径全部对不上）。因此在冷启动与手动清理时
+// 按端口回收一切非本进程的监听者。
+const SERVICE_PORTS: [u16; 4] = [9528, 8001, 8002, 8003];
+
+// 返回监听某端口的其它进程 PID（不含自身）；工具缺失/失败返回空
+fn listeners_on_port(port: u16) -> Vec<u32> {
+    #[cfg(unix)]
+    {
+        for cmd in ["lsof", "/usr/sbin/lsof", "/usr/bin/lsof"] {
+            let Ok(out) = quiet(Command::new(cmd))
+                .args(["-nP", "-sTCP:LISTEN", "-t", &format!("-iTCP:{port}")])
+                .output()
+            else { continue };
+            if out.status.success() {
+                return String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .filter_map(|l| l.trim().parse::<u32>().ok())
+                    .filter(|pid| *pid != std::process::id())
+                    .collect();
+            }
+        }
+        Vec::new()
+    }
+    #[cfg(windows)]
+    {
+        let mut out = Vec::new();
+        if let Ok(o) = quiet(Command::new("netstat").arg("-ano")).output() {
+            for line in String::from_utf8_lossy(&o.stdout).lines() {
+                let lower = line.to_ascii_lowercase();
+                if !lower.contains(&format!(":{port}")) || !lower.contains("listening") { continue; }
+                if let Some(pid) = line.rsplit_whitespace().next().and_then(|s| s.parse::<u32>().ok()) {
+                    if pid != std::process::id() && !out.contains(&pid) { out.push(pid); }
+                }
+            }
+        }
+        out
+    }
+}
+
+fn kill_pid(pid: u32) {
+    #[cfg(unix)]
+    {
+        let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+    }
+    #[cfg(windows)]
+    {
+        let _ = quiet(Command::new("taskkill")).args(["/PID", &pid.to_string(), "/T", "/F"]).status();
+    }
+}
+
+// 回收残留监听进程：先 TERM 优雅退出（start-all 收到 SIGTERM 会清理子服务），
+// 最多等 ~3.5s，仍残留的再 KILL。返回被清理的 PID。
+fn reclaim_stray_services() -> Vec<u32> {
+    let mut killed: Vec<u32> = Vec::new();
+    for port in SERVICE_PORTS {
+        let pids = listeners_on_port(port);
+        if pids.is_empty() { continue; }
+        for pid in &pids { if !killed.contains(pid) { kill_pid(*pid); killed.push(*pid); } }
+        let mut left = listeners_on_port(port);
+        for _ in 0..7 {
+            if left.is_empty() { break; }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            left = listeners_on_port(port);
+        }
+        for pid in &left {
+            #[cfg(unix)]
+            {
+                let _ = Command::new("kill").args(["-KILL", &pid.to_string()]).status();
+            }
+            #[cfg(windows)]
+            {
+                let _ = quiet(Command::new("taskkill")).args(["/PID", &pid.to_string(), "/T", "/F"]).status();
+            }
+        }
+    }
+    killed
+}
+
 fn start_service(app: &tauri::AppHandle, state: &Arc<AppState>) -> Result<(), String> {
     // 先停旧的
     stop_service(state);
+    // 自愈：本 App 子进程已停，若端口仍被占用 = 孤儿/残留进程（旧数据目录 / 上一会话遗留），
+    // 先按端口清掉再冷启动，避免 start-all 因"已在运行"跳过、服务始终不归本 App 管。
+    let strays = reclaim_stray_services();
+    if !strays.is_empty() {
+        println!("[opensound] 已回收残留监听进程：{strays:?}");
+    }
 
     let dir = server_dir(app, state).ok_or("无法定位 asr-server 目录（请在设置中配置 asr-server 路径）")?;
     let node = {
@@ -1798,6 +1884,19 @@ fn start_service_cmd(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) -> 
 fn stop_service_cmd(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     stop_service(&state);
     Ok(())
+}
+
+// 设置页「清理残留服务进程」：停掉本 App 子服务后，再按端口回收一切残留监听进程（返回被清理的 PID）。
+// 用于 9528 被旧数据目录/上一会话孤儿进程占用、App 启停按钮失效时的 App 内闭环恢复。
+#[tauri::command]
+fn cleanup_stray_services(state: State<'_, Arc<AppState>>) -> String {
+    stop_service(&state);
+    let strays = reclaim_stray_services();
+    if strays.is_empty() {
+        "未发现残留服务进程（端口 9528/8001/8002/8003 均空闲或归本 App 管理）".to_string()
+    } else {
+        format!("已清理残留服务进程：{}", strays.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", "))
+    }
 }
 
 #[tauri::command]
@@ -1999,6 +2098,7 @@ pub fn run() {
             get_service_status,
             start_service_cmd,
             stop_service_cmd,
+            cleanup_stray_services,
             quit_app,
             check_runtime,
             install_runtime,

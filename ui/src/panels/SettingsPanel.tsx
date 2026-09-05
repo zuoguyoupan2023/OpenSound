@@ -97,6 +97,8 @@ export default function SettingsPanel(props: PanelProps) {
   const [pathLoading, setPathLoading] = useState(true);
   const [restarting, setRestarting] = useState(false);
   const [pathMsg, setPathMsg] = useState("");
+  const [cleaningStray, setCleaningStray] = useState(false);
+  const [strayMsg, setStrayMsg] = useState("");
   // 数据目录（存储规范：音频库/对话历史/config.json 都在这里）
   const [dataDir, setDataDir] = useState("");
   // 032 P3：模型存放目录（数据根目录，独立于服务代码目录）
@@ -234,6 +236,40 @@ export default function SettingsPanel(props: PanelProps) {
       setDataDir(p);
     } catch (e) {
       showToast("打开失败: " + String(e));
+    }
+  };
+
+  // 配置的 server_path 无效（项目改名/移动后遗留死路径）时：一键清空，改由 App 自动定位
+  const clearServerPath = async () => {
+    setPathMsg("");
+    setRestarting(true);
+    try {
+      await invoke("set_server_path", { path: "" });
+      setServerPath("");
+      await restartService();
+      setPathMsg("已改为自动定位并重启服务");
+      setTimeout(() => props.refresh(), 500);
+    } catch (e) {
+      setPathMsg("失败: " + e);
+    } finally {
+      setRestarting(false);
+    }
+  };
+
+  // 清理残留/孤儿服务进程：9528/8001/8002/8003 被旧数据目录或上一会话遗留进程占用、
+  // App 启停按钮失效时，App 内一键回收（无需终端），随后点「启动」即由本 App 接管
+  const doCleanupStray = async () => {
+    setStrayMsg("");
+    setCleaningStray(true);
+    try {
+      const r = await invoke<string>("cleanup_stray_services");
+      setStrayMsg(r);
+      await props.refresh?.();
+      await props.onRefreshRuntime?.();
+    } catch (e) {
+      setStrayMsg("清理失败: " + e);
+    } finally {
+      setCleaningStray(false);
     }
   };
 
@@ -466,6 +502,18 @@ export default function SettingsPanel(props: PanelProps) {
           <p className="settings-hint">
             ⚠️ 这是<b>后端程序所在目录</b>（含 start-all.js），与模型存储无关；模型存放在上方「模型存放目录」。普通用户无需修改。
           </p>
+          {!pathLoading &&
+            serverPath.trim() &&
+            props.runtime?.server_dir &&
+            props.runtime.server_dir.replace(/[\\/]+$/, "") !== serverPath.trim().replace(/[\\/]+$/, "") && (
+              <p className="settings-msg" style={{ color: "#e5484d" }}>
+                ⚠️ 配置的服务代码目录不存在（可能是项目改名/移动后的遗留路径）。App 当前实际使用：
+                <code>{props.runtime.server_dir}</code>　
+                <Button variant="ghost" onClick={clearServerPath} disabled={restarting}>
+                  改为自动定位
+                </Button>
+              </p>
+            )}
           {pathMsg && <p className="settings-msg">{pathMsg}</p>}
         </div>
 
@@ -554,7 +602,16 @@ export default function SettingsPanel(props: PanelProps) {
               >
                 {props.pyInstalling ? <Spinner /> : "安装 / 修复 Python 基础（uv + CPython 3.11）"}
               </Button>
+              <Button
+                variant="ghost"
+                onClick={doCleanupStray}
+                disabled={props.runtimeInstalling || props.pyInstalling || cleaningStray}
+                title="清掉非本 App 拉起的残留进程（旧数据目录/上一会话遗留占着 9528 的孤儿进程），随后点「启动」即可由本 App 接管服务"
+              >
+                {cleaningStray ? <Spinner /> : "清理残留服务进程"}
+              </Button>
             </div>
+            {strayMsg && <p className="settings-msg">{strayMsg}</p>}
             <p className="settings-hint">
               Node 按钮：缺少 Node.js 或服务依赖时，由 App 自动下载便携版 Node 并安装依赖（无需手动装环境）。
               Python 基础按钮：可选装（仅 qwen3 / SenseVoice 原始版 / CosyVoice 需要）；不装则这三个引擎不可用，其余不受影响。

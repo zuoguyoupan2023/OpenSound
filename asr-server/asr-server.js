@@ -2169,17 +2169,12 @@ const INSTALLERS = {
     }
 
     // ③ venv 自建：缺失才装（含 torch，首次可能几分钟）；031 跨平台：Win 用 Scripts/python.exe。
-    // 034 阶段3：受管 venv 落数据目录 venvs/（uv 自举目标路径）；代码目录 .venv-cosyvoice 为历史回退。
-    const IS_WIN = process.platform === 'win32';
-    const venvCandidates = [
-      path.join(DATA_DIR, 'venvs', '.venv-cosyvoice'),
-      path.join(__dirname, '.venv-cosyvoice'),
-    ];
-    const venvDir = venvCandidates.find((d) => existsSync(IS_WIN ? path.join(d, 'Scripts', 'python.exe') : path.join(d, 'bin', 'python3')))
-      || venvCandidates[0];
-    const venvPy = IS_WIN
-      ? path.join(venvDir, 'Scripts', 'python.exe')
-      : path.join(venvDir, 'bin', 'python3');
+    // 034 阶段3：受管 venv 一律落数据目录 venvs/（uv 自举目标路径），与 uvVenvInstaller / venvKeyPkgOk /
+    // start-all venvPy 的就绪、启动口径完全一致。此前 cosyvoice 独有"代码目录 .venv-cosyvoice 历史回退"
+    // 候选：mac 上第一阶段残留的代码目录 venv 存在时，会把 venv 建到代码目录，而就绪检查只认数据目录 →
+    // 依赖明明装好（torch 已在）仍报"缺 torch"（2026-09-05 mac 实测）。代码目录旧 venv 属遗留，不再作为创建目标。
+    const venvDir = venvDirOf('.venv-cosyvoice');
+    const venvPy = venvPyOf('.venv-cosyvoice');
     if (!venvKeyPkgOk('.venv-cosyvoice', 'torch')) {
       // 034：优先 uv（受管 CPython）建引擎环境；uv 未装 → 明确提示先装全局 Python 基础
       ctx.nd({ type: 'log', message: '.venv-cosyvoice 缺失/不完整 → 用 uv 创建并安装锁定依赖（含 torch，较大，首次约几分钟）…' });
