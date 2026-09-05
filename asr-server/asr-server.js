@@ -1479,10 +1479,14 @@ const CV_WEIGHTS = {
 // 2026-08-28：cosyvoice 旧锁文件漏装的运行时依赖（坑 I 扩展）——
 // 安装器补装 与 engineReadiness 就绪检查 共用这份清单，避免两处漂移。
 // 缺任一 → 卡片如实报「缺环境」并出「检测/修复」按钮（此前 state=ready 时前端不渲染按钮，用户无入口，陷入「启动中」死等）。
-const COSYVOICE_RUNTIME_DEPS = ['modelscope', 'onnxruntime', 'omegaconf', 'librosa', 'soundfile', 'unidecode'];
+// 2026-09-05 追加探针 'pkg_resources'：uv venv 的 setuptools≥81 已移除 pkg_resources，而 pyworld 0.3.5 仍
+// `import pkg_resources` → 8003 cosyvoice 启动即崩（mac 实测 ModuleNotFoundError）。按模块探针而非 setuptools
+// 版本探针，已装 84 的 venv 点「检测/修复」也会自动降级补装（spec 见 COSYVOICE_EXTRA_SPEC）。
+const COSYVOICE_RUNTIME_DEPS = ['modelscope', 'onnxruntime', 'omegaconf', 'librosa', 'soundfile', 'unidecode', 'pkg_resources'];
 // 2026-08-29：torchaudio 2.11 load() 强制 torchcodec，而 torchcodec 在 Win 需系统 FFmpeg full-shared DLL（随包不可保证）
 // → 不走依赖路线；已在 vendor file_utils.load_wav 改为 soundfile 直读（自带 libsndfile，零系统依赖）。勿再加 torchcodec。
-const COSYVOICE_EXTRA_SPEC = {};
+// 'pkg_resources' 不是独立 PyPI 包：真正要装的是仍带 pkg_resources 的 setuptools（<81；81 起已移除）。
+const COSYVOICE_EXTRA_SPEC = { pkg_resources: 'setuptools<81' };
 
 // 2026-08-28：元数据/展示类文件跨镜像必然不同（.gitattributes / README.md / asset/* 实测：HF 与 ModelScope 内容不一致），
 // 非运行必需 → 不进校验清单、不强制下载（消除"大小不符"红字与打地鼠）。

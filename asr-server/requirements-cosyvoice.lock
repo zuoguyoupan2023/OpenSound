@@ -67,7 +67,9 @@ rich==15.0.0
 ruamel.yaml==0.18.17
 ruamel.yaml.clib==0.2.15
 safetensors==0.8.0
-setuptools==84.0.0
+# 2026-09-05：setuptools 钉 <81 —— ≥81 已移除 pkg_resources，而 pyworld 0.3.5 仍 `import pkg_resources`，
+# uv venv 装 84.0.0 → 8003 cosyvoice 启动即崩（mac 实测 ModuleNotFoundError）。
+setuptools==80.9.0
 shellingham==1.5.4
 sympy==1.14.0
 tensorboard==2.21.0
