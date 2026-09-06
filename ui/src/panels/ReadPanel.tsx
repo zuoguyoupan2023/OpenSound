@@ -14,6 +14,7 @@ import {
 import { fmtTime, fmtDur, truncate } from "../format";
 import { useAudioPlayback } from "../useAudioPlayback";
 import { showToast } from "../toast";
+import { splitTextBatches, textFingerprint } from "../textSplit";
 import { listVoices, type CloneVoice } from "../voiceStore";
 import { Panel, Button, Select, Spinner, EngineBadge } from "../components/ui";
 import {
@@ -43,6 +44,28 @@ const QWEN3_VOICES = ["Vivian", "Serena", "Uncle_Fu", "Dylan", "Eric", "Ryan", "
 
 type Speaking = "idle" | "speaking" | "done";
 
+// 060 P1：每批上限字数（本地持久化，默认 1000，可选 200–5000）
+const BATCH_CHARS_OPTIONS = [200, 500, 1000, 2000, 5000];
+const LS_READ_PREFS = "os_read_prefs";
+const DEFAULT_BATCH_CHARS = 1000;
+function loadReadBatchChars(): number {
+  try {
+    const raw = localStorage.getItem(LS_READ_PREFS);
+    const v = raw ? Number(JSON.parse(raw)?.batchChars) : NaN;
+    if (Number.isFinite(v) && BATCH_CHARS_OPTIONS.includes(v)) return v;
+  } catch {
+    /* ignore */
+  }
+  return DEFAULT_BATCH_CHARS;
+}
+function saveReadBatchChars(v: number) {
+  try {
+    localStorage.setItem(LS_READ_PREFS, JSON.stringify({ batchChars: v }));
+  } catch {
+    /* ignore */
+  }
+}
+
 export default function ReadPanel(props: PanelProps) {
   const [text, setText] = useState("");
   const [engine, setEngine] = useState<"kokoro" | "qwen3" | "clone" | "system" | "azure" | "cloud">("kokoro");
@@ -62,6 +85,10 @@ export default function ReadPanel(props: PanelProps) {
   const [error, setError] = useState("");
   const [fileName, setFileName] = useState("");
   const [history, setHistory] = useState<AudioRecord[]>([]);
+  // 060 P1：每批上限字数（默认 1000，200–5000）；多批进度；断点续读偏移（仅同文本有效）
+  const [batchChars, setBatchChars] = useState<number>(loadReadBatchChars());
+  const [batchInfo, setBatchInfo] = useState<{ done: number; total: number } | null>(null);
+  const [resumeAt, setResumeAt] = useState<{ offset: number; fp: string } | null>(null);
   const playerRef = useRef<FramePlayer | null>(null);
   // 朗读中断控制：停止时 abort 底层流，服务端不再继续合成
   const speakAbortRef = useRef<AbortController | null>(null);
@@ -196,66 +223,125 @@ export default function ReadPanel(props: PanelProps) {
     stopAudio();
     const player = createFramePlayer((i) => console.log("播放第", i + 1, "句"));
     playerRef.current = player;
-    const ac = new AbortController();
-    speakAbortRef.current = ac;
+    // 060 P1：文本按句边界切成 ≤ effChars 的批次逐批朗读（qwen3 单请求上限 2000 字，自动再压低）
+    const effChars = engine === "qwen3" ? Math.min(batchChars, 2000) : batchChars;
+    const batches = splitTextBatches(text, effChars);
+    if (!batches.length) {
+      setState("idle");
+      return;
+    }
+    const fp = textFingerprint(text);
+    // 断点续读：文本未变且上次中断过 → 从中断批次的开头继续（该批前半截已入「已截断」记录）
+    let startIdx = 0;
+    if (resumeAt && resumeAt.fp === fp && resumeAt.offset > 0) {
+      const idx = batches.findIndex((b) => b.end > resumeAt!.offset);
+      if (idx >= 0) startIdx = idx;
+    }
+    const total = batches.length;
+    const meta = {
+      source: "read" as const,
+      voice:
+        engine === "clone"
+          ? cloneVoiceId
+          : engine === "qwen3"
+          ? voice
+          : engine === "azure"
+          ? azureVoice
+          : engine === "cloud"
+          ? cloudVoice
+          : undefined,
+      sid: engine === "kokoro" ? sid : undefined,
+      speed: engine === "kokoro" ? speed : undefined,
+      language: engine === "qwen3" ? language : undefined,
+    };
+    const speakVoice = () =>
+      engine === "clone"
+        ? cloneVoiceId
+        : engine === "azure"
+        ? azureVoice
+        : engine === "cloud"
+        ? cloudVoice
+        : voice;
+
+    // 逐批：每批一个 /speak 流 → 顺序播放 → 收集帧；帧全部攒到 frameArrays，读完统一合并落盘
+    const frameArrays: Uint8Array[] = [];
+    let interruptedBatchStart = -1; // 中断时正在读的批次起点（原文偏移），供断点续读
+    let pendingCp: Promise<Uint8Array[]> | null = null;
+    let fatal: unknown = null;
     try {
-      const stream = await speakStream(
-        {
-          text,
-          engine,
-          sid,
-          speed,
-          voice:
-            engine === "clone"
-              ? cloneVoiceId
-              : engine === "azure"
-              ? azureVoice
-              : engine === "cloud"
-              ? cloudVoice
-              : voice,
-          language,
-        },
-        ac.signal
-      );
-      const { playStream, collected } = teeCollect(stream);
-      // 落盘与播放解耦：流读完（含被中断）即保存，不再等播放完成
-      collected
-        .then(async (frames) => {
-          if (!frames.length) return;
-          const rec = await saveTts(mergeWavFrames(frames), engine, text, {
-            source: "read",
-            voice:
-              engine === "clone"
-                ? cloneVoiceId
-                : engine === "qwen3"
-                ? voice
-                : engine === "azure"
-                ? azureVoice
-                : engine === "cloud"
-                ? cloudVoice
-                : undefined,
-            sid: engine === "kokoro" ? sid : undefined,
-            speed: engine === "kokoro" ? speed : undefined,
-            language: engine === "qwen3" ? language : undefined,
-            interrupted: speakStoppedRef.current || undefined,
-          }).catch((e) => console.error("保存朗读失败:", e));
-          if (rec) {
-            setHistory((h) => [rec, ...h].slice(0, 20));
-            showToast(
-              speakStoppedRef.current
-                ? "已保存已生成部分（已截断）"
-                : "已存入朗读历史"
-            );
-          }
-        })
-        .catch((e) => console.error("收集朗读帧失败:", e));
-      await player.start(playStream);
-      setState("done");
+      for (let bi = startIdx; bi < total; bi++) {
+        if (speakStoppedRef.current) break;
+        interruptedBatchStart = batches[bi].start;
+        if (total > 1) setBatchInfo({ done: bi, total });
+        const batchAc = new AbortController();
+        speakAbortRef.current = batchAc;
+        try {
+          const stream = await speakStream(
+            {
+              text: batches[bi].text,
+              engine,
+              sid,
+              speed,
+              voice: speakVoice(),
+              language,
+            },
+            batchAc.signal
+          );
+          const { playStream, collected } = teeCollect(stream);
+          pendingCp = collected
+            .then((frames) => {
+              if (frames.length) frameArrays.push(...frames);
+              return frames;
+            })
+            .catch(() => [] as Uint8Array[]);
+          await player.start(playStream); // 中断时 abort → 此处抛错，帧收集 promise 走 catch 保留已收部分
+          await pendingCp;
+          pendingCp = null;
+        } finally {
+          if (speakAbortRef.current === batchAc) speakAbortRef.current = null;
+        }
+        if (speakStoppedRef.current) break;
+        if (total > 1) setBatchInfo({ done: bi + 1, total });
+      }
     } catch (e) {
-      // 主动停止不算错误
-      if (!speakStoppedRef.current) {
-        setError(String(e));
-        setState("idle");
+      // 主动停止不算错误；其它错误记录并继续走收尾（已收帧仍保存）
+      if (!speakStoppedRef.current) fatal = e;
+    }
+    // 收尾：等最后一批（可能被中断）的帧收集完成，避免漏掉已到达的部分帧
+    if (pendingCp) {
+      try {
+        await pendingCp;
+      } catch {
+        /* ignore */
+      }
+      pendingCp = null;
+    }
+    const interrupted = speakStoppedRef.current;
+    if (interrupted && interruptedBatchStart >= 0) {
+      setResumeAt({ offset: interruptedBatchStart, fp });
+    } else if (!interrupted) {
+      setResumeAt(null);
+    }
+    if (total > 1) setBatchInfo(null);
+    setState(interrupted ? "idle" : fatal ? "idle" : "done");
+    if (fatal) setError(String(fatal));
+    if (frameArrays.length) {
+      // 续读从批次 startIdx 开始 → 记录文本只存实际读到的后半段，与音频开头对齐
+      const recText = startIdx > 0 ? text.slice(batches[startIdx].start) : text;
+      const rec = await saveTts(mergeWavFrames(frameArrays), engine, recText, {
+        ...meta,
+        interrupted: interrupted || undefined,
+      }).catch((e) => {
+        console.error("保存朗读失败:", e);
+        return null;
+      });
+      if (rec) {
+        setHistory((h) => [rec, ...h].slice(0, 20));
+        showToast(
+          interrupted || fatal
+            ? "已保存已生成部分（已截断）"
+            : "已存入朗读历史"
+        );
       }
     }
   };
@@ -286,6 +372,20 @@ export default function ReadPanel(props: PanelProps) {
       setError(String(e));
     }
   };
+
+  // 060 P1：断点提示（仅当文本未变、引擎支持分批时展示）
+  const effCharsNow =
+    engine === "qwen3" ? Math.min(batchChars, 2000) : batchChars;
+  const resumeVisible =
+    state === "idle" &&
+    engine !== "system" &&
+    !!resumeAt &&
+    resumeAt.fp === textFingerprint(text);
+  const resumeBatchNo = (() => {
+    if (!resumeVisible || !resumeAt) return -1;
+    const bs = splitTextBatches(text, effCharsNow);
+    return bs.findIndex((b) => b.end > resumeAt.offset);
+  })();
 
   return (
     <Panel
@@ -505,6 +605,47 @@ export default function ReadPanel(props: PanelProps) {
           </Button>
         </div>
       </div>
+
+      {/* 060 P1：每批上限字数设置 + 多批进度 + 断点续读提示 */}
+      {engine !== "system" && (
+        <div className="toolbar">
+          <label className="inline-field">
+            每批 ≤
+            <Select
+              value={String(batchChars)}
+              onChange={(v) => {
+                const n = Number(v);
+                setBatchChars(n);
+                saveReadBatchChars(n);
+              }}
+              options={BATCH_CHARS_OPTIONS.map((o) => ({
+                value: String(o),
+                label: String(o),
+              }))}
+              disabled={state === "speaking"}
+            />
+            字
+          </label>
+          {state === "speaking" && batchInfo && (
+            <span className="hint">
+              正在朗读第 {batchInfo.done + 1} / {batchInfo.total} 批
+              （每批 ≤ {effCharsNow} 字）…
+            </span>
+          )}
+          {resumeVisible && resumeBatchNo >= 0 && (
+            <span className="hint">
+              上次读到第 {resumeBatchNo + 1} 批时中断——点「朗读」将从该批继续
+              <Button
+                variant="ghost"
+                className="batch-resume-reset"
+                onClick={() => setResumeAt(null)}
+              >
+                从头开始
+              </Button>
+            </span>
+          )}
+        </div>
+      )}
 
       <div className="engine-status">
         <EngineBadge label="系统朗读" ready />

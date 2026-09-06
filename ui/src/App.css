@@ -515,6 +515,13 @@ textarea:focus,
   flex-wrap: wrap;
 }
 
+/* 060 P1：断点续读提示里的「从头开始」小按钮 */
+.batch-resume-reset {
+  margin-left: 8px;
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
 .file-btn {
   display: inline-block;
   background: var(--card);
