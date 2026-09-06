@@ -19,6 +19,7 @@ import {
   AZURE_TTS_VOICES,
   AZURE_ASR_LANGS,
 } from "../api";
+import { langLabel } from "../langNames";
 import { showToast } from "../toast";
 import { Panel, Button, Spinner, Select } from "../components/ui";
 
@@ -387,15 +388,24 @@ export default function SettingsPanel(props: PanelProps) {
                 placeholder="Region（如 eastasia / japanwest / eastus）"
                 style={{ marginBottom: 8 }}
               />
-              <Select
+              <input
+                className="input"
+                list="azure-voice-list"
                 value={azureTtsVoice}
-                onChange={setAzureTtsVoice}
-                options={AZURE_TTS_VOICES.map((v) => ({ value: v.value, label: `TTS 音色：${v.label}` }))}
+                onChange={(e) => setAzureTtsVoice(e.target.value)}
+                placeholder="TTS 音色（可下拉选常用，或手输任意 Neural 音色名）"
               />
+              <datalist id="azure-voice-list">
+                {AZURE_TTS_VOICES.map((v) => (
+                  <option key={v.value} value={v.value}>
+                    {v.label}
+                  </option>
+                ))}
+              </datalist>
               <Select
                 value={azureAsrLanguage}
                 onChange={setAzureAsrLanguage}
-                options={AZURE_ASR_LANGS.map((c) => ({ value: c, label: `识别语言：${c}` }))}
+                options={AZURE_ASR_LANGS.map((c) => ({ value: c, label: `识别语言：${langLabel(c)}（${c}）` }))}
               />
               <p className="settings-hint">
                 同一个「语音服务」资源的 Key + Region 同时用于朗读与识别（识别面板可临时切换语言）。音频/文本将出网到 Microsoft Azure。

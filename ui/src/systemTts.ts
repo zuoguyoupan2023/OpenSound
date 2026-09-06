@@ -76,3 +76,32 @@ export async function previewSystemVoice(
 ): Promise<void> {
   await previewVoice({ voiceId, text: text ?? null });
 }
+
+// 各语言本地化试听文本（插件默认样本是英文，对非英语音色不合适）
+const PREVIEW_TEXT: Record<string, string> = {
+  zh: "你好，这是系统朗读试听，希望你喜欢这个声音。",
+  cmn: "你好，这是系统朗读试听，希望你喜欢这个声音。",
+  yue: "你好，而家试试用呢把声读出嚟，希望你钟意。",
+  en: "Hello, this is a voice preview. Hope you like it.",
+  ja: "こんにちは、これは音声のプレビューです。",
+  ko: "안녕하세요, 음성 미리 듣기입니다.",
+  fr: "Bonjour, ceci est un aperçu de la voix.",
+  de: "Hallo, das ist eine Sprachvorschau.",
+  es: "Hola, esta es una vista previa de la voz.",
+  pt: "Olá, esta é uma prévia da voz.",
+  it: "Ciao, questa è un'anteprima della voce.",
+  ru: "Привет, это предварительное прослушивание голоса.",
+  ar: "مرحبا، هذه معاينة صوتية.",
+  hi: "नमस्ते, यह आवाज़ का पूर्वावलोकन है।",
+  th: "สวัสดี นี่คือตัวอย่างเสียง",
+  vi: "Xin chào, đây là bản xem trước giọng nói.",
+  id: "Halo, ini pratinjau suara.",
+  ms: "Halo, ini pratonton suara.",
+  tr: "Merhaba, bu bir ses önizlemesidir.",
+  nl: "Hallo, dit is een stemvoorbeeld.",
+  pl: "Cześć, to jest podgląd głosu.",
+};
+export function previewSampleText(language?: string): string {
+  const primary = (language || "").split("-")[0].toLowerCase();
+  return PREVIEW_TEXT[primary] || "你好，这是语音试听。Hello, this is a voice preview.";
+}

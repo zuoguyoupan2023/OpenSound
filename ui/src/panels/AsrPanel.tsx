@@ -2,6 +2,7 @@ import { useRef, useState, useEffect } from "react";
 import type { PanelProps } from "../App";
 import { Icon } from "@iconify/react";
 import { transcribe, computeStarting, getPersistedSettings, switchEcoEngine, engineDisabledInEco, azureAsrConfigured, AZURE_ASR_LANGS, updateSettings, type EcoAsr } from "../api";
+import { langLabel } from "../langNames";
 import { createRecorder, type Recorder } from "../audio";
 import { saveRecording } from "../audioStore";
 import { Panel, Button, Select, Spinner, EngineBadge } from "../components/ui";
@@ -299,7 +300,7 @@ export default function AsrPanel(props: PanelProps) {
                 setAzureLang(v);
                 updateSettings({ azureAsrLanguage: v }).catch(() => {});
               }}
-              options={AZURE_ASR_LANGS.map((c) => ({ value: c, label: c }))}
+              options={AZURE_ASR_LANGS.map((c) => ({ value: c, label: `${langLabel(c)}（${c}）` }))}
             />
             <span className="hint">
               {azureAsrConfigured()

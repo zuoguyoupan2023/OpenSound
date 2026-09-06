@@ -821,15 +821,48 @@ export async function switchEcoEngine(
 
 // 000-plan-11：Azure TTS 音色清单（标准音色子集；完整列表见 learn.microsoft.com/azure/ai-services/speech-service/language-support）
 export const AZURE_TTS_VOICES = [
+  // 中文（普通话 / 粤语 / 台湾国语）
   { value: "zh-CN-XiaoxiaoNeural", label: "晓晓（普通话·女）" },
   { value: "zh-CN-XiaoyiNeural", label: "晓伊（普通话·女）" },
   { value: "zh-CN-YunxiNeural", label: "云希（普通话·男）" },
   { value: "zh-CN-YunjianNeural", label: "云健（普通话·男）" },
   { value: "zh-CN-YunyangNeural", label: "云扬（普通话·男·新闻）" },
+  { value: "zh-CN-YunxiaNeural", label: "云夏（普通话·男·少年）" },
+  { value: "zh-CN-liaoning-XiaobeiNeural", label: "晓北（东北话·女）" },
+  { value: "zh-CN-shaanxi-XiaoniNeural", label: "晓妮（中原官话·女）" },
   { value: "zh-HK-HiuMaanNeural", label: "曉曼（粤语·女）" },
-  { value: "zh-TW-HsiaoChenNeural", label: "曉臻（台湾·女）" },
+  { value: "zh-HK-WanLungNeural", label: "雲龍（粤语·男）" },
+  { value: "zh-TW-HsiaoChenNeural", label: "曉臻（台湾国语·女）" },
+  { value: "zh-TW-YunJheNeural", label: "雲哲（台湾国语·男）" },
+  // 英语
   { value: "en-US-AriaNeural", label: "Aria（英语·女）" },
+  { value: "en-US-JennyNeural", label: "Jenny（英语·女）" },
   { value: "en-US-GuyNeural", label: "Guy（英语·男）" },
+  { value: "en-GB-SoniaNeural", label: "Sonia（英式英语·女）" },
+  { value: "en-GB-RyanNeural", label: "Ryan（英式英语·男）" },
+  { value: "en-AU-NatashaNeural", label: "Natasha（澳式英语·女）" },
+  // 日韩
+  { value: "ja-JP-NanamiNeural", label: "七海（日语·女）" },
+  { value: "ja-JP-KeitaNeural", label: "圭太（日语·男）" },
+  { value: "ko-KR-SunHiNeural", label: "선희（韩语·女）" },
+  { value: "ko-KR-InJoonNeural", label: "인준（韩语·男）" },
+  // 欧语
+  { value: "fr-FR-DeniseNeural", label: "Denise（法语·女）" },
+  { value: "de-DE-KatjaNeural", label: "Katja（德语·女）" },
+  { value: "es-ES-ElviraNeural", label: "Elvira（西班牙语·女）" },
+  { value: "pt-BR-FranciscaNeural", label: "Francisca（巴西葡语·女）" },
+  { value: "it-IT-ElsaNeural", label: "Elsa（意大利语·女）" },
+  { value: "nl-NL-ColetteNeural", label: "Colette（荷兰语·女）" },
+  { value: "pl-PL-ZofiaNeural", label: "Zofia（波兰语·女）" },
+  { value: "ru-RU-SvetlanaNeural", label: "Svetlana（俄语·女）" },
+  { value: "tr-TR-EmelNeural", label: "Emel（土耳其语·女）" },
+  // 亚非语
+  { value: "th-TH-PremwadeeNeural", label: "Premwadee（泰语·女）" },
+  { value: "vi-VN-HoaiMyNeural", label: "Hoài My（越南语·女）" },
+  { value: "id-ID-GadisNeural", label: "Gadis（印尼语·女）" },
+  { value: "ms-MY-YasminNeural", label: "Yasmin（马来语·女）" },
+  { value: "hi-IN-SwaraNeural", label: "Swara（印地语·女）" },
+  { value: "ar-SA-ZariyahNeural", label: "Zariyah（阿拉伯语·女）" },
 ];
 // Azure 语音识别语言（STT 支持的常用 locale）
 export const AZURE_ASR_LANGS = [

@@ -21,10 +21,12 @@ import {
   speakSystem,
   stopSystem,
   previewSystemVoice,
+  previewSampleText,
   isSpeakingSystem,
   ttsErrorMessage,
   type Voice as SystemVoice,
 } from "../systemTts";
+import { langLabel } from "../langNames";
 
 const KOKORO_VOICES = [
   { sid: 18, label: "18（中文女声）" },
@@ -344,16 +346,7 @@ export default function ReadPanel(props: PanelProps) {
         {engine === "system" && (() => {
           const isMac = /Mac/i.test(navigator.userAgent);
           const isWin = /Win/i.test(navigator.userAgent);
-          // 按语言主子标签分组（zh / yue / en / ja…），组内声调排序优先展示常用语言
-          const GROUP_NAMES: Record<string, string> = {
-            zh: "中文（普通话）", cmn: "中文（普通话）", yue: "粤语",
-            en: "英语", ja: "日语", ko: "韩语", fr: "法语", de: "德语", es: "西班牙语",
-            it: "意大利语", ru: "俄语", pt: "葡萄牙语", ar: "阿拉伯语", th: "泰语",
-            vi: "越南语", id: "印尼语", tr: "土耳其语", nl: "荷兰语", pl: "波兰语",
-            uk: "乌克兰语", hi: "印地语", fi: "芬兰语", da: "丹麦语", no: "挪威语",
-            sv: "瑞典语", he: "希伯来语", cs: "捷克语", el: "希腊语", hu: "匈牙利语",
-            ro: "罗马尼亚语", ms: "马来语", ca: "加泰罗尼亚语", nb: "挪威语",
-          };
+          // 按语言主子标签分组（zh / yue / en / ja…），组名取 langNames 中文名
           const groups = new Map<string, number>();
           for (const v of sysVoices) {
             const g = v.language?.split("-")[0].toLowerCase() || "other";
@@ -368,7 +361,7 @@ export default function ReadPanel(props: PanelProps) {
           const sysLangOptions = [
             ...[...groups.keys()].sort(groupOrder).map((g) => ({
               value: g,
-              label: `${GROUP_NAMES[g] || g}（${groups.get(g)} 个）`,
+              label: `${langLabel(g)}（${groups.get(g)} 个）`,
             })),
             { value: "all", label: `全部音色（${sysVoices.length} 个）` },
           ];
@@ -399,11 +392,12 @@ export default function ReadPanel(props: PanelProps) {
               <Button
                 variant="ghost"
                 disabled={!sysVoiceId || state === "speaking"}
-                onClick={() =>
-                  previewSystemVoice(sysVoiceId).catch((e) =>
-                    setError(ttsErrorMessage(e))
-                  )
-                }
+                onClick={() => {
+                  const v = sysVoices.find((x) => x.id === sysVoiceId);
+                  previewSystemVoice(sysVoiceId, previewSampleText(v?.language)).catch(
+                    (e) => setError(ttsErrorMessage(e))
+                  );
+                }}
               >
                 <Icon icon="lucide:ear" width={14} height={14} /> 试听
               </Button>
