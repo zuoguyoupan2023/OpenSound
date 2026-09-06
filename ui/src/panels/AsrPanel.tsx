@@ -144,7 +144,14 @@ export default function AsrPanel(props: PanelProps) {
     import("@tauri-apps/api/core")
       .then(({ invoke }) => invoke<string[]>("sys_supported_locales"))
       .then((ls) => {
-        if (ls.length) setSysLocales(ls);
+        if (!ls.length) return;
+        const pri = ["zh-CN", "zh-TW", "zh-HK", "yue-HK", "en-US", "en-GB", "es-ES", "fr-FR", "ru-RU", "ar-SA", "ja-JP", "ko-KR"];
+        ls.sort((a, b) => {
+          const pa = pri.indexOf(a), pb = pri.indexOf(b);
+          if (pa !== -1 || pb !== -1) return (pa === -1 ? 99 : pa) - (pb === -1 ? 99 : pb);
+          return a.localeCompare(b);
+        });
+        setSysLocales(ls);
       })
       .catch(() => {});
   }, []);

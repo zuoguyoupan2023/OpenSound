@@ -320,7 +320,7 @@ export default function ReadPanel(props: PanelProps) {
             groups.set(g, (groups.get(g) || 0) + 1);
           }
           const groupOrder = (a: string, b: string) => {
-            const pri = ["zh", "cmn", "yue", "en", "ja", "ko"];
+            const pri = ["zh", "cmn", "yue", "en", "es", "fr", "ru", "ar", "ja", "ko"];
             const pa = pri.indexOf(a), pb = pri.indexOf(b);
             if (pa !== -1 || pb !== -1) return (pa === -1 ? 99 : pa) - (pb === -1 ? 99 : pb);
             return a.localeCompare(b);
