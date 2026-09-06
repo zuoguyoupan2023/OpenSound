@@ -1,9 +1,9 @@
 import { useRef, useState, useEffect } from "react";
 import type { PanelProps } from "../App";
 import { Icon } from "@iconify/react";
-import { transcribe, computeStarting, getPersistedSettings, switchEcoEngine, engineDisabledInEco, azureAsrConfigured, AZURE_ASR_LANGS, updateSettings, type EcoAsr } from "../api";
+import { transcribe, computeStarting, getPersistedSettings, switchEcoEngine, engineDisabledInEco, azureAsrConfigured, AZURE_ASR_LANGS, updateSettings, getBaseUrl, getToken, type EcoAsr } from "../api";
 import { langLabel } from "../langNames";
-import { createRecorder, type Recorder } from "../audio";
+import { createRecorder, pcmToWavBlob, type Recorder } from "../audio";
 import { saveRecording } from "../audioStore";
 import { Panel, Button, Select, Spinner, EngineBadge } from "../components/ui";
 import { showToast } from "../toast";
@@ -74,6 +74,10 @@ export default function AsrPanel(props: PanelProps) {
   const [azureLang, setAzureLang] = useState<string>(getPersistedSettings().azureAsrLanguage || "zh-CN");
   const [punc, setPunc] = useState<boolean>(false);
   const [vad, setVad] = useState<boolean>(false);
+  // 060 Stage 3：长录音 VAD 分段逐句识别（逐句回显、可中途停止保留已识别部分）
+  const [segOn, setSegOn] = useState<boolean>(false);
+  const [segInfo, setSegInfo] = useState<{ done: number; total: number } | null>(null);
+  const segStopRef = useRef(false);
   const [text, setText] = useState("");
   const [error, setError] = useState("");
   const [elapsed, setElapsed] = useState<number>(0);
@@ -159,6 +163,72 @@ export default function AsrPanel(props: PanelProps) {
       .catch(() => {});
   }, []);
 
+  // 060 Stage 3：长录音 → /vad 切成语音段 → 逐段 /transcribe（可中途停止）
+  const stopSegmented = () => {
+    segStopRef.current = true;
+  };
+
+  // 返回拼装全文；无有效分段或出错时返回空串（调用方回退整段识别）
+  const runSegmented = async (wav: Blob): Promise<string> => {
+    const buf = new Uint8Array(await wav.arrayBuffer());
+    const raw = buf.subarray(44); // 16k 单声道 16bit WAV → RAW PCM
+    if (raw.length < 3200) return "";
+    const token = getToken();
+    const headers: Record<string, string> = {
+      "Content-Type": "application/octet-stream",
+    };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const resp = await fetch(`${getBaseUrl()}/vad`, {
+      method: "POST",
+      headers,
+      body: raw as BodyInit,
+    });
+    if (!resp.ok) throw new Error("VAD 分段失败: HTTP " + resp.status);
+    const data = (await resp.json()) as { speech?: [number, number][] };
+    const segs = Array.isArray(data.speech) ? data.speech : [];
+    if (!segs.length) return ""; // 无语音段 → 回退整段识别
+
+    const sr = 16000;
+    const pad = Math.round((200 * sr) / 1000); // 段前后各留 200ms 过渡
+    const minSamples = 1600;
+    const out: string[] = [];
+    let submitted = 0;
+    for (let i = 0; i < segs.length; i++) {
+      if (segStopRef.current) break;
+      const s = segs[i];
+      if (!Array.isArray(s) || s.length < 2) continue;
+      const a = Math.max(0, Math.round((s[0] / 1000) * sr) - pad);
+      const b = Math.min(raw.length, Math.round((s[1] / 1000) * sr) + pad);
+      if (b - a < minSamples) continue;
+      setSegInfo({ done: i, total: segs.length });
+      const segBytes = raw.slice(a, b - ((b - a) % 2));
+      const pcm = new Int16Array(
+        segBytes.buffer,
+        segBytes.byteOffset,
+        segBytes.byteLength / 2
+      );
+      try {
+        const r = await transcribe(
+          pcmToWavBlob(pcm, sr),
+          engine,
+          false,
+          false,
+          engine === "whisper" ? whisperLang : ""
+        );
+        if (r.text && r.text.trim()) {
+          out.push(r.text.trim());
+          submitted++;
+          setText(out.join("\n")); // 逐句回显
+        }
+      } catch (e) {
+        // 单段失败不中断整段流程
+        console.error("分段识别失败:", e);
+      }
+    }
+    setSegInfo({ done: submitted, total: segs.length });
+    return out.join("\n");
+  };
+
   const toggle = async () => {
     setError("");
     if (state === "recording") {
@@ -193,6 +263,37 @@ export default function AsrPanel(props: PanelProps) {
           setText(r.text);
           setElapsed(Math.round((Date.now() - t0) / 100) / 10);
           setState("done");
+          return;
+        }
+        // 060 Stage 3：长录音自动分段（VAD 逐句识别、逐句回显；可点「停止识别」保留已识别部分）
+        if (segOn) {
+          segStopRef.current = false;
+          setSegInfo({ done: 0, total: 1 });
+          let segText = "";
+          try {
+            segText = await runSegmented(wav);
+          } catch (e) {
+            console.error("分段识别失败，回退整段识别:", e);
+            segText = "";
+          }
+          if (!segText.trim()) {
+            // VAD 无有效分段或失败 → 回退整段识别，保证仍能出结果
+            const r = await transcribe(
+              wav,
+              engine,
+              punc,
+              vad,
+              engine === "whisper" ? whisperLang : ""
+            );
+            segText = r.text;
+          }
+          saveRecording(wav, engine, segText, { source: "asr" }).catch((e) =>
+            console.error("保存录音失败:", e)
+          );
+          setText(segText);
+          setElapsed(Math.round((Date.now() - t0) / 100) / 10);
+          setState("done");
+          setSegInfo(null);
           return;
         }
         const r = await transcribe(wav, engine, punc, vad, engine === "whisper" ? whisperLang : "");
@@ -245,11 +346,17 @@ export default function AsrPanel(props: PanelProps) {
     <Panel
       title="识别面板"
       subtitle="录音 → 本地语音识别 → 文本（SenseVoice 中文最优）"
-      actions={state === "recording" && (
-        <Button variant="danger" onClick={cancel}>
-          取消
-        </Button>
-      )}
+      actions={
+        state === "recording" ? (
+          <Button variant="danger" onClick={cancel}>
+            取消录音
+          </Button>
+        ) : state === "processing" && segInfo ? (
+          <Button variant="danger" onClick={stopSegmented}>
+            停止识别（保留已识别）
+          </Button>
+        ) : undefined
+      }
     >
       <div className="asr-control">
         <button
@@ -263,7 +370,10 @@ export default function AsrPanel(props: PanelProps) {
             </>
           ) : state === "processing" ? (
             <>
-              <Spinner /> 识别中…
+              <Spinner />{" "}
+              {segInfo && segInfo.total > 1
+                ? `识别第 ${segInfo.done + 1}/${segInfo.total} 段…`
+                : "识别中…"}
             </>
           ) : (
             <>
@@ -352,6 +462,20 @@ export default function AsrPanel(props: PanelProps) {
           />
           自动过滤静音(VAD)
         </label>
+        <label className="punc-toggle">
+          <input
+            type="checkbox"
+            checked={segOn}
+            onChange={(e) => setSegOn(e.target.checked)}
+            disabled={engine === "sys" || engine === "azure"}
+          />
+          长录音自动分段识别（VAD 逐句 · 可中途停止）
+        </label>
+        {(engine === "sys" || engine === "azure") && (
+          <span className="hint">
+            系统/云端识别暂不支持本项（本地 SenseVoice / Whisper 可用）。
+          </span>
+        )}
       </div>
 
       <div className="engine-status">
@@ -374,6 +498,15 @@ export default function AsrPanel(props: PanelProps) {
       {error && (
         <div className="error-box">
           <Icon icon="lucide:triangle-alert" width={16} height={16} /> {error}
+        </div>
+      )}
+
+      {state === "processing" && segInfo && text && (
+        <div className="result-box">
+          <div className="result-label">
+            分段识别进行中（第 {segInfo.done + 1}/{segInfo.total} 段）· 已识别：
+          </div>
+          <div className="result-text">{text}</div>
         </div>
       )}
 
