@@ -11,10 +11,20 @@ type State = "idle" | "recording" | "processing" | "done";
 
 // 000-plan-6 阶段1：系统识别仅 macOS 接入（Win 系统识别自由听写为云端服务，离线不可用）
 const isMac = /Mac/i.test(navigator.userAgent);
-const SYS_LANG_OPTIONS = [
-  { value: "zh-CN", label: "中文（zh-CN）" },
-  { value: "en-US", label: "英文（en-US）" },
-];
+// 系统识别语言名（常见 locale；未收录的原样显示代码，运行时以 supportedLocales 枚举为准）
+const SYS_LANG_NAMES: Record<string, string> = {
+  "zh-CN": "中文（大陆）", "zh-TW": "中文（台湾）", "zh-HK": "中文（香港）",
+  "yue-HK": "粤语", "en-US": "英语（美）", "en-GB": "英语（英）", "en-AU": "英语（澳）",
+  "en-IN": "英语（印度）", "ja-JP": "日语", "ko-KR": "韩语", "fr-FR": "法语", "fr-CA": "法语（加）",
+  "de-DE": "德语", "es-ES": "西班牙语", "es-MX": "西班牙语（墨）", "it-IT": "意大利语",
+  "ru-RU": "俄语", "pt-BR": "葡萄牙语（巴西）", "pt-PT": "葡萄牙语", "ar-SA": "阿拉伯语",
+  "th-TH": "泰语", "vi-VN": "越南语", "id-ID": "印尼语", "ms-MY": "马来语", "tr-TR": "土耳其语",
+  "nl-NL": "荷兰语", "pl-PL": "波兰语", "uk-UA": "乌克兰语", "hi-IN": "印地语", "da-DK": "丹麦语",
+  "fi-FI": "芬兰语", "nb-NO": "挪威语", "sv-SE": "瑞典语", "he-IL": "希伯来语", "cs-CZ": "捷克语",
+  "el-GR": "希腊语", "hu-HU": "匈牙利语", "ro-RO": "罗马尼亚语", "ca-ES": "加泰罗尼亚语",
+};
+const sysLangLabel = (code: string) =>
+  SYS_LANG_NAMES[code] ? `${SYS_LANG_NAMES[code]}（${code}）` : code;
 
 // 录音 WAV Blob → base64（系统识别经 Tauri 原生命令转写，不走服务端）
 function blobToBase64(blob: Blob): Promise<string> {
@@ -55,6 +65,8 @@ export default function AsrPanel(props: PanelProps) {
   const [engine, setEngine] = useState<string>("auto");
   const [whisperLang, setWhisperLang] = useState<string>("");
   const [sysLang, setSysLang] = useState<string>("zh-CN");
+  // 运行时枚举本机支持的识别 locale（SFSpeechRecognizer.supportedLocales；空则回退常见清单）
+  const [sysLocales, setSysLocales] = useState<string[]>([]);
   // supportsOnDeviceRecognition 运行时结果（true=设备端离线 / false=走苹果服务器）
   const [sysOnDevice, setSysOnDevice] = useState<boolean | null>(null);
   const [punc, setPunc] = useState<boolean>(false);
@@ -126,6 +138,16 @@ export default function AsrPanel(props: PanelProps) {
     if (engine !== ecoActiveAsr) setEngine(ecoActiveAsr);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ecoActiveAsr, props.models]);
+
+  useEffect(() => {
+    if (!isMac) return;
+    import("@tauri-apps/api/core")
+      .then(({ invoke }) => invoke<string[]>("sys_supported_locales"))
+      .then((ls) => {
+        if (ls.length) setSysLocales(ls);
+      })
+      .catch(() => {});
+  }, []);
 
   const toggle = async () => {
     setError("");
@@ -250,7 +272,14 @@ export default function AsrPanel(props: PanelProps) {
         {engine === "sys" && (
           <label className="whisper-lang">
             系统识别语言
-            <Select value={sysLang} onChange={setSysLang} options={SYS_LANG_OPTIONS} />
+            <Select
+              value={sysLang}
+              onChange={setSysLang}
+              options={(sysLocales.length
+                ? sysLocales
+                : ["zh-CN", "en-US"]
+              ).map((c) => ({ value: c, label: sysLangLabel(c) }))}
+            />
             <span className="hint">
               走 macOS 自带 SFSpeechRecognizer（零下载兜底）；精度与多语言不如
               SenseVoice/Whisper。首次使用会请求「语音识别」权限。

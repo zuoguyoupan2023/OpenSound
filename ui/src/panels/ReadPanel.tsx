@@ -304,19 +304,45 @@ export default function ReadPanel(props: PanelProps) {
         {engine === "system" && (() => {
           const isMac = /Mac/i.test(navigator.userAgent);
           const isWin = /Win/i.test(navigator.userAgent);
+          // 按语言主子标签分组（zh / yue / en / ja…），组内声调排序优先展示常用语言
+          const GROUP_NAMES: Record<string, string> = {
+            zh: "中文（普通话）", cmn: "中文（普通话）", yue: "粤语",
+            en: "英语", ja: "日语", ko: "韩语", fr: "法语", de: "德语", es: "西班牙语",
+            it: "意大利语", ru: "俄语", pt: "葡萄牙语", ar: "阿拉伯语", th: "泰语",
+            vi: "越南语", id: "印尼语", tr: "土耳其语", nl: "荷兰语", pl: "波兰语",
+            uk: "乌克兰语", hi: "印地语", fi: "芬兰语", da: "丹麦语", no: "挪威语",
+            sv: "瑞典语", he: "希伯来语", cs: "捷克语", el: "希腊语", hu: "匈牙利语",
+            ro: "罗马尼亚语", ms: "马来语", ca: "加泰罗尼亚语", nb: "挪威语",
+          };
+          const groups = new Map<string, number>();
+          for (const v of sysVoices) {
+            const g = v.language?.split("-")[0].toLowerCase() || "other";
+            groups.set(g, (groups.get(g) || 0) + 1);
+          }
+          const groupOrder = (a: string, b: string) => {
+            const pri = ["zh", "cmn", "yue", "en", "ja", "ko"];
+            const pa = pri.indexOf(a), pb = pri.indexOf(b);
+            if (pa !== -1 || pb !== -1) return (pa === -1 ? 99 : pa) - (pb === -1 ? 99 : pb);
+            return a.localeCompare(b);
+          };
+          const sysLangOptions = [
+            ...[...groups.keys()].sort(groupOrder).map((g) => ({
+              value: g,
+              label: `${GROUP_NAMES[g] || g}（${groups.get(g)} 个）`,
+            })),
+            { value: "all", label: `全部音色（${sysVoices.length} 个）` },
+          ];
           const filtered = sysVoices.filter(
-            (v) => sysLang === "all" || v.language?.toLowerCase().startsWith(sysLang)
+            (v) =>
+              sysLang === "all" ||
+              v.language?.split("-")[0].toLowerCase() === sysLang
           );
           return (
             <>
               <Select
                 value={sysLang}
                 onChange={setSysLang}
-                options={[
-                  { value: "zh", label: "中文音色" },
-                  { value: "en", label: "英文音色" },
-                  { value: "all", label: "全部音色" },
-                ]}
+                options={sysLangOptions}
               />
               <Select
                 value={sysVoiceId}

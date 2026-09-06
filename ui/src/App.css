@@ -477,6 +477,13 @@ textarea:focus,
   color: var(--muted);
 }
 
+/* 语言选择下拉：标签内含长提示，select 默认拉伸会被撑满整行，限定合理宽度 */
+.asr-control .whisper-lang select {
+  width: fit-content;
+  min-width: 170px;
+  max-width: 320px;
+}
+
 /* S11：Whisper 语言下拉的提示行 */
 .asr-control .whisper-lang .hint {
   font-size: 11px;

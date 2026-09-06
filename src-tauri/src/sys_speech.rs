@@ -11,6 +11,19 @@ pub struct SysTranscribeResult {
     pub language: String,
 }
 
+/// 枚举本机 SFSpeechRecognizer 支持的识别 locale（macOS 10.15+；取决于系统已装语言）
+#[tauri::command]
+pub fn sys_supported_locales() -> Vec<String> {
+    #[cfg(target_os = "macos")]
+    {
+        mac::supported_locales()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Vec::new()
+    }
+}
+
 #[tauri::command]
 pub async fn sys_transcribe(
     wav_base64: String,
@@ -49,6 +62,15 @@ mod mac {
 
     const AUTH_TIMEOUT: Duration = Duration::from_secs(15);
     const TASK_TIMEOUT: Duration = Duration::from_secs(60);
+
+    pub fn supported_locales() -> Vec<String> {
+        let mut out: Vec<String> = unsafe { SFSpeechRecognizer::supportedLocales() }
+            .iter()
+            .map(|l| l.localeIdentifier().to_string())
+            .collect();
+        out.sort();
+        out
+    }
 
     pub fn transcribe(wav_base64: &str, language: &str) -> Result<SysTranscribeResult, String> {
         let wav = base64::engine::general_purpose::STANDARD

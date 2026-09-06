@@ -2142,6 +2142,7 @@ pub fn run() {
             conversation_store::conversation_save,
             conversation_store::conversation_rename,
             conversation_store::conversation_delete,
+            sys_speech::sys_supported_locales,
             sys_speech::sys_transcribe
         ])
         .build(tauri::generate_context!())
