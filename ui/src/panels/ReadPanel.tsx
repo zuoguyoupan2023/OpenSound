@@ -9,12 +9,26 @@ import {
   saveTts,
   listAudio,
   deleteAudio,
+  blobToBase64,
+  wavBlobDuration,
   type AudioRecord,
 } from "../audioStore";
 import { fmtTime, fmtDur, truncate } from "../format";
 import { useAudioPlayback } from "../useAudioPlayback";
 import { showToast } from "../toast";
 import { splitTextBatches, textFingerprint } from "../textSplit";
+import {
+  booksList,
+  booksGet,
+  booksCreate,
+  booksSaveSegment,
+  booksSetNext,
+  booksDelete,
+  booksExport,
+  bookSegUrl,
+  bookDone,
+  type BookSummary,
+} from "../bookStore";
 import { listVoices, type CloneVoice } from "../voiceStore";
 import { Panel, Button, Select, Spinner, EngineBadge } from "../components/ui";
 import {
@@ -93,6 +107,15 @@ export default function ReadPanel(props: PanelProps) {
   // 朗读中断控制：停止时 abort 底层流，服务端不再继续合成
   const speakAbortRef = useRef<AbortController | null>(null);
   const speakStoppedRef = useRef(false);
+  // 060 P2：长文朗读任务（books/）状态
+  const [books, setBooks] = useState<BookSummary[]>([]);
+  const [bookBusyId, setBookBusyId] = useState<string | null>(null); // 正在生成/播放的任务 id
+  const [bookCreating, setBookCreating] = useState(false);
+  const [bookPlayIdx, setBookPlayIdx] = useState(-1); // 正在处理/播放的批下标（展示用）
+  const bookStopRef = useRef(false);
+  const bookAbortRef = useRef<AbortController | null>(null);
+  const bookPlayerRef = useRef<FramePlayer | null>(null);
+  const bookAudioRef = useRef<HTMLAudioElement | null>(null);
   // 历史条目播放（与音频库同款单实例逻辑）
   const { playingId, togglePlay, stopPlay } = useAudioPlayback((m) =>
     setError(m)
@@ -188,6 +211,23 @@ export default function ReadPanel(props: PanelProps) {
       .catch((e) => setError("获取系统音色失败: " + ttsErrorMessage(e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [engine, sysVoices.length]);
+
+  // 060 P2：载入长文任务列表；离开面板时兜底停止书朗读/生成
+  useEffect(() => {
+    booksList()
+      .then(setBooks)
+      .catch((e) => console.error("载入长文任务失败:", e));
+    return () => {
+      bookStopRef.current = true;
+      bookAbortRef.current?.abort();
+      bookAbortRef.current = null;
+      if (bookAudioRef.current) {
+        bookAudioRef.current.pause();
+        bookAudioRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const loadFile = async (file: File) => {
     const t = await file.text();
@@ -370,6 +410,214 @@ export default function ReadPanel(props: PanelProps) {
       setHistory((h) => h.filter((x) => x.id !== rec.id));
     } catch (e) {
       setError(String(e));
+    }
+  };
+
+  // ===== 060 P2：长文朗读任务（books/） =====
+  const refreshBooks = async () => {
+    try {
+      setBooks(await booksList());
+    } catch (e) {
+      console.error("刷新长文任务失败:", e);
+    }
+  };
+
+  // 与 speak() 一致：按当前引擎给出朗读参数（快照进任务，续读时按它生成）
+  const pickBookVoice = () =>
+    engine === "clone"
+      ? cloneVoiceId
+      : engine === "azure"
+      ? azureVoice
+      : engine === "cloud"
+      ? cloudVoice
+      : voice;
+
+  // 从当前文本 + 当前引擎/音色参数新建任务并自动开始生成
+  const createBookTask = async () => {
+    if (!text.trim()) {
+      setError("请先粘贴文本或打开文件，再创建长文任务");
+      return;
+    }
+    if (engine === "system") {
+      setError("长文任务暂不支持系统朗读，请选择 Kokoro / Qwen3 / 克隆 / 云端引擎");
+      return;
+    }
+    setError("");
+    setBookCreating(true);
+    try {
+      const effChars = engine === "qwen3" ? Math.min(batchChars, 2000) : batchChars;
+      const batches = splitTextBatches(text, effChars);
+      if (!batches.length) {
+        setError("文本为空，无法创建任务");
+        return;
+      }
+      const title = fileName || text.replace(/\s+/g, " ").slice(0, 24).trim() || "长文任务";
+      const sum = await booksCreate({
+        title,
+        sourceName: fileName,
+        text,
+        engine,
+        voice: pickBookVoice(),
+        sid: engine === "kokoro" ? sid : undefined,
+        speed: engine === "kokoro" ? speed : 1,
+        language,
+        batchChars: effChars,
+        batches: batches.map((b) => ({ start: b.start, end: b.end })),
+      });
+      await refreshBooks();
+      showToast(`已创建长文任务（${batches.length} 批），开始自动朗读…`);
+      void generateBook(sum.id);
+    } catch (e) {
+      setError("创建长文任务失败: " + String(e));
+    } finally {
+      setBookCreating(false);
+    }
+  };
+
+  // 按任务记录的参数组 /speak 参数（续读也用同一份快照）
+  const bookSpeakParams = (s: BookSummary, chunk: string) => ({
+    text: chunk,
+    engine: s.engine as "kokoro" | "qwen3" | "clone" | "azure" | "cloud",
+    sid: s.engine === "kokoro" ? s.sid : undefined,
+    speed: s.engine === "kokoro" ? s.speed : undefined,
+    voice: s.engine === "kokoro" ? undefined : s.voice || undefined,
+    language: s.language || undefined,
+  });
+
+  // 逐批合成未完成的批次：合成一帧帧播放 → 整批完成后存 seg_xxxxx.wav 并前移进度
+  const generateBook = async (id: string) => {
+    if (bookBusyId) return;
+    setBookBusyId(id);
+    setBookPlayIdx(-1);
+    bookStopRef.current = false;
+    const player = createFramePlayer();
+    bookPlayerRef.current = player;
+    try {
+      const d = await booksGet(id);
+      const total = d.batches.length;
+      let idx = Math.max(0, Math.min(d.summary.next_idx, total));
+      while (idx < total && !bookStopRef.current) {
+        const b = d.batches[idx];
+        const chunk = d.text.slice(b.start, b.end);
+        if (!chunk.trim()) {
+          // 空白批没有可朗读内容：跳过并把进度同步推进（避免任务永远"未完成"）
+          idx++;
+          try {
+            await booksSetNext(id, idx);
+          } catch {
+            /* ignore */
+          }
+          continue;
+        }
+        setBookPlayIdx(idx);
+        const ac = new AbortController();
+        bookAbortRef.current = ac;
+        let frames: Uint8Array[] = [];
+        try {
+          const stream = await speakStream(bookSpeakParams(d.summary, chunk), ac.signal);
+          const { playStream, collected } = teeCollect(stream);
+          const cp = collected.catch(() => [] as Uint8Array[]);
+          await player.start(playStream);
+          if (bookStopRef.current) break;
+          frames = await cp;
+        } finally {
+          if (bookAbortRef.current === ac) bookAbortRef.current = null;
+        }
+        if (bookStopRef.current) break;
+        if (!frames.length) throw new Error("该批未生成音频（引擎不可用？）");
+        // 只保存整批完成的音频；中断的半截不落盘 → 续读时整批重读
+        const wav = mergeWavFrames(frames);
+        const dur = await wavBlobDuration(wav);
+        await booksSaveSegment(id, idx, await blobToBase64(wav), dur);
+        idx++;
+        setBookPlayIdx(-1);
+        if (!bookStopRef.current) void refreshBooks();
+      }
+      if (bookStopRef.current) {
+        showToast("已暂停 —— 已完成批次已分文件保存，可稍后「继续生成」");
+      } else {
+        showToast("长文任务已全部生成完成，可从头播放");
+      }
+    } catch (e) {
+      if (!bookStopRef.current) setError("长文朗读失败: " + String(e));
+    } finally {
+      player.stop();
+      bookPlayerRef.current = null;
+      bookAbortRef.current = null;
+      setBookBusyId(null);
+      setBookPlayIdx(-1);
+      void refreshBooks();
+    }
+  };
+
+  // 从头播放已全部合成的任务（纯文件播放，不重新合成）
+  const playBook = async (sum: BookSummary) => {
+    if (bookBusyId) return;
+    setBookBusyId(sum.id);
+    setBookPlayIdx(-1);
+    bookStopRef.current = false;
+    try {
+      for (let i = 0; i < sum.total_batches; i++) {
+        if (bookStopRef.current) break;
+        const url = await bookSegUrl(sum, i);
+        if (!url) continue;
+        setBookPlayIdx(i);
+        await new Promise<void>((resolve) => {
+          const a = new Audio(url);
+          bookAudioRef.current = a;
+          const done = () => {
+            if (bookAudioRef.current === a) bookAudioRef.current = null;
+            resolve();
+          };
+          a.onended = done;
+          a.onerror = () => {
+            console.error("播放长文批次失败:", i);
+            done();
+          };
+          a.onpause = done; // 点「停止」pause → 结束当前帧
+          a.play().catch(() => done());
+        });
+      }
+      if (!bookStopRef.current) showToast("播放结束");
+    } finally {
+      if (bookAudioRef.current) {
+        bookAudioRef.current.pause();
+        bookAudioRef.current = null;
+      }
+      setBookBusyId(null);
+      setBookPlayIdx(-1);
+    }
+  };
+
+  const stopBook = () => {
+    bookStopRef.current = true;
+    bookAbortRef.current?.abort();
+    bookAbortRef.current = null;
+    bookPlayerRef.current?.stop();
+    bookPlayerRef.current = null;
+    if (bookAudioRef.current) {
+      bookAudioRef.current.pause();
+      bookAudioRef.current = null;
+    }
+  };
+
+  const removeBook = async (s: BookSummary) => {
+    if (!window.confirm(`删除长文任务「${truncate(s.title, 24)}」及其全部音频？`)) return;
+    if (bookBusyId === s.id) stopBook();
+    try {
+      await booksDelete(s.id);
+      await refreshBooks();
+    } catch (e) {
+      setError("删除长文任务失败: " + String(e));
+    }
+  };
+
+  const exportBook = async (s: BookSummary) => {
+    try {
+      const ok = await booksExport(s.id, s.title || s.id);
+      if (ok) showToast("已导出 zip（批次音频 + 源文本）");
+    } catch (e) {
+      setError("导出长文任务失败: " + String(e));
     }
   };
 
@@ -594,7 +842,10 @@ export default function ReadPanel(props: PanelProps) {
             />
           </label>
           {fileName && <span className="muted">已载入: {fileName}</span>}
-          <Button onClick={speak} disabled={state === "speaking"}>
+          <Button
+            onClick={speak}
+            disabled={state === "speaking" || !!bookBusyId}
+          >
             {state === "speaking" ? (
               <Spinner />
             ) : (
@@ -622,7 +873,7 @@ export default function ReadPanel(props: PanelProps) {
                 value: String(o),
                 label: String(o),
               }))}
-              disabled={state === "speaking"}
+              disabled={state === "speaking" || !!bookBusyId}
             />
             字
           </label>
@@ -670,6 +921,111 @@ export default function ReadPanel(props: PanelProps) {
         />
       </div>
 
+      {/* 060 P2：长文朗读任务（分文件保存 · 可续读） */}
+      <div className="read-history">
+        <div className="read-history-head">
+          <span className="install-head">📖 长文朗读任务（每批一个文件 · 可暂停续读）</span>
+        </div>
+        <div className="read-tools book-tools">
+          <Button
+            onClick={createBookTask}
+            disabled={
+              bookCreating ||
+              !!bookBusyId ||
+              state === "speaking" ||
+              !text.trim() ||
+              engine === "system"
+            }
+          >
+            {bookCreating ? (
+              <Spinner />
+            ) : (
+              <Icon icon="lucide:book-plus" width={16} height={16} />
+            )}
+            {engine === "system"
+              ? "长文任务不支持系统朗读"
+              : "从当前文本新建任务并朗读"}
+          </Button>
+          <span className="hint">
+            长文按每批 ≤{batchChars} 字拆批、整批完成才存一个 WAV；可随时暂停，之后「继续生成」从断点续；完整生成后可「从头播放」。
+          </span>
+        </div>
+        {books.length === 0 ? (
+          <div className="empty">
+            还没有长文任务。粘贴长文本或打开 .txt/.md 文件后点上方按钮即可创建。
+          </div>
+        ) : (
+          <div className="audio-list">
+            {books.map((s) => {
+              const busy = bookBusyId === s.id;
+              const done = bookDone(s);
+              return (
+                <div key={s.id} className="audio-row">
+                  <div className="audio-info">
+                    <div className="audio-title">
+                      <span className="src-badge src-book">长文</span>
+                      {done && <span className="src-badge src-ok">已生成</span>}
+                      {busy && <span className="src-badge src-cut">处理中</span>}
+                      {s.title ? truncate(s.title, 44) : s.id}
+                    </div>
+                    <div className="model-meta">
+                      <span>{fmtTime(s.created_at)}</span>
+                      <span className="model-cat">{s.engine || "auto"}</span>
+                      <span>
+                        {done
+                          ? `全部 ${s.total_batches} 批`
+                          : `已到 ${s.next_idx}/${s.total_batches} 批`}
+                        {busy && bookPlayIdx >= 0
+                          ? ` · 正在处理第 ${bookPlayIdx + 1} 批…`
+                          : ""}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="audio-actions">
+                    {busy ? (
+                      <Button variant="danger" onClick={stopBook}>
+                        <Icon icon="lucide:square" width={16} height={16} /> 停止
+                      </Button>
+                    ) : done ? (
+                      <Button
+                        variant="ghost"
+                        onClick={() => playBook(s)}
+                        disabled={!!bookBusyId || state === "speaking"}
+                      >
+                        <Icon icon="lucide:play" width={16} height={16} /> 从头播放
+                      </Button>
+                    ) : (
+                      <Button
+                        variant="ghost"
+                        onClick={() => generateBook(s.id)}
+                        disabled={!!bookBusyId || state === "speaking"}
+                      >
+                        <Icon icon="lucide:play" width={16} height={16} /> 继续生成
+                      </Button>
+                    )}
+                    <Button
+                      variant="ghost"
+                      onClick={() => exportBook(s)}
+                      disabled={!!bookBusyId}
+                      title="导出 zip（批次音频 + 源文本）"
+                    >
+                      <Icon icon="lucide:download" width={16} height={16} />
+                    </Button>
+                    <Button
+                      variant="danger"
+                      onClick={() => removeBook(s)}
+                      disabled={!!bookBusyId}
+                    >
+                      <Icon icon="lucide:trash-2" width={16} height={16} />
+                    </Button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
       <div className="read-history">
         <div className="read-history-head">
           <span className="install-head">朗读历史（最近 {history.length} 条）</span>
@@ -705,7 +1061,9 @@ export default function ReadPanel(props: PanelProps) {
                   <Button
                     variant="ghost"
                     onClick={() => togglePlay(rec).catch((e) => setError(String(e)))}
-                    disabled={playingId !== null && playingId !== rec.id}
+                    disabled={
+                      (playingId !== null && playingId !== rec.id) || !!bookBusyId
+                    }
                   >
                     {playingId === rec.id ? (
                       <>

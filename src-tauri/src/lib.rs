@@ -11,6 +11,7 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::{Emitter, Manager, State};
 
 mod audio_store;
+mod book_store;
 mod conversation_store;
 mod realtime;
 mod recorder;
@@ -2174,6 +2175,14 @@ pub fn run() {
             audio_store::audio_export,
             audio_store::audio_set_clone_sample,
             audio_store::audio_read_base64,
+            book_store::books_list,
+            book_store::books_get_dir,
+            book_store::books_create,
+            book_store::books_get,
+            book_store::books_save_segment,
+            book_store::books_set_next,
+            book_store::books_delete,
+            book_store::books_export,
             conversation_store::conversation_list,
             conversation_store::conversation_get,
             conversation_store::conversation_save,
