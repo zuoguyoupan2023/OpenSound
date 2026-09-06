@@ -515,6 +515,13 @@ textarea:focus,
   flex-wrap: wrap;
 }
 
+/* 060：正文计量统计（中文按字、英文按词） */
+.read-count {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 6px;
+}
+
 /* 060 P2：长文任务工具行 */
 .book-tools {
   margin-top: 0;

@@ -97,6 +97,23 @@ export async function booksSaveSegment(
   });
 }
 
+/** 系统音色（macOS say）逐批合成并直接落盘为任务批次（engine=system 的任务专用） */
+export async function booksSynthSystemSegment(
+  id: string,
+  idx: number,
+  text: string,
+  voice: string,
+  speed: number
+): Promise<BookSummary> {
+  return invoke<BookSummary>("books_synth_segment_system", {
+    id,
+    idx,
+    text,
+    voice,
+    speed,
+  });
+}
+
 /** 手动推进进度（跳过空白批等场景；只前进不回退） */
 export async function booksSetNext(id: string, next: number): Promise<BookSummary> {
   return invoke<BookSummary>("books_set_next", { id, next });
@@ -117,11 +134,11 @@ export async function booksExport(id: string, defaultName: string): Promise<bool
 }
 
 let dirCache: string | null = null;
-/** 任务已合成批次的播放 URL（asset protocol；目录缓存在 Rust 侧创建） */
-export async function bookSegUrl(summary: BookSummary, idx: number): Promise<string | null> {
+/** 任务某批已合成音频的播放 URL（asset protocol；目录缓存在 Rust 侧创建） */
+export async function bookSegUrl(id: string, idx: number): Promise<string | null> {
   const dir = dirCache ?? (dirCache = await booksGetDir());
   const file = `seg_${String(idx).padStart(5, "0")}.wav`;
-  return convertFileSrc(dir + "/" + summary.id + "/" + file);
+  return convertFileSrc(dir + "/" + id + "/" + file);
 }
 
 /** 任务是否全部批次已合成 */

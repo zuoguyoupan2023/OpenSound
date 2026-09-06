@@ -269,33 +269,25 @@ pub fn books_get(app: tauri::AppHandle, id: String) -> Result<BookDetail, String
     })
 }
 
-/// 保存一批已合成的 WAV 并前移 next_idx（只记录整批完成的；中断的半截不落盘）
-#[tauri::command]
-pub fn books_save_segment(
-    app: tauri::AppHandle,
-    id: String,
+/// 把一段整批 WAV 落盘为 seg_<idx>.wav 并前移 next_idx（公共收口：save_segment / 系统音色合成共用）
+fn commit_wav_segment(
+    app: &tauri::AppHandle,
+    id: &str,
     idx: usize,
-    wav_base64: String,
+    wav: &[u8],
     duration_sec: f64,
 ) -> Result<BookSummary, String> {
-    if !id_ok(&id) {
-        return Err("非法任务 id".into());
-    }
-    let dir = books_dir(&app)?;
-    let task = task_dir(&dir, &id);
+    let dir = books_dir(app)?;
+    let task = task_dir(&dir, id);
     let mut meta = read_meta(&task)?;
     if idx >= meta.batches.len() {
         return Err(format!("批下标越界: {idx} >= {}", meta.batches.len()));
     }
-    let wav = base64::engine::general_purpose::STANDARD
-        .decode(&wav_base64)
-        .map_err(|e| format!("WAV base64 解码失败: {e}"))?;
     if wav.len() < 44 {
         return Err("WAV 数据不完整".into());
     }
-
     let file = format!("seg_{:05}.wav", idx);
-    fs::write(seg_path(&task, idx), &wav).map_err(|e| format!("写入批次音频失败: {e}"))?;
+    fs::write(seg_path(&task, idx), wav).map_err(|e| format!("写入批次音频失败: {e}"))?;
     meta.batches[idx].file = file;
     meta.batches[idx].duration_sec = duration_sec;
     write_meta(&task, &meta)?;
@@ -311,6 +303,149 @@ pub fn books_save_segment(
     let out = item.clone();
     write_index(&dir, &idx_items)?;
     Ok(out)
+}
+
+/// 保存一批已合成的 WAV 并前移 next_idx（只记录整批完成的；中断的半截不落盘）
+#[tauri::command]
+pub fn books_save_segment(
+    app: tauri::AppHandle,
+    id: String,
+    idx: usize,
+    wav_base64: String,
+    duration_sec: f64,
+) -> Result<BookSummary, String> {
+    if !id_ok(&id) {
+        return Err("非法任务 id".into());
+    }
+    let wav = base64::engine::general_purpose::STANDARD
+        .decode(&wav_base64)
+        .map_err(|e| format!("WAV base64 解码失败: {e}"))?;
+    commit_wav_segment(&app, &id, idx, &wav, duration_sec)
+}
+
+// ---------- 系统音色合成落盘（Stage 2.6；macOS 用 say + afconvert，Win 待 WinRT stream） ----------
+
+/// 解析 WAV 头算时长（LE PCM；供 afconvert 产物用）
+fn wav_duration_sec(bytes: &[u8]) -> Option<f64> {
+    if bytes.len() < 44 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return None;
+    }
+    let le = |o: usize| -> u32 {
+        u32::from_le_bytes(bytes[o..o + 4].try_into().unwrap_or_default())
+    };
+    let le16 = |o: usize| -> u16 {
+        u16::from_le_bytes(bytes[o..o + 2].try_into().unwrap_or_default())
+    };
+    let sample_rate = le(24);
+    let channels = le16(22) as u32;
+    let bits = le16(34) as u32;
+    let data_size = le(40);
+    if sample_rate == 0 || channels == 0 || bits == 0 {
+        return None;
+    }
+    let byte_rate = sample_rate * channels * (bits / 8);
+    if byte_rate == 0 {
+        return None;
+    }
+    Some(data_size as f64 / byte_rate as f64)
+}
+
+#[cfg(target_os = "macos")]
+fn synth_system_voice_wav(text: &str, voice: &str, speed: f64, wav_path: &Path) -> Result<f64, String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let dir = wav_path
+        .parent()
+        .ok_or_else(|| "非法输出目录".to_string())?;
+    let aiff = dir.join("_say_tmp.aiff");
+    let _ = fs::remove_file(&aiff);
+    let _ = fs::remove_file(wav_path); // 防半截残留
+
+    let mut cmd = Command::new("/usr/bin/say");
+    cmd.arg("-o").arg(&aiff);
+    if !voice.trim().is_empty() {
+        cmd.arg("-v").arg(voice.trim());
+    }
+    // 语速：1x 用 say 默认；其它按 ≈175 词/分折算并限幅
+    if speed > 0.0 && (speed - 1.0).abs() > 1e-6 {
+        let rpm = ((175.0 * speed).round() as i64).clamp(60, 400);
+        cmd.arg("-r").arg(rpm.to_string());
+    }
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("无法启动 say: {e}"))?;
+    if let Some(mut si) = child.stdin.take() {
+        let _ = si.write_all(text.as_bytes());
+    }
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("等待 say 失败: {e}"))?;
+    if !out.status.success() {
+        let _ = fs::remove_file(&aiff);
+        return Err(format!(
+            "say 合成失败: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let af = Command::new("/usr/bin/afconvert")
+        .arg("-f")
+        .arg("WAVE")
+        .arg("-d")
+        .arg("LEI16")
+        .arg(&aiff)
+        .arg(wav_path)
+        .output()
+        .map_err(|e| format!("无法启动 afconvert: {e}"))?;
+    let _ = fs::remove_file(&aiff);
+    if !af.status.success() {
+        let _ = fs::remove_file(wav_path);
+        return Err(format!(
+            "afconvert 转 WAV 失败: {}",
+            String::from_utf8_lossy(&af.stderr).trim()
+        ));
+    }
+    let bytes = fs::read(wav_path).map_err(|e| format!("读取合成 WAV 失败: {e}"))?;
+    wav_duration_sec(&bytes).ok_or_else(|| "无法解析合成 WAV 时长".to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn synth_system_voice_wav(_text: &str, _voice: &str, _speed: f64, _wav_path: &Path) -> Result<f64, String> {
+    Err("系统音色落盘当前仅支持 macOS（say + afconvert）；Windows 需接入 WinRT SpeechSynthesizer 流（见 060 §4.6b，待实现）".into())
+}
+
+/// 系统音色逐批合成并直接落盘为任务批次（engine=system 的长文任务专用）
+/// text 为单批文本；voice 用系统音色名/标识符（ReadPanel 系统音色列表所选）；speed 沿用语速倍率
+#[tauri::command]
+pub fn books_synth_segment_system(
+    app: tauri::AppHandle,
+    id: String,
+    idx: usize,
+    text: String,
+    voice: String,
+    speed: f64,
+) -> Result<BookSummary, String> {
+    if !id_ok(&id) {
+        return Err("非法任务 id".into());
+    }
+    let dir = books_dir(&app)?;
+    let task = task_dir(&dir, &id);
+    let meta = read_meta(&task)?;
+    if idx >= meta.batches.len() {
+        return Err(format!("批下标越界: {idx} >= {}", meta.batches.len()));
+    }
+    if text.trim().is_empty() {
+        return Err("该批文本为空".into());
+    }
+    let seg = seg_path(&task, idx);
+    let dur = synth_system_voice_wav(&text, &voice, speed, &seg)?;
+    let wav = fs::read(&seg).map_err(|e| format!("读取合成 WAV 失败: {e}"))?;
+    // 上面已写入 seg 文件，这里只需更新 meta/索引；避免二次写文件用字节直传
+    commit_wav_segment(&app, &id, idx, &wav, dur)
 }
 
 /// 手动推进 next_idx（跳过空白批/保留进度用；只前进不回退，封顶 total_batches）

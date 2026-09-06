@@ -16,12 +16,13 @@ import {
 import { fmtTime, fmtDur, truncate } from "../format";
 import { useAudioPlayback } from "../useAudioPlayback";
 import { showToast } from "../toast";
-import { splitTextBatches, textFingerprint } from "../textSplit";
+import { splitTextBatches, textFingerprint, countTextStats, textCountLabel } from "../textSplit";
 import {
   booksList,
   booksGet,
   booksCreate,
   booksSaveSegment,
+  booksSynthSystemSegment,
   booksSetNext,
   booksDelete,
   booksExport,
@@ -99,9 +100,14 @@ export default function ReadPanel(props: PanelProps) {
   const [error, setError] = useState("");
   const [fileName, setFileName] = useState("");
   const [history, setHistory] = useState<AudioRecord[]>([]);
-  // 060 P1：每批上限字数（默认 1000，200–5000）；多批进度；断点续读偏移（仅同文本有效）
+  // 060 P1：每批上限字数（默认 1000，200–5000）；多批进度（含已计量单位）；断点续读偏移（仅同文本有效）
   const [batchChars, setBatchChars] = useState<number>(loadReadBatchChars());
-  const [batchInfo, setBatchInfo] = useState<{ done: number; total: number } | null>(null);
+  const [batchInfo, setBatchInfo] = useState<{
+    done: number;
+    total: number;
+    doneUnits: number;
+    totalUnits: number;
+  } | null>(null);
   const [resumeAt, setResumeAt] = useState<{ offset: number; fp: string } | null>(null);
   const playerRef = useRef<FramePlayer | null>(null);
   // 朗读中断控制：停止时 abort 底层流，服务端不再继续合成
@@ -258,19 +264,32 @@ export default function ReadPanel(props: PanelProps) {
         if (idx >= 0) startIdx = idx;
       }
       const total = batches.length;
+      const batchUnits = batches.map((b) => countTextStats(b.text).total);
+      const pref: number[] = [0];
+      for (const c of batchUnits) pref.push(pref[pref.length - 1] + c);
+      const totalUnits = pref[total] || 1;
+      if (startIdx > 0) {
+        showToast(`检测到断点：从第 ${startIdx + 1} / ${total} 批继续（想从头读请先点「从头开始」）`);
+      }
+      console.info(
+        `[朗读-系统] 共 ${total} 批 · 从批 ${startIdx + 1} 开始 · 文本 ${pref[total]} 计量单位`,
+        `批字数=${batchChars}`
+      );
       let interruptedBatchStart = -1;
       try {
         for (let bi = startIdx; bi < total; bi++) {
           if (speakStoppedRef.current) break;
           interruptedBatchStart = batches[bi].start;
-          if (total > 1) setBatchInfo({ done: bi, total });
+          if (total > 1)
+            setBatchInfo({ done: bi, total, doneUnits: pref[bi], totalUnits });
           await speakSystem(batches[bi].text, sysVoiceId || null, speed);
           // speak() 开始即 resolve，轮询直到这一块说完（或被停止）
           while (!speakStoppedRef.current && (await isSpeakingSystem())) {
             await new Promise((r) => setTimeout(r, 300));
           }
           if (speakStoppedRef.current) break;
-          if (total > 1) setBatchInfo({ done: bi + 1, total });
+          if (total > 1)
+            setBatchInfo({ done: bi + 1, total, doneUnits: pref[bi + 1], totalUnits });
         }
       } catch (e) {
         if (!speakStoppedRef.current) setError(ttsErrorMessage(e));
@@ -303,6 +322,18 @@ export default function ReadPanel(props: PanelProps) {
       if (idx >= 0) startIdx = idx;
     }
     const total = batches.length;
+    // 060：进度按"计量单位"算（中文按字、英文按词），每批预先统计便于累计
+    const batchUnits = batches.map((b) => countTextStats(b.text).total);
+    const pref: number[] = [0];
+    for (const c of batchUnits) pref.push(pref[pref.length - 1] + c);
+    const totalUnits = pref[total] || 1;
+    if (startIdx > 0) {
+      showToast(`检测到断点：从第 ${startIdx + 1} / ${total} 批继续（想从头读请先点「从头开始」）`);
+    }
+    console.info(
+      `[朗读-${engine}] 共 ${total} 批 · 从批 ${startIdx + 1} 开始 · 文本 ${pref[total]} 计量单位（中文${countTextStats(text).cjk} 字 / 英文 ${countTextStats(text).words} 词）`,
+      `批字数=${batchChars}`
+    );
     const meta = {
       source: "read" as const,
       voice:
@@ -337,7 +368,8 @@ export default function ReadPanel(props: PanelProps) {
       for (let bi = startIdx; bi < total; bi++) {
         if (speakStoppedRef.current) break;
         interruptedBatchStart = batches[bi].start;
-        if (total > 1) setBatchInfo({ done: bi, total });
+        if (total > 1)
+          setBatchInfo({ done: bi, total, doneUnits: pref[bi], totalUnits });
         const batchAc = new AbortController();
         speakAbortRef.current = batchAc;
         try {
@@ -366,7 +398,8 @@ export default function ReadPanel(props: PanelProps) {
           if (speakAbortRef.current === batchAc) speakAbortRef.current = null;
         }
         if (speakStoppedRef.current) break;
-        if (total > 1) setBatchInfo({ done: bi + 1, total });
+        if (total > 1)
+          setBatchInfo({ done: bi + 1, total, doneUnits: pref[bi + 1], totalUnits });
       }
     } catch (e) {
       // 主动停止不算错误；其它错误记录并继续走收尾（已收帧仍保存）
@@ -463,8 +496,8 @@ export default function ReadPanel(props: PanelProps) {
       setError("请先粘贴文本或打开文件，再创建长文任务");
       return;
     }
-    if (engine === "system") {
-      setError("长文任务暂不支持系统朗读，请选择 Kokoro / Qwen3 / 克隆 / 云端引擎");
+    if (engine === "system" && !sysVoiceId) {
+      setError("请先在引擎区选择一个系统音色（如中文音色），再创建长文任务");
       return;
     }
     setError("");
@@ -482,9 +515,9 @@ export default function ReadPanel(props: PanelProps) {
         sourceName: fileName,
         text,
         engine,
-        voice: pickBookVoice(),
+        voice: engine === "system" ? sysVoiceId : pickBookVoice(),
         sid: engine === "kokoro" ? sid : undefined,
-        speed: engine === "kokoro" ? speed : 1,
+        speed: engine === "kokoro" || engine === "system" ? speed : 1,
         language,
         batchChars: effChars,
         batches: batches.map((b) => ({ start: b.start, end: b.end })),
@@ -535,6 +568,30 @@ export default function ReadPanel(props: PanelProps) {
           continue;
         }
         setBookPlayIdx(idx);
+        if (d.summary.engine === "system") {
+          // 系统音色长文任务（Stage 2.6）：Rust 侧 say+afconvert 合成并直接落盘该批
+          const ac = new AbortController();
+          bookAbortRef.current = ac;
+          try {
+            await booksSynthSystemSegment(
+              id,
+              idx,
+              chunk,
+              d.summary.voice,
+              d.summary.speed
+            );
+          } finally {
+            if (bookAbortRef.current === ac) bookAbortRef.current = null;
+          }
+          if (bookStopRef.current) break;
+          // 播放刚合成的这一批，保持"边生成边听"的节奏
+          await playBookSegById(id, idx);
+          if (bookStopRef.current) break;
+          idx++;
+          setBookPlayIdx(-1);
+          if (!bookStopRef.current) void refreshBooks();
+          continue;
+        }
         const ac = new AbortController();
         bookAbortRef.current = ac;
         let frames: Uint8Array[] = [];
@@ -575,6 +632,30 @@ export default function ReadPanel(props: PanelProps) {
     }
   };
 
+  // 播放任务的单个批次文件（asset URL），供从头播放与系统任务边生成边听复用
+  const playBookSegById = (id: string, idx: number): Promise<void> => {
+    setBookPlayIdx(idx);
+    return (async () => {
+      const url = await bookSegUrl(id, idx);
+      if (!url) return;
+      await new Promise<void>((resolve) => {
+        const a = new Audio(url);
+        bookAudioRef.current = a;
+        const done = () => {
+          if (bookAudioRef.current === a) bookAudioRef.current = null;
+          resolve();
+        };
+        a.onended = done;
+        a.onerror = () => {
+          console.error("播放长文批次失败:", idx);
+          done();
+        };
+        a.onpause = done; // 点「停止」pause → 结束当前帧
+        a.play().catch(() => done());
+      });
+    })();
+  };
+
   // 从头播放已全部合成的任务（纯文件播放，不重新合成）
   const playBook = async (sum: BookSummary) => {
     if (bookBusyId) return;
@@ -584,24 +665,7 @@ export default function ReadPanel(props: PanelProps) {
     try {
       for (let i = 0; i < sum.total_batches; i++) {
         if (bookStopRef.current) break;
-        const url = await bookSegUrl(sum, i);
-        if (!url) continue;
-        setBookPlayIdx(i);
-        await new Promise<void>((resolve) => {
-          const a = new Audio(url);
-          bookAudioRef.current = a;
-          const done = () => {
-            if (bookAudioRef.current === a) bookAudioRef.current = null;
-            resolve();
-          };
-          a.onended = done;
-          a.onerror = () => {
-            console.error("播放长文批次失败:", i);
-            done();
-          };
-          a.onpause = done; // 点「停止」pause → 结束当前帧
-          a.play().catch(() => done());
-        });
+        await playBookSegById(sum.id, i);
       }
       if (!bookStopRef.current) showToast("播放结束");
     } finally {
@@ -852,6 +916,9 @@ export default function ReadPanel(props: PanelProps) {
           placeholder="在这里粘贴要朗读的文本…"
           rows={8}
         />
+        <div className="read-count">
+          {text.trim() ? `正文：${textCountLabel(countTextStats(text))}` : ""}
+        </div>
         <div className="read-tools">
           <label className="file-btn">
             <Icon icon="lucide:folder-open" width={16} height={16} /> 打开文件
@@ -903,6 +970,8 @@ export default function ReadPanel(props: PanelProps) {
         {state === "speaking" && batchInfo && (
           <span className="hint">
             正在朗读第 {batchInfo.done + 1} / {batchInfo.total} 批
+            {batchInfo.totalUnits > 0 &&
+              ` · 已读约 ${Math.min(100, Math.floor((batchInfo.doneUnits / batchInfo.totalUnits) * 100))}%（${batchInfo.doneUnits}/${batchInfo.totalUnits} 字词）`}
             （每批 ≤ {effCharsNow} 字）…
           </span>
         )}
@@ -955,8 +1024,7 @@ export default function ReadPanel(props: PanelProps) {
               bookCreating ||
               !!bookBusyId ||
               state === "speaking" ||
-              !text.trim() ||
-              engine === "system"
+              !text.trim()
             }
           >
             {bookCreating ? (
@@ -964,12 +1032,10 @@ export default function ReadPanel(props: PanelProps) {
             ) : (
               <Icon icon="lucide:book-plus" width={16} height={16} />
             )}
-            {engine === "system"
-              ? "长文任务不支持系统朗读"
-              : "从当前文本新建任务并朗读"}
+            从当前文本新建任务并朗读
           </Button>
           <span className="hint">
-            长文按每批 ≤{batchChars} 字拆批、整批完成才存一个 WAV；可随时暂停，之后「继续生成」从断点续；完整生成后可「从头播放」。
+            长文按每批 ≤{batchChars} 字拆批、整批完成才存一个 WAV；可随时暂停，「继续生成」从断点续，完整生成后可「从头播放」。系统音色（macOS）也已支持合成落盘。
           </span>
         </div>
         {books.length === 0 ? (

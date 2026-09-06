@@ -2180,6 +2180,7 @@ pub fn run() {
             book_store::books_create,
             book_store::books_get,
             book_store::books_save_segment,
+            book_store::books_synth_segment_system,
             book_store::books_set_next,
             book_store::books_delete,
             book_store::books_export,

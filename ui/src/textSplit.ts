@@ -77,3 +77,48 @@ export function textFingerprint(text: string): string {
   const head = text.slice(0, 30).replace(/\s+/g, " ");
   return `${text.length}:${head}`;
 }
+
+// ---------- 字数统计（060：中文按字、英文按词，分开计，可混合） ----------
+
+export interface TextCounts {
+  /** 中文字符数（汉字 + 中文标点等 CJK 单字符） */
+  cjk: number;
+  /** 英文/数字等连续字母数字词数（含撇号如 don't） */
+  words: number;
+  /** 计量单位合计 = cjk + words（朗读进度按它算） */
+  total: number;
+}
+
+function isCjkCode(cp: number): boolean {
+  return (
+    (cp >= 0x3400 && cp <= 0x4dbf) || // 扩展 A
+    (cp >= 0x4e00 && cp <= 0x9fff) || // 基本区
+    (cp >= 0xf900 && cp <= 0xfaff) || // 兼容表意
+    (cp >= 0x20000 && cp <= 0x2a6df) || // 扩展 B
+    (cp >= 0x2a700 && cp <= 0x2ebef) || // 扩展 C–F
+    (cp >= 0x3000 && cp <= 0x303f) || // 中文标点/符号（。，、；：？！…）
+    cp === 0xff01 || cp === 0xff0c || cp === 0xff1b || cp === 0xff1a || cp === 0xff1f || // 全角 !,：；
+    (cp >= 0xff5f && cp <= 0xff60) // 全角括号
+  );
+}
+
+const WORD_RE = /[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)*/g;
+
+export function countTextStats(text: string): TextCounts {
+  let cjk = 0;
+  for (const ch of text) {
+    const cp = ch.codePointAt(0) ?? 0;
+    if (isCjkCode(cp)) cjk++;
+  }
+  const words = (text.match(WORD_RE) || []).length;
+  return { cjk, words, total: cjk + words };
+}
+
+/** 展示文案：如「中文 12 字 · 英文 3 词（合计 15）」 */
+export function textCountLabel(c: TextCounts): string {
+  const parts: string[] = [];
+  if (c.cjk) parts.push(`中文 ${c.cjk} 字`);
+  if (c.words) parts.push(`英文 ${c.words} 词`);
+  if (!parts.length) return "0 字";
+  return `${parts.join(" · ")}（合计 ${c.total}）`;
+}
