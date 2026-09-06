@@ -1,7 +1,7 @@
 import { useRef, useState, useEffect } from "react";
 import type { PanelProps } from "../App";
 import { Icon } from "@iconify/react";
-import { transcribe, computeStarting, getPersistedSettings, switchEcoEngine, engineDisabledInEco, type EcoAsr } from "../api";
+import { transcribe, computeStarting, getPersistedSettings, switchEcoEngine, engineDisabledInEco, azureAsrConfigured, AZURE_ASR_LANGS, updateSettings, type EcoAsr } from "../api";
 import { createRecorder, type Recorder } from "../audio";
 import { saveRecording } from "../audioStore";
 import { Panel, Button, Select, Spinner, EngineBadge } from "../components/ui";
@@ -69,6 +69,8 @@ export default function AsrPanel(props: PanelProps) {
   const [sysLocales, setSysLocales] = useState<string[]>([]);
   // supportsOnDeviceRecognition 运行时结果（true=设备端离线 / false=走苹果服务器）
   const [sysOnDevice, setSysOnDevice] = useState<boolean | null>(null);
+  // 000-plan-11 A-1：Azure 云识别语言（持久化到设置；Key/Region 复用 Azure 语音资源）
+  const [azureLang, setAzureLang] = useState<string>(getPersistedSettings().azureAsrLanguage || "zh-CN");
   const [punc, setPunc] = useState<boolean>(false);
   const [vad, setVad] = useState<boolean>(false);
   const [text, setText] = useState("");
@@ -98,8 +100,8 @@ export default function AsrPanel(props: PanelProps) {
       ? "（点选切换并启用）"
       : "";
   const pickAsrEngine: (v: string) => Promise<void> = async (v) => {
-    // 系统识别走 macOS 原生（SFSpeechRecognizer），不占服务/模型，不受节能约束
-    if (v === "sys") {
+    // 系统识别（mac 原生）与云端识别不占本地模型资源，不受节能约束
+    if (v === "sys" || v === "azure") {
       setEngine(v);
       return;
     }
@@ -134,7 +136,7 @@ export default function AsrPanel(props: PanelProps) {
   // 000-plan-3：节能下当前识别引擎不在启用集（含默认 auto 语义不明确）→ 自动回落启用引擎
   useEffect(() => {
     if (!ecoActiveAsr) return;
-    if (engine === "sys") return; // 系统识别不参与节能
+    if (engine === "sys" || engine === "azure") return; // 系统/云端识别不参与节能
     if (engine !== ecoActiveAsr) setEngine(ecoActiveAsr);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ecoActiveAsr, props.models]);
@@ -165,6 +167,17 @@ export default function AsrPanel(props: PanelProps) {
       recRef.current = null;
       const t0 = Date.now();
       try {
+        if (engine === "azure") {
+          // Azure 云识别：本机录音 WAV → asr-server 转发到 Azure STT（自带标点，不走本地 VAD/标点）
+          const r = await transcribe(wav, "azure", false, false, "");
+          saveRecording(wav, "azure", r.text, { source: "asr" }).catch((e) =>
+            console.error("保存录音失败:", e)
+          );
+          setText(r.text);
+          setElapsed(Math.round((Date.now() - t0) / 100) / 10);
+          setState("done");
+          return;
+        }
         if (engine === "sys") {
           // 系统识别：Tauri 原生命令（SFSpeechRecognizer），不经 9528 服务
           const { invoke } = await import("@tauri-apps/api/core");
@@ -273,9 +286,28 @@ export default function AsrPanel(props: PanelProps) {
               ...(isMac
                 ? [{ value: "sys", label: "系统识别（mac 系统兜底 · 零下载）" }]
                 : []),
+              { value: "azure", label: "Azure 语音识别（云 · 出网 · 自带标点）" },
             ]}
           />
         </label>
+        {engine === "azure" && (
+          <label className="whisper-lang">
+            Azure 识别语言
+            <Select
+              value={azureLang}
+              onChange={(v) => {
+                setAzureLang(v);
+                updateSettings({ azureAsrLanguage: v }).catch(() => {});
+              }}
+              options={AZURE_ASR_LANGS.map((c) => ({ value: c, label: c }))}
+            />
+            <span className="hint">
+              {azureAsrConfigured()
+                ? "录音将出网到 Azure 语音服务（Key/Region 与朗读共用，在 设置 → 云端能力 配置）。"
+                : "⚠️ 未配置 Azure Key/Region —— 请到 设置 → 云端能力 填写。"}
+            </span>
+          </label>
+        )}
         {engine === "sys" && (
           <label className="whisper-lang">
             系统识别语言
@@ -335,6 +367,7 @@ export default function AsrPanel(props: PanelProps) {
         />
         <EngineBadge label="Whisper" ready={whisperReady} />
         {isMac && <EngineBadge label="系统识别" ready />}
+        <EngineBadge label="Azure 云识别" ready={azureAsrConfigured()} />
       </div>
 
       {error && (

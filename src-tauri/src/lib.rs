@@ -1301,6 +1301,24 @@ struct UiSettings {
     deepseek_key: String,
     #[serde(default)]
     zhipu_key: String,
+    // 000-plan-11 云端能力：Azure Speech（TTS/ASR 共用 Key+Region，同一语音资源）
+    #[serde(default)]
+    azure_key: String,
+    #[serde(default)]
+    azure_region: String,
+    #[serde(default)]
+    azure_tts_voice: String,
+    #[serde(default)]
+    azure_asr_language: String,
+    // 云端 TTS · OpenAI 兼容（/v1/audio/speech）
+    #[serde(default)]
+    openai_tts_base_url: String,
+    #[serde(default)]
+    openai_tts_key: String,
+    #[serde(default)]
+    openai_tts_model: String,
+    #[serde(default)]
+    openai_tts_voice: String,
     // 030 阶段一：服务资源模式
     // power_mode = "full"（全能，全部拉起）| "eco"（节能，每类同时仅启用 1 个模型）
     // eco_big（旧全局单开，仅兼容旧 config，新 UI 不再写；读取时回退推导 eco_tts/eco_asr）
@@ -1524,6 +1542,14 @@ fn set_ui_settings(
     token: Option<String>,
     deepseek_key: Option<String>,
     zhipu_key: Option<String>,
+    azure_key: Option<String>,
+    azure_region: Option<String>,
+    azure_tts_voice: Option<String>,
+    azure_asr_language: Option<String>,
+    openai_tts_base_url: Option<String>,
+    openai_tts_key: Option<String>,
+    openai_tts_model: Option<String>,
+    openai_tts_voice: Option<String>,
     power_mode: Option<String>,
     eco_big: Option<String>,
     llm_model: Option<String>,
@@ -1535,6 +1561,14 @@ fn set_ui_settings(
     if let Some(v) = token { cfg.ui.token = v; }
     if let Some(v) = deepseek_key { cfg.ui.deepseek_key = v; }
     if let Some(v) = zhipu_key { cfg.ui.zhipu_key = v; }
+    if let Some(v) = azure_key { cfg.ui.azure_key = v; }
+    if let Some(v) = azure_region { cfg.ui.azure_region = v; }
+    if let Some(v) = azure_tts_voice { cfg.ui.azure_tts_voice = v; }
+    if let Some(v) = azure_asr_language { cfg.ui.azure_asr_language = v; }
+    if let Some(v) = openai_tts_base_url { cfg.ui.openai_tts_base_url = v; }
+    if let Some(v) = openai_tts_key { cfg.ui.openai_tts_key = v; }
+    if let Some(v) = openai_tts_model { cfg.ui.openai_tts_model = v; }
+    if let Some(v) = openai_tts_voice { cfg.ui.openai_tts_voice = v; }
     if let Some(v) = power_mode { cfg.ui.power_mode = v; }
     if let Some(v) = eco_big { cfg.ui.eco_big = v; }
     if let Some(v) = llm_model { cfg.ui.llm_model = v; }

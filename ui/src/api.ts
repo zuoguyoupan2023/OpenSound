@@ -20,6 +20,15 @@ interface PersistedSettings {
   token?: string;
   deepseekKey?: string;
   zhipuKey?: string;
+  // 000-plan-11 云端能力（Azure Speech：TTS/ASR 共用 Key+Region；OpenAI 兼容 TTS）
+  azureKey?: string;
+  azureRegion?: string;
+  azureTtsVoice?: string;
+  azureAsrLanguage?: string;
+  openaiTtsBaseUrl?: string;
+  openaiTtsKey?: string;
+  openaiTtsModel?: string;
+  openaiTtsVoice?: string;
   powerMode?: PowerMode;
   ecoBig?: EcoBig;
   /** 000-plan-3：用户选择的本地 LLM 档位（llama-cpp），持久化跨重启沿用 */
@@ -138,6 +147,14 @@ export async function initSettings(): Promise<void> {
       token: string;
       deepseek_key: string;
       zhipu_key: string;
+      azure_key: string;
+      azure_region: string;
+      azure_tts_voice: string;
+      azure_asr_language: string;
+      openai_tts_base_url: string;
+      openai_tts_key: string;
+      openai_tts_model: string;
+      openai_tts_voice: string;
       power_mode: string;
       eco_big: string;
       llm_model: string;
@@ -149,6 +166,14 @@ export async function initSettings(): Promise<void> {
       token: ui.token || "",
       deepseekKey: ui.deepseek_key || "",
       zhipuKey: ui.zhipu_key || "",
+      azureKey: ui.azure_key || "",
+      azureRegion: ui.azure_region || "",
+      azureTtsVoice: ui.azure_tts_voice || "zh-CN-XiaoxiaoNeural",
+      azureAsrLanguage: ui.azure_asr_language || "zh-CN",
+      openaiTtsBaseUrl: ui.openai_tts_base_url || "",
+      openaiTtsKey: ui.openai_tts_key || "",
+      openaiTtsModel: ui.openai_tts_model || "tts-1",
+      openaiTtsVoice: ui.openai_tts_voice || "alloy",
       powerMode: ui.power_mode === "eco" ? "eco" : "full",
       ecoBig: (ui.eco_big as EcoBig) || "none",
       llmModel: ui.llm_model || "",
@@ -216,6 +241,39 @@ export function getCloudApiKey(engine: string): string {
   return "";
 }
 
+// 云端 TTS 配置组包（000-plan-11）：随 /speak 请求体带给 asr-server 转发（仅存本机设置，出网到对应供应商）
+export function getCloudTtsCfg(engine: string): Record<string, unknown> | null {
+  const s = getPersistedSettings();
+  if (engine === "azure")
+    return {
+      key: s.azureKey || "",
+      region: s.azureRegion || "",
+      voice: s.azureTtsVoice || "zh-CN-XiaoxiaoNeural",
+    };
+  if (engine === "cloud")
+    return {
+      baseUrl: s.openaiTtsBaseUrl || "",
+      apiKey: s.openaiTtsKey || "",
+      model: s.openaiTtsModel || "tts-1",
+      voice: s.openaiTtsVoice || "alloy",
+    };
+  return null;
+}
+
+// 云端 TTS 是否已配置（引擎徽标 / 朗读前提示用）
+export function cloudTtsConfigured(engine: string): boolean {
+  const s = getPersistedSettings();
+  if (engine === "azure") return Boolean(s.azureKey && s.azureRegion);
+  if (engine === "cloud") return Boolean(s.openaiTtsBaseUrl && s.openaiTtsKey);
+  return false;
+}
+
+// Azure 语音识别是否已配置
+export function azureAsrConfigured(): boolean {
+  const s = getPersistedSettings();
+  return Boolean(s.azureKey && s.azureRegion);
+}
+
 // 局部更新设置：先更内存缓存再持久化到 config.json（未传的字段不动）
 export async function updateSettings(
   partial: Partial<PersistedSettings>
@@ -234,6 +292,14 @@ export async function updateSettings(
     token: partial.token,
     deepseekKey: partial.deepseekKey,
     zhipuKey: partial.zhipuKey,
+    azureKey: partial.azureKey,
+    azureRegion: partial.azureRegion,
+    azureTtsVoice: partial.azureTtsVoice,
+    azureAsrLanguage: partial.azureAsrLanguage,
+    openaiTtsBaseUrl: partial.openaiTtsBaseUrl,
+    openaiTtsKey: partial.openaiTtsKey,
+    openaiTtsModel: partial.openaiTtsModel,
+    openaiTtsVoice: partial.openaiTtsVoice,
     powerMode: partial.powerMode,
     ecoBig: partial.ecoBig,
     llmModel: partial.llmModel,
@@ -327,11 +393,19 @@ export async function transcribe(
   const q = `/transcribe?engine=${encodeURIComponent(engine)}&punct=${punct ? "1" : "0"}&vad=${vad ? "1" : "0"}${
     lang ? `&lang=${encodeURIComponent(lang)}` : ""
   }`;
+  // Azure 云识别：Key/Region/语言经请求头传入（仅本机回环；服务端转发到该 region 的 STT 端点）
+  const azureHeaders: Record<string, string> = {};
+  if (engine === "azure") {
+    const s = getPersistedSettings();
+    azureHeaders["x-os-azure-key"] = s.azureKey || "";
+    azureHeaders["x-os-azure-region"] = s.azureRegion || "";
+    azureHeaders["x-os-azure-lang"] = s.azureAsrLanguage || "zh-CN";
+  }
   const res = await fetch(
     `${getBaseUrl()}${q}`,
     authHeaders({
       method: "POST",
-      headers: { "Content-Type": "audio/wav" },
+      headers: { "Content-Type": "audio/wav", ...azureHeaders },
       body: wav,
     })
   );
@@ -351,7 +425,7 @@ export async function transcribe(
 // ---------- 朗读 TTS ----------
 export interface SpeakParams {
   text: string;
-  engine: "kokoro" | "qwen3" | "clone";
+  engine: "kokoro" | "qwen3" | "clone" | "system" | "azure" | "cloud";
   sid?: number;
   speed?: number;
   voice?: string;
@@ -375,6 +449,9 @@ export async function speakStream(
         speed: params.speed ?? 1,
         voice: params.voice,
         language: params.language,
+        // 000-plan-11：云端引擎的 Key/Region 等配置随请求体转发（azure → body.azure，cloud → body.cloud）
+        ...(params.engine === "azure" ? { azure: getCloudTtsCfg("azure") } : {}),
+        ...(params.engine === "cloud" ? { cloud: getCloudTtsCfg("cloud") } : {}),
       }),
       signal,
     })
@@ -741,3 +818,21 @@ export async function switchEcoEngine(
   await updateSettings({ powerMode, [key]: engine } as Partial<PersistedSettings>);
   await restartService();
 }
+
+// 000-plan-11：Azure TTS 音色清单（标准音色子集；完整列表见 learn.microsoft.com/azure/ai-services/speech-service/language-support）
+export const AZURE_TTS_VOICES = [
+  { value: "zh-CN-XiaoxiaoNeural", label: "晓晓（普通话·女）" },
+  { value: "zh-CN-XiaoyiNeural", label: "晓伊（普通话·女）" },
+  { value: "zh-CN-YunxiNeural", label: "云希（普通话·男）" },
+  { value: "zh-CN-YunjianNeural", label: "云健（普通话·男）" },
+  { value: "zh-CN-YunyangNeural", label: "云扬（普通话·男·新闻）" },
+  { value: "zh-HK-HiuMaanNeural", label: "曉曼（粤语·女）" },
+  { value: "zh-TW-HsiaoChenNeural", label: "曉臻（台湾·女）" },
+  { value: "en-US-AriaNeural", label: "Aria（英语·女）" },
+  { value: "en-US-GuyNeural", label: "Guy（英语·男）" },
+];
+// Azure 语音识别语言（STT 支持的常用 locale）
+export const AZURE_ASR_LANGS = [
+  "zh-CN", "zh-HK", "zh-TW", "en-US", "ja-JP", "ko-KR", "fr-FR", "de-DE",
+  "es-ES", "ru-RU", "pt-BR", "it-IT", "th-TH", "vi-VN", "ar-SA", "hi-IN",
+];

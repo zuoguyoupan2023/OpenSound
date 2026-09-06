@@ -199,7 +199,7 @@ pub fn audio_delete(app: tauri::AppHandle, id: String) -> Result<(), String> {
 /// 各 TTS 引擎帧流的真实采样率（asr-server.js / qwen3 / cosyvoice 服务端均为 24kHz）
 fn engine_sample_rate(engine: &str) -> u32 {
     match engine {
-        "kokoro" | "qwen3" | "clone" | "cosyvoice" => 24000,
+        "kokoro" | "qwen3" | "clone" | "cosyvoice" | "azure" | "cloud" => 24000,
         _ => 16000,
     }
 }

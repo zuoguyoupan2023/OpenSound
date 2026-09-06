@@ -1,7 +1,7 @@
 import { useRef, useState, useEffect } from "react";
 import type { PanelProps } from "../App";
 import { Icon } from "@iconify/react";
-import { speakStream, computeStarting, getPersistedSettings, switchEcoEngine, engineDisabledInEco, TTS_PANEL_TO_ID, TTS_ID_TO_PANEL, type EcoTts } from "../api";
+import { speakStream, computeStarting, getPersistedSettings, switchEcoEngine, engineDisabledInEco, cloudTtsConfigured, AZURE_TTS_VOICES, TTS_PANEL_TO_ID, TTS_ID_TO_PANEL, type EcoTts } from "../api";
 import { createFramePlayer, type FramePlayer, stopAudio, setAudioPlayErrorHandler } from "../audio";
 import {
   teeCollect,
@@ -43,7 +43,9 @@ type Speaking = "idle" | "speaking" | "done";
 
 export default function ReadPanel(props: PanelProps) {
   const [text, setText] = useState("");
-  const [engine, setEngine] = useState<"kokoro" | "qwen3" | "clone" | "system">("kokoro");
+  const [engine, setEngine] = useState<"kokoro" | "qwen3" | "clone" | "system" | "azure" | "cloud">("kokoro");
+  const [azureVoice, setAzureVoice] = useState<string>("zh-CN-XiaoxiaoNeural");
+  const [cloudVoice, setCloudVoice] = useState<string>("alloy");
   // 000-plan-6 阶段1：系统朗读（系统音色）
   const [sysVoices, setSysVoices] = useState<SystemVoice[]>([]);
   const [sysLang, setSysLang] = useState<string>("zh");
@@ -80,9 +82,9 @@ export default function ReadPanel(props: PanelProps) {
       ? "（点选切换并启用）"
       : "";
   const pickEngine: (v: string) => Promise<void> = async (v) => {
-    // 系统朗读走系统原生引擎（不占服务/模型），不受节能模式约束
-    if (v === "system") {
-      setEngine("system");
+    // 系统朗读（原生引擎）与云端引擎（不占本地模型资源）不受节能模式约束
+    if (v === "system" || v === "azure" || v === "cloud") {
+      setEngine(v as typeof engine);
       return;
     }
     const id = TTS_PANEL_TO_ID[v];
@@ -114,7 +116,7 @@ export default function ReadPanel(props: PanelProps) {
   const ecoActivePanel = ecoActiveTts ? (TTS_ID_TO_PANEL[ecoActiveTts] as typeof engine) : null;
   useEffect(() => {
     if (!ecoActivePanel) return;
-    if (engine === "system") return; // 系统朗读不参与节能
+    if (engine === "system" || engine === "azure" || engine === "cloud") return; // 系统/云端引擎不参与节能
     if (engine !== ecoActivePanel) setEngine(ecoActivePanel);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ecoActiveTts, props.models]);
@@ -201,7 +203,14 @@ export default function ReadPanel(props: PanelProps) {
           engine,
           sid,
           speed,
-          voice: engine === "clone" ? cloneVoiceId : voice,
+          voice:
+            engine === "clone"
+              ? cloneVoiceId
+              : engine === "azure"
+              ? azureVoice
+              : engine === "cloud"
+              ? cloudVoice
+              : voice,
           language,
         },
         ac.signal
@@ -218,6 +227,10 @@ export default function ReadPanel(props: PanelProps) {
                 ? cloneVoiceId
                 : engine === "qwen3"
                 ? voice
+                : engine === "azure"
+                ? azureVoice
+                : engine === "cloud"
+                ? cloudVoice
                 : undefined,
             sid: engine === "kokoro" ? sid : undefined,
             speed: engine === "kokoro" ? speed : undefined,
@@ -299,8 +312,35 @@ export default function ReadPanel(props: PanelProps) {
               label: `克隆音色（CosyVoice）${ttsOffLabel("clone")}`,
             },
             { value: "system", label: "系统朗读（系统音色 · 离线秒开）" },
+            { value: "azure", label: "Azure TTS（云 · 出网）" },
+            { value: "cloud", label: "OpenAI 兼容（云 · 出网）" },
           ]}
         />
+        {(engine === "azure" || engine === "cloud") && (
+          <Select
+            value={engine === "azure" ? azureVoice : cloudVoice}
+            onChange={engine === "azure" ? setAzureVoice : setCloudVoice}
+            options={
+              engine === "azure"
+                ? AZURE_TTS_VOICES.map((v) => ({ value: v.value, label: v.label }))
+                : ["alloy", "echo", "fable", "onyx", "nova", "shimmer"].map((v) => ({
+                    value: v,
+                    label: v,
+                  }))
+            }
+          />
+        )}
+        {(engine === "azure" || engine === "cloud") && (
+          <span className="hint">
+            {engine === "azure"
+              ? cloudTtsConfigured("azure")
+                ? "音频将出网到 Azure 语音服务（Key/Region 在 设置 → 云端能力 配置）。"
+                : "⚠️ 未配置 Azure Key/Region —— 请到 设置 → 云端能力 填写。"
+              : cloudTtsConfigured("cloud")
+              ? "音频将出网到你配置的 OpenAI 兼容端点（Base URL/Key 在 设置 → 云端能力）。"
+              : "⚠️ 未配置 Base URL/API Key —— 请到 设置 → 云端能力 填写。"}
+          </span>
+        )}
         {engine === "system" && (() => {
           const isMac = /Mac/i.test(navigator.userAgent);
           const isWin = /Win/i.test(navigator.userAgent);
@@ -474,6 +514,8 @@ export default function ReadPanel(props: PanelProps) {
 
       <div className="engine-status">
         <EngineBadge label="系统朗读" ready />
+        <EngineBadge label="Azure 云" ready={cloudTtsConfigured("azure")} />
+        <EngineBadge label="OpenAI 兼容云" ready={cloudTtsConfigured("cloud")} />
         <EngineBadge
           label="Kokoro"
           ready={kokoroReady}

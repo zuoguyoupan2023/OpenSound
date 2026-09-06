@@ -552,7 +552,7 @@ async function cloudTtsCall(cfg, text) {
   const res = await fetch(base + '/audio/speech', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + cfg.apiKey },
-    body: JSON.stringify({ model: cfg.model || 'tts-1', input: text, voice: cfg.voice || 'alloy', response_format: 'mp3' }),
+    body: JSON.stringify({ model: cfg.model || 'tts-1', input: text, voice: cfg.voice || 'alloy', response_format: 'wav' }),
   });
   if (!res.ok) {
     const d = await res.json().catch(() => ({}));
@@ -577,7 +577,8 @@ async function azureTtsCall(cfg, text) {
     headers: {
       'Ocp-Apim-Subscription-Key': cfg.key,
       'Content-Type': 'application/ssml+xml',
-      'X-Microsoft-OutputFormat': 'audio-24khz-48kbitrate-mono-mp3',
+      // 000-plan-11：必须返回 WAV（riff-24khz-16bit-mono-pcm）；此前 mp3 与帧流协议不兼容（每帧须为完整 WAV）
+      'X-Microsoft-OutputFormat': 'riff-24khz-16bit-mono-pcm',
       'User-Agent': 'opensound-asr-server'
     },
     body: ssml,
@@ -589,6 +590,31 @@ async function azureTtsCall(cfg, text) {
   const buf = Buffer.from(await res.arrayBuffer());
   if (!buf.length) throw new Error('Azure TTS 未返回音频');
   return buf;
+}
+
+// 微软 Azure 语音识别 REST（同步单段）：cfg = { key, region, language }；body=16kHz 单声道 WAV；返回文本
+// 000-plan-11 A-1：识别面板「Azure 语音识别（云）」走此通道；Key/Region 与 Azure TTS 共用同一语音资源
+async function azureSttCall(wav, cfg) {
+  const region = String(cfg && cfg.region || '').replace(/[^a-zA-Z0-9-]/g, '');
+  if (!cfg || !cfg.key || !region) throw new Error('Azure 识别未配置（请到 设置 → 云端能力 填写 Azure Key 与 Region）');
+  const lang = cfg.language || 'zh-CN';
+  const res = await fetch('https://' + region + '.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=' + encodeURIComponent(lang), {
+    method: 'POST',
+    headers: {
+      'Ocp-Apim-Subscription-Key': cfg.key,
+      'Content-Type': 'audio/wav; codecs=audio/pcm; samplerate=16000',
+      'Accept': 'application/json',
+      'User-Agent': 'opensound-asr-server'
+    },
+    body: wav,
+  });
+  if (!res.ok) {
+    const d = await res.text().catch(() => '');
+    throw new Error('Azure 识别错误：HTTP ' + res.status + (d ? ' · ' + d.slice(0, 200) : ''));
+  }
+  const j = await res.json().catch(() => ({}));
+  if (j.RecognitionStatus !== 'Success') throw new Error('Azure 识别失败：' + (j.RecognitionStatus || '未知状态'));
+  return String(j.DisplayText || '').trim();
 }
 
 // 阿里云 DashScope CosyVoice（独立协议，multimodal-generation）：cfg = { key, model, voice }；返回 MP3 Buffer
@@ -2765,6 +2791,27 @@ const server = http.createServer(async (req, res) => {
   if (engine === 'auto') engine = hasSenseVoice ? 'sensevoice' : 'whisper';
   if (engine === 'sensevoice' && !hasSenseVoice) {
     return send(400, { error: 'SenseVoice 模型未下载，请运行 npm run download-sensevoice（或改用 ?engine=whisper）' });
+  }
+  // 000-plan-11 A-1：Azure 云识别（Key/Region/Language 经请求头传入，仅本机回环不出进程）
+  if (engine === 'azure') {
+    const azureCfg = {
+      key: req.headers['x-os-azure-key'] || '',
+      region: req.headers['x-os-azure-region'] || '',
+      language: req.headers['x-os-azure-lang'] || 'zh-CN',
+    };
+    const chunks0 = [];
+    for await (const c of req) chunks0.push(c);
+    const wav0 = Buffer.concat(chunks0);
+    if (wav0.length < 100) return send(400, { error: '音频数据过短' });
+    const t0 = Date.now();
+    try {
+      const text = await azureSttCall(wav0, azureCfg);
+      send(200, { text, engine: 'azure', durationSec: Math.round((Date.now() - t0) / 100) / 10 });
+    } catch (e) {
+      log('Azure 识别错误: ' + e.message);
+      send(500, { error: e.message });
+    }
+    return;
   }
   if (!['sensevoice', 'sensevoice-original', 'whisper'].includes(engine)) {
     return send(400, { error: '未知引擎: ' + engine + '（支持 sensevoice / sensevoice-original / whisper）' });

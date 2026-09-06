@@ -16,9 +16,11 @@ import {
   type PowerMode,
   type EcoTts,
   type EcoAsr,
+  AZURE_TTS_VOICES,
+  AZURE_ASR_LANGS,
 } from "../api";
 import { showToast } from "../toast";
-import { Panel, Button, Spinner } from "../components/ui";
+import { Panel, Button, Spinner, Select } from "../components/ui";
 
 // 字节格式化（与模型页同口径）
 function fmtBytes(n?: number | null): string {
@@ -93,6 +95,16 @@ export default function SettingsPanel(props: PanelProps) {
   const [token, setToken] = useState("");
   const [deepseekKey, setDeepseekKey] = useState("");
   const [zhipuKey, setZhipuKey] = useState("");
+  // 000-plan-11：设置分页签（通用 / 云端能力）；云端字段随请求转发，仅存本机 config.json
+  const [tab, setTab] = useState<"general" | "cloud">("general");
+  const [azureKey, setAzureKey] = useState("");
+  const [azureRegion, setAzureRegion] = useState("");
+  const [azureTtsVoice, setAzureTtsVoice] = useState("zh-CN-XiaoxiaoNeural");
+  const [azureAsrLanguage, setAzureAsrLanguage] = useState("zh-CN");
+  const [openaiTtsBaseUrl, setOpenaiTtsBaseUrl] = useState("");
+  const [openaiTtsKey, setOpenaiTtsKey] = useState("");
+  const [openaiTtsModel, setOpenaiTtsModel] = useState("tts-1");
+  const [openaiTtsVoice, setOpenaiTtsVoice] = useState("alloy");
   const [serverPath, setServerPath] = useState("");
   const [pathLoading, setPathLoading] = useState(true);
   const [restarting, setRestarting] = useState(false);
@@ -142,6 +154,14 @@ export default function SettingsPanel(props: PanelProps) {
     setToken(initial[1]);
     setDeepseekKey(initial[2]);
     setZhipuKey(initial[3]);
+    setAzureKey(s.azureKey || "");
+    setAzureRegion(s.azureRegion || "");
+    setAzureTtsVoice(s.azureTtsVoice || "zh-CN-XiaoxiaoNeural");
+    setAzureAsrLanguage(s.azureAsrLanguage || "zh-CN");
+    setOpenaiTtsBaseUrl(s.openaiTtsBaseUrl || "");
+    setOpenaiTtsKey(s.openaiTtsKey || "");
+    setOpenaiTtsModel(s.openaiTtsModel || "tts-1");
+    setOpenaiTtsVoice(s.openaiTtsVoice || "alloy");
     setPowerMode(s.powerMode || "full");
     setEcoTts((s.ecoTts as EcoTts) || "");
     setEcoAsr((s.ecoAsr as EcoAsr) || "");
@@ -211,6 +231,14 @@ export default function SettingsPanel(props: PanelProps) {
         token.trim(),
         deepseekKey.trim(),
         zhipuKey.trim(),
+        azureKey.trim(),
+        azureRegion.trim(),
+        azureTtsVoice,
+        azureAsrLanguage,
+        openaiTtsBaseUrl.trim(),
+        openaiTtsKey.trim(),
+        openaiTtsModel.trim(),
+        openaiTtsVoice.trim(),
       ]);
       if (next === savedSnapshotRef.current) return;
       updateSettings({
@@ -218,6 +246,14 @@ export default function SettingsPanel(props: PanelProps) {
         token: token.trim(),
         deepseekKey: deepseekKey.trim(),
         zhipuKey: zhipuKey.trim(),
+        azureKey: azureKey.trim(),
+        azureRegion: azureRegion.trim(),
+        azureTtsVoice,
+        azureAsrLanguage,
+        openaiTtsBaseUrl: openaiTtsBaseUrl.trim(),
+        openaiTtsKey: openaiTtsKey.trim(),
+        openaiTtsModel: openaiTtsModel.trim(),
+        openaiTtsVoice: openaiTtsVoice.trim(),
       })
         .then(() => {
           savedSnapshotRef.current = next;
@@ -228,7 +264,7 @@ export default function SettingsPanel(props: PanelProps) {
     }, 600);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [baseUrl, token, deepseekKey, zhipuKey]);
+  }, [baseUrl, token, deepseekKey, zhipuKey, azureKey, azureRegion, azureTtsVoice, azureAsrLanguage, openaiTtsBaseUrl, openaiTtsKey, openaiTtsModel, openaiTtsVoice]);
 
   const openDataDir = async () => {
     try {
@@ -321,6 +357,100 @@ export default function SettingsPanel(props: PanelProps) {
         </Button>
       }
     >
+      {/* 000-plan-11：设置分页签——通用 / 云端能力（三类 Key 集中管理） */}
+      <div className="rb-title" style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+        <Button variant={tab === "general" ? "primary" : "ghost"} onClick={() => setTab("general")}>
+          通用
+        </Button>
+        <Button variant={tab === "cloud" ? "primary" : "ghost"} onClick={() => setTab("cloud")}>
+          <Icon icon="lucide:cloud" width={14} height={14} /> 云端能力
+        </Button>
+      </div>
+
+      {tab === "cloud" && (
+        <>
+          <div className="settings-block">
+            <div className="settings-item">
+              <label className="settings-label">Azure 语音（朗读 TTS + 识别 ASR 共用）</label>
+              <input
+                className="input"
+                type="password"
+                value={azureKey}
+                onChange={(e) => setAzureKey(e.target.value)}
+                placeholder="Azure Speech Subscription Key（portal.azure.com 创建「语音服务」资源）"
+                style={{ marginBottom: 8 }}
+              />
+              <input
+                className="input"
+                value={azureRegion}
+                onChange={(e) => setAzureRegion(e.target.value)}
+                placeholder="Region（如 eastasia / japanwest / eastus）"
+                style={{ marginBottom: 8 }}
+              />
+              <Select
+                value={azureTtsVoice}
+                onChange={setAzureTtsVoice}
+                options={AZURE_TTS_VOICES.map((v) => ({ value: v.value, label: `TTS 音色：${v.label}` }))}
+              />
+              <Select
+                value={azureAsrLanguage}
+                onChange={setAzureAsrLanguage}
+                options={AZURE_ASR_LANGS.map((c) => ({ value: c, label: `识别语言：${c}` }))}
+              />
+              <p className="settings-hint">
+                同一个「语音服务」资源的 Key + Region 同时用于朗读与识别（识别面板可临时切换语言）。音频/文本将出网到 Microsoft Azure。
+              </p>
+            </div>
+          </div>
+
+          <div className="settings-block">
+            <div className="settings-item">
+              <label className="settings-label">云端朗读 · OpenAI 兼容（/v1/audio/speech）</label>
+              <input
+                className="input"
+                value={openaiTtsBaseUrl}
+                onChange={(e) => setOpenaiTtsBaseUrl(e.target.value)}
+                placeholder="Base URL（如 https://api.openai.com/v1 或第三方兼容端点）"
+                style={{ marginBottom: 8 }}
+              />
+              <input
+                className="input"
+                type="password"
+                value={openaiTtsKey}
+                onChange={(e) => setOpenaiTtsKey(e.target.value)}
+                placeholder="API Key"
+                style={{ marginBottom: 8 }}
+              />
+              <input
+                className="input"
+                value={openaiTtsModel}
+                onChange={(e) => setOpenaiTtsModel(e.target.value)}
+                placeholder="Model（默认 tts-1）"
+                style={{ marginBottom: 8 }}
+              />
+              <input
+                className="input"
+                value={openaiTtsVoice}
+                onChange={(e) => setOpenaiTtsVoice(e.target.value)}
+                placeholder="Voice（默认 alloy）"
+              />
+              <p className="settings-hint">
+                可接 OpenAI 官方或任何 /audio/speech 兼容端点（fish.audio 等）。文本将出网到该端点。
+              </p>
+            </div>
+          </div>
+
+          <div className="settings-block">
+            <div className="settings-item">
+              <label className="settings-label">云端朗读 · CosyVoice（DashScope）</label>
+              <p className="settings-hint">
+                服务端通道已存在但当前返回 MP3，与帧流播放协议不兼容，<b>暂未开放</b>（待核实 DashScope 的 WAV 输出后接入，见 000-plan-11）。
+              </p>
+            </div>
+          </div>
+        </>
+      )}
+
       <div className="settings-block" id="power-mode-section">
         <div className="settings-item">
           <label className="settings-label">服务资源模式（030 规划）</label>
