@@ -25,6 +25,8 @@ base64 = "0.22"
 zip = "0.6"
 fs2 = "0.4"
 tauri-plugin-dialog = "2"
+# 000-plan-6 阶段1：系统朗读（Win=WinRT / Mac=AVSpeechSynthesizer）；锁版本试运行
+tauri-plugin-tts = "=0.1.13"
 
 [profile.dev]
 # 省磁盘：关闭 debuginfo、合并符号（Tauri dev 调试已足够）
@@ -32,3 +34,10 @@ debug = 0
 split-debuginfo = "packed"
 [profile.dev.package."*"]
 opt-level = 1
+
+# 000-plan-6 阶段1：系统识别（macOS SFSpeechRecognizer 兜底；Win 系统识别为云端，不接）
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-speech = { version = "0.3", features = ["block2"] }
+objc2-foundation = { version = "0.3", features = ["NSURL", "NSLocale", "NSString", "NSError"] }
+block2 = "0.6"

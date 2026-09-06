@@ -2,7 +2,9 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "主窗口默认权限",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-show",
@@ -10,6 +12,7 @@
     "core:window:allow-set-focus",
     "core:event:default",
     "dialog:default",
-    "dialog:allow-save"
+    "dialog:allow-save",
+    "tts:default"
   ]
 }

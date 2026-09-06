@@ -4,5 +4,7 @@
 <dict>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>OpenSound 需要使用麦克风进行语音识别与语音对话。</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>OpenSound 使用 macOS 系统语音识别把你的录音转为文本（系统识别引擎）。</string>
 </dict>
 </plist>

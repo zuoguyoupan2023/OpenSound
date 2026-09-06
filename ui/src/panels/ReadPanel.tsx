@@ -16,6 +16,15 @@ import { useAudioPlayback } from "../useAudioPlayback";
 import { showToast } from "../toast";
 import { listVoices, type CloneVoice } from "../voiceStore";
 import { Panel, Button, Select, Spinner, EngineBadge } from "../components/ui";
+import {
+  listSystemVoices,
+  speakSystem,
+  stopSystem,
+  previewSystemVoice,
+  isSpeakingSystem,
+  ttsErrorMessage,
+  type Voice as SystemVoice,
+} from "../systemTts";
 
 const KOKORO_VOICES = [
   { sid: 18, label: "18（中文女声）" },
@@ -34,7 +43,11 @@ type Speaking = "idle" | "speaking" | "done";
 
 export default function ReadPanel(props: PanelProps) {
   const [text, setText] = useState("");
-  const [engine, setEngine] = useState<"kokoro" | "qwen3" | "clone">("kokoro");
+  const [engine, setEngine] = useState<"kokoro" | "qwen3" | "clone" | "system">("kokoro");
+  // 000-plan-6 阶段1：系统朗读（系统音色）
+  const [sysVoices, setSysVoices] = useState<SystemVoice[]>([]);
+  const [sysLang, setSysLang] = useState<string>("zh");
+  const [sysVoiceId, setSysVoiceId] = useState<string>("");
   const [sid, setSid] = useState<number>(18);
   const [speed, setSpeed] = useState<number>(1);
   const [voice, setVoice] = useState<string>("Vivian");
@@ -67,6 +80,11 @@ export default function ReadPanel(props: PanelProps) {
       ? "（点选切换并启用）"
       : "";
   const pickEngine: (v: string) => Promise<void> = async (v) => {
+    // 系统朗读走系统原生引擎（不占服务/模型），不受节能模式约束
+    if (v === "system") {
+      setEngine("system");
+      return;
+    }
     const id = TTS_PANEL_TO_ID[v];
     if (ecoSettings.powerMode === "eco" && ecoActiveTts && ecoActiveTts !== id) {
       const name = v === "clone" ? "CosyVoice 克隆" : v === "qwen3" ? "Qwen3 TTS" : "Kokoro";
@@ -96,6 +114,7 @@ export default function ReadPanel(props: PanelProps) {
   const ecoActivePanel = ecoActiveTts ? (TTS_ID_TO_PANEL[ecoActiveTts] as typeof engine) : null;
   useEffect(() => {
     if (!ecoActivePanel) return;
+    if (engine === "system") return; // 系统朗读不参与节能
     if (engine !== ecoActivePanel) setEngine(ecoActivePanel);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ecoActiveTts, props.models]);
@@ -126,6 +145,19 @@ export default function ReadPanel(props: PanelProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 进入「系统朗读」时枚举系统音色（默认选中第一个中文音色）
+  useEffect(() => {
+    if (engine !== "system" || sysVoices.length) return;
+    listSystemVoices()
+      .then((vs) => {
+        setSysVoices(vs);
+        const zh = vs.find((v) => v.language?.toLowerCase().startsWith("zh"));
+        if (zh) setSysVoiceId(zh.id);
+      })
+      .catch((e) => setError("获取系统音色失败: " + ttsErrorMessage(e)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [engine, sysVoices.length]);
+
   const loadFile = async (file: File) => {
     const t = await file.text();
     setText(t);
@@ -138,9 +170,26 @@ export default function ReadPanel(props: PanelProps) {
       return;
     }
     setError("");
-    stopAudio();
     setState("speaking");
     speakStoppedRef.current = false;
+    // 系统朗读：走系统原生 TTS，不入音频库（Win 无归档通道；mac 归档为后续阶段）
+    if (engine === "system") {
+      try {
+        await speakSystem(text, sysVoiceId || null, speed);
+        // speak() 开始即 resolve，轮询直到说完（或被停止）
+        while (!speakStoppedRef.current && (await isSpeakingSystem())) {
+          await new Promise((r) => setTimeout(r, 300));
+        }
+        if (!speakStoppedRef.current) setState("done");
+      } catch (e) {
+        if (!speakStoppedRef.current) {
+          setError(ttsErrorMessage(e));
+          setState("idle");
+        }
+      }
+      return;
+    }
+    stopAudio();
     const player = createFramePlayer((i) => console.log("播放第", i + 1, "句"));
     playerRef.current = player;
     const ac = new AbortController();
@@ -199,6 +248,11 @@ export default function ReadPanel(props: PanelProps) {
   const stop = () => {
     // 先标记停止，再中断流、停播放器；已生成的句子会以「已截断」入库
     speakStoppedRef.current = true;
+    if (engine === "system") {
+      stopSystem().catch((e) => console.error("停止系统朗读失败:", e));
+      setState("idle");
+      return;
+    }
     speakAbortRef.current?.abort();
     speakAbortRef.current = null;
     playerRef.current?.stop();
@@ -244,8 +298,59 @@ export default function ReadPanel(props: PanelProps) {
               value: "clone",
               label: `克隆音色（CosyVoice）${ttsOffLabel("clone")}`,
             },
+            { value: "system", label: "系统朗读（系统音色 · 离线秒开）" },
           ]}
         />
+        {engine === "system" && (() => {
+          const isMac = /Mac/i.test(navigator.userAgent);
+          const isWin = /Win/i.test(navigator.userAgent);
+          const filtered = sysVoices.filter(
+            (v) => sysLang === "all" || v.language?.toLowerCase().startsWith(sysLang)
+          );
+          return (
+            <>
+              <Select
+                value={sysLang}
+                onChange={setSysLang}
+                options={[
+                  { value: "zh", label: "中文音色" },
+                  { value: "en", label: "英文音色" },
+                  { value: "all", label: "全部音色" },
+                ]}
+              />
+              <Select
+                value={sysVoiceId}
+                onChange={setSysVoiceId}
+                options={
+                  filtered.length
+                    ? filtered.map((v) => ({
+                        value: v.id,
+                        label: `${v.name}（${v.language}）`,
+                      }))
+                    : [{ value: "", label: "（未枚举到系统音色）" }]
+                }
+              />
+              <Button
+                variant="ghost"
+                disabled={!sysVoiceId || state === "speaking"}
+                onClick={() =>
+                  previewSystemVoice(sysVoiceId).catch((e) =>
+                    setError(ttsErrorMessage(e))
+                  )
+                }
+              >
+                <Icon icon="lucide:ear" width={14} height={14} /> 试听
+              </Button>
+              <span className="hint">
+                {isMac
+                  ? "系统自带为紧凑版音色：到 设置 → 辅助功能 → 朗读内容 → 声音 可免费下载增强版（更自然）。"
+                  : isWin
+                  ? "到 设置 → 时间和语言 → 语音 可添加中文语音包；系统离线音色较机械，要更自然请用本地模型引擎。"
+                  : "使用系统自带朗读引擎与音色。"}
+              </span>
+            </>
+          );
+        })()}
         {engine === "clone" && (
           <>
             <Select
@@ -342,6 +447,7 @@ export default function ReadPanel(props: PanelProps) {
       </div>
 
       <div className="engine-status">
+        <EngineBadge label="系统朗读" ready />
         <EngineBadge
           label="Kokoro"
           ready={kokoroReady}

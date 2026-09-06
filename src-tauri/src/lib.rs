@@ -14,6 +14,7 @@ mod audio_store;
 mod conversation_store;
 mod realtime;
 mod recorder;
+mod sys_speech;
 use realtime::Realtime;
 use recorder::Recorder;
 
@@ -2044,6 +2045,7 @@ pub fn run() {
         .manage(state.clone())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_tts::init())
         .setup(move |app| {
             let handle = app.handle().clone();
             let state2 = state.clone();
@@ -2139,7 +2141,8 @@ pub fn run() {
             conversation_store::conversation_get,
             conversation_store::conversation_save,
             conversation_store::conversation_rename,
-            conversation_store::conversation_delete
+            conversation_store::conversation_delete,
+            sys_speech::sys_transcribe
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
