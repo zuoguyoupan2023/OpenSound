@@ -243,21 +243,46 @@ export default function ReadPanel(props: PanelProps) {
     setError("");
     setState("speaking");
     speakStoppedRef.current = false;
-    // 系统朗读：走系统原生 TTS，不入音频库（Win 无归档通道；mac 归档为后续阶段）
+    // 060 Stage 2.5：系统朗读长文模式 —— 走系统原生 TTS（不入音频库：OS 只出声、拿不到音频字节），
+    // 按批字数逐块顺序朗读：一次只 speakSystem 一块、轮询读完再下一块 → 文本级批进度 + 停止后续读
     if (engine === "system") {
-      try {
-        await speakSystem(text, sysVoiceId || null, speed);
-        // speak() 开始即 resolve，轮询直到说完（或被停止）
-        while (!speakStoppedRef.current && (await isSpeakingSystem())) {
-          await new Promise((r) => setTimeout(r, 300));
-        }
-        if (!speakStoppedRef.current) setState("done");
-      } catch (e) {
-        if (!speakStoppedRef.current) {
-          setError(ttsErrorMessage(e));
-          setState("idle");
-        }
+      const batches = splitTextBatches(text, batchChars);
+      if (!batches.length) {
+        setState("idle");
+        return;
       }
+      const fp = textFingerprint(text);
+      let startIdx = 0;
+      if (resumeAt && resumeAt.fp === fp && resumeAt.offset > 0) {
+        const idx = batches.findIndex((b) => b.end > resumeAt!.offset);
+        if (idx >= 0) startIdx = idx;
+      }
+      const total = batches.length;
+      let interruptedBatchStart = -1;
+      try {
+        for (let bi = startIdx; bi < total; bi++) {
+          if (speakStoppedRef.current) break;
+          interruptedBatchStart = batches[bi].start;
+          if (total > 1) setBatchInfo({ done: bi, total });
+          await speakSystem(batches[bi].text, sysVoiceId || null, speed);
+          // speak() 开始即 resolve，轮询直到这一块说完（或被停止）
+          while (!speakStoppedRef.current && (await isSpeakingSystem())) {
+            await new Promise((r) => setTimeout(r, 300));
+          }
+          if (speakStoppedRef.current) break;
+          if (total > 1) setBatchInfo({ done: bi + 1, total });
+        }
+      } catch (e) {
+        if (!speakStoppedRef.current) setError(ttsErrorMessage(e));
+      }
+      const interrupted = speakStoppedRef.current;
+      if (interrupted && interruptedBatchStart >= 0) {
+        setResumeAt({ offset: interruptedBatchStart, fp });
+      } else if (!interrupted) {
+        setResumeAt(null);
+      }
+      if (total > 1) setBatchInfo(null);
+      setState(interrupted ? "idle" : "done");
       return;
     }
     stopAudio();
@@ -621,12 +646,11 @@ export default function ReadPanel(props: PanelProps) {
     }
   };
 
-  // 060 P1：断点提示（仅当文本未变、引擎支持分批时展示）
+  // 060 P1/P2.5：断点提示（仅当文本未变时展示；系统朗读同样支持续读）
   const effCharsNow =
     engine === "qwen3" ? Math.min(batchChars, 2000) : batchChars;
   const resumeVisible =
     state === "idle" &&
-    engine !== "system" &&
     !!resumeAt &&
     resumeAt.fp === textFingerprint(text);
   const resumeBatchNo = (() => {
@@ -857,46 +881,44 @@ export default function ReadPanel(props: PanelProps) {
         </div>
       </div>
 
-      {/* 060 P1：每批上限字数设置 + 多批进度 + 断点续读提示 */}
-      {engine !== "system" && (
-        <div className="toolbar">
-          <label className="inline-field">
-            每批 ≤
-            <Select
-              value={String(batchChars)}
-              onChange={(v) => {
-                const n = Number(v);
-                setBatchChars(n);
-                saveReadBatchChars(n);
-              }}
-              options={BATCH_CHARS_OPTIONS.map((o) => ({
-                value: String(o),
-                label: String(o),
-              }))}
-              disabled={state === "speaking" || !!bookBusyId}
-            />
-            字
-          </label>
-          {state === "speaking" && batchInfo && (
-            <span className="hint">
-              正在朗读第 {batchInfo.done + 1} / {batchInfo.total} 批
-              （每批 ≤ {effCharsNow} 字）…
-            </span>
-          )}
-          {resumeVisible && resumeBatchNo >= 0 && (
-            <span className="hint">
-              上次读到第 {resumeBatchNo + 1} 批时中断——点「朗读」将从该批继续
-              <Button
-                variant="ghost"
-                className="batch-resume-reset"
-                onClick={() => setResumeAt(null)}
-              >
-                从头开始
-              </Button>
-            </span>
-          )}
-        </div>
-      )}
+      {/* 060 P1/P2.5：每批上限字数设置 + 多批进度 + 断点续读提示（系统朗读也走逐块长文模式） */}
+      <div className="toolbar">
+        <label className="inline-field">
+          每批 ≤
+          <Select
+            value={String(batchChars)}
+            onChange={(v) => {
+              const n = Number(v);
+              setBatchChars(n);
+              saveReadBatchChars(n);
+            }}
+            options={BATCH_CHARS_OPTIONS.map((o) => ({
+              value: String(o),
+              label: String(o),
+            }))}
+            disabled={state === "speaking" || !!bookBusyId}
+          />
+          字
+        </label>
+        {state === "speaking" && batchInfo && (
+          <span className="hint">
+            正在朗读第 {batchInfo.done + 1} / {batchInfo.total} 批
+            （每批 ≤ {effCharsNow} 字）…
+          </span>
+        )}
+        {resumeVisible && resumeBatchNo >= 0 && (
+          <span className="hint">
+            上次读到第 {resumeBatchNo + 1} 批时中断——点「朗读」将从该批继续
+            <Button
+              variant="ghost"
+              className="batch-resume-reset"
+              onClick={() => setResumeAt(null)}
+            >
+              从头开始
+            </Button>
+          </span>
+        )}
+      </div>
 
       <div className="engine-status">
         <EngineBadge label="系统朗读" ready />
