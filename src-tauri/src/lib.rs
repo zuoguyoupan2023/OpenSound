@@ -758,9 +758,12 @@ fn find_node() -> Option<String> {
 // 统一用 quiet() 包裹所有子进程 Command（Windows 静默；Unix 原样）。
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
-fn quiet(mut c: Command) -> Command {
+fn quiet(c: Command) -> Command {
     #[cfg(windows)]
-    c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    let c = {
+        c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        c
+    };
     c
 }
 
