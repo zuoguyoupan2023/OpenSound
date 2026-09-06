@@ -30,7 +30,13 @@
           "$APPDATA/audio/**",
           "$APPDATA/audio",
           "$APPDATA/books/**",
-          "$APPDATA/books"
+          "$APPDATA/books",
+          "$DOWNLOAD/opensound-download/library/audio/**",
+          "$DOWNLOAD/opensound-download/library/audio",
+          "$DOWNLOAD/opensound-download/library/books/**",
+          "$DOWNLOAD/opensound-download/library/books",
+          "$DOWNLOAD/opensound-download/library/conversations/**",
+          "$DOWNLOAD/opensound-download/library/conversations"
         ]
       }
     },

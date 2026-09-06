@@ -7,7 +7,6 @@ use std::fs;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use tauri::Manager;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ChatMsg {
@@ -66,11 +65,8 @@ struct ConvIndex {
 }
 
 fn conv_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    let base = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("无法定位应用数据目录: {e}"))?;
-    Ok(base.join("conversations"))
+    // 061：统一数据布局 —— conversations/ 与 audio/、books/ 同放 <数据根>/library/
+    Ok(crate::library_root(app).join("conversations"))
 }
 
 fn index_path(dir: &PathBuf) -> PathBuf {

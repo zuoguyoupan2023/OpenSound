@@ -16,7 +16,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
-use tauri::Manager;
 use zip::write::FileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
@@ -92,11 +91,8 @@ struct BookIndex {
 }
 
 fn books_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    let base = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("无法定位应用数据目录: {e}"))?;
-    Ok(base.join("books"))
+    // 061：统一数据布局 —— books/ 与 audio/、conversations/ 同放 <数据根>/library/（可随「模型存放目录」一起改）
+    Ok(crate::library_root(app).join("books"))
 }
 
 fn index_path(dir: &Path) -> PathBuf {

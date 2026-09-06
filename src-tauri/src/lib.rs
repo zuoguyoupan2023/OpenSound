@@ -1378,7 +1378,7 @@ struct PersistedConfig {
 }
 
 /// 数据根目录：配置优先，否则默认 app_data_dir（Win: %APPDATA%\world.opensound.local）
-fn data_root(app: &tauri::AppHandle) -> PathBuf {
+pub(crate) fn data_root(app: &tauri::AppHandle) -> PathBuf {
     if let Some(p) = load_config(app).data_dir {
         if !p.trim().is_empty() {
             return PathBuf::from(p);
@@ -1391,6 +1391,51 @@ fn data_root(app: &tauri::AppHandle) -> PathBuf {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .unwrap_or_default();
     PathBuf::from(home).join("Downloads").join("opensound-download")
+}
+
+/// 用户内容库子目录（060/061：audio/books/conversations 统一放在数据根下一个独立
+/// library/ 文件夹，与 models/ cache/ 等"模型/运行时"目录隔开，避免混淆；改数据根后一并搬走）
+pub(crate) fn library_root(app: &tauri::AppHandle) -> PathBuf {
+    data_root(app).join("library")
+}
+
+/// 需要统一迁入 library/ 的旧目录（位于 app_data_dir）
+const LIBRARY_SUBDIRS: &[&str] = &["audio", "books", "conversations"];
+
+/// 061：把旧 app_data_dir/{audio,books,conversations} 一键迁移到 <数据根>/library/…
+/// （同盘 rename 优先，跨盘复制后删除；新位置非空则跳过，绝不覆盖用户数据）
+fn migrate_legacy_library(app: &tauri::AppHandle) {
+    let Ok(legacy) = app.path().app_data_dir() else {
+        return;
+    };
+    let root = library_root(app);
+    for sub in LIBRARY_SUBDIRS {
+        let dst = root.join(sub);
+        let src = legacy.join(sub);
+        if src.is_dir() && !dst.exists() {
+            match fs::rename(&src, &dst) {
+                Ok(()) => {
+                    eprintln!("[opensound] 已迁移库目录 {sub} → {}", dst.display());
+                }
+                Err(_) => {
+                    if copy_dir_recursive(&src, &dst).is_ok() {
+                        let _ = fs::remove_dir_all(&src);
+                        eprintln!("[opensound] 已复制并清理库目录 {sub} → {}", dst.display());
+                    } else {
+                        eprintln!("[opensound] 库目录 {sub} 迁移失败（保留原位置）");
+                    }
+                }
+            }
+        }
+        if let Err(e) = fs::create_dir_all(&dst) {
+            eprintln!("[opensound] 创建库目录 {} 失败: {e}", dst.display());
+        }
+    }
+    // 资产协议按当前 library/ 动态放行（自定义数据根也能播放）
+    let scope = app.asset_protocol_scope();
+    for sub in LIBRARY_SUBDIRS {
+        let _ = scope.allow_directory(root.join(sub), true);
+    }
 }
 
 fn load_config(app: &tauri::AppHandle) -> PersistedConfig {
@@ -1475,15 +1520,36 @@ fn get_data_root(app: tauri::AppHandle) -> String {
 #[tauri::command]
 fn set_data_root(app: tauri::AppHandle, path: String) -> Result<(), String> {
     let mut cfg = load_config(&app);
+    // 061：改目录时把旧 library/ 内容（audio/books/conversations）一并搬到新数据根
+    let old_lib = library_root(&app);
     let trimmed = path.trim().to_string();
     if trimmed.is_empty() {
-        cfg.data_dir = None; // 清空 = 回到默认 app_data_dir
+        cfg.data_dir = None; // 清空 = 回到默认数据目录
     } else {
         let dir = std::path::PathBuf::from(&trimmed);
         fs::create_dir_all(&dir).map_err(|e| format!("无法创建数据目录：{e}"))?;
         cfg.data_dir = Some(trimmed);
     }
-    save_config(&app, &cfg)
+    save_config(&app, &cfg)?;
+
+    let new_lib = library_root(&app);
+    if old_lib != new_lib {
+        for sub in LIBRARY_SUBDIRS {
+            let src = old_lib.join(sub);
+            let dst = new_lib.join(sub);
+            if src.is_dir() && !dst.exists() {
+                if fs::rename(&src, &dst).is_err() {
+                    // 跨盘：复制后清理
+                    if copy_dir_recursive(&src, &dst).is_ok() {
+                        let _ = fs::remove_dir_all(&src);
+                    }
+                }
+            }
+            let _ = fs::create_dir_all(&dst);
+            let _ = app.asset_protocol_scope().allow_directory(&dst, true);
+        }
+    }
+    Ok(())
 }
 
 // 把历史落盘在 asr-server/models 的模型迁移到数据目录 models（同盘 rename 优先，跨盘复制后删除）
@@ -2089,6 +2155,8 @@ pub fn run() {
             let state2 = state.clone();
             // 首次启动：从旧标识符（com.tabu.local）迁移配置（identifier 升级后配置目录变化）
             migrate_legacy_config(&handle);
+            // 061：统一数据布局 —— 旧 app_data_dir 的 audio/books/conversations 迁入 <数据根>/library/…
+            migrate_legacy_library(&handle);
             // 加载 asr-server 路径配置到 state
             *state.server_path.lock().unwrap() = load_config(&handle).server_path;
             // 032 运行时预检（P2 拍板：启动只检测、不自动安装）：
