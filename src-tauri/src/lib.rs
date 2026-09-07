@@ -816,9 +816,39 @@ fn deps_ready(server_dir: &std::path::Path) -> bool {
 }
 
 fn npm_cli_js(node_exe: &str) -> std::path::PathBuf {
-    // node 同目录 node_modules/npm/bin/npm-cli.js（系统 node 与便携版 node 布局一致）
-    let base = PathBuf::from(node_exe).parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
-    base.join("node_modules").join("npm").join("bin").join("npm-cli.js")
+    // 定位 npm-cli.js。⚠️ 2026-09-08 修复（S6 验收发现）：旧实现只查「node 同目录 node_modules/npm」，
+    // 仅 Windows 官方 zip 布局成立；macOS nvm/官方 tar/homebrew 的 npm 在 <prefix>/lib/node_modules/npm
+    // （bin/npm 是指向它的符号链接）→ 点「安装 Node」在 npm 启动前就报"未找到 npm"。
+    // 修复：1) 同级 node_modules 2) bin/npm 符号链接解析 3) 自可执行向上 3 级找 lib|libexec/lib/node_modules/npm。
+    let exe = fs::canonicalize(node_exe).unwrap_or_else(|_| PathBuf::from(node_exe));
+    let base = exe
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let c1 = base.join("node_modules").join("npm").join("bin").join("npm-cli.js");
+    if c1.is_file() {
+        return c1;
+    }
+    // Unix 官方 tar / nvm / homebrew：同目录有 bin/npm 符号链接 → 解析出真实 npm-cli.js
+    if let Ok(p) = fs::canonicalize(base.join("npm")) {
+        if p.is_file() {
+            return p;
+        }
+    }
+    // 逐级上找 <prefix>/lib 或 <prefix>/libexec/lib 下的 node_modules/npm（libexec 兼容 homebrew keg 布局）
+    let mut dir = Some(base.as_path());
+    for _ in 0..3 {
+        if let Some(d) = dir {
+            for lib in ["lib", "libexec/lib"] {
+                let c = d.join(lib).join("node_modules").join("npm").join("bin").join("npm-cli.js");
+                if c.is_file() {
+                    return c;
+                }
+            }
+            dir = d.parent();
+        }
+    }
+    c1 // 找不到也返回默认，让上层报"未找到 npm"
 }
 
 // 解压目录里找 node-v*/ 下的 node 可执行文件
@@ -1160,7 +1190,12 @@ fn ensure_npm_deps(app: &tauri::AppHandle, server_dir: &std::path::Path, node_ex
 // 一键自举：确保 node → 安装依赖 → 拉起服务（command 入口）
 #[tauri::command]
 async fn install_runtime(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
-    install_runtime_plain(app, state.inner().clone()).await
+    let r = install_runtime_plain(app, state.inner().clone()).await;
+    if let Err(ref e) = r {
+        // 错误原本只回 UI（且 UI 此前无展示）→ 补打日志便于定位（2026-09-08 S6 验收排查）
+        eprintln!("[opensound] install_runtime 失败: {e}");
+    }
+    r
 }
 
 // 普通异步入口（setup 自动自举 / command 共用；state 传 Arc 避免借用冲突）

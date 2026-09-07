@@ -394,6 +394,15 @@ function App() {
                 )}
               </div>
             )}
+            {lastLog?.step === "error" && !runtimeBusy && (
+              <div className="rb-main">
+                <div className="rb-text">
+                  <div className="rb-title" style={{ color: "var(--danger, #e5534b)" }}>
+                    运行环境安装失败：{lastLog!.message}
+                  </div>
+                </div>
+              </div>
+            )}
             {runtimeBusy && (
               <div className="rb-main">
                 <Icon icon="lucide:loader-2" width={16} height={16} className="rb-busy-icon" />
