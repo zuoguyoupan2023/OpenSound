@@ -29,7 +29,7 @@ const ASR_ENGINE = (process.env.ASR_ENGINE || 'auto').toLowerCase(); // auto | s
 const ASR_WHISPER_LANG = (process.env.ASR_WHISPER_LANG || '').toLowerCase().trim();
 // asr-server 架构版本：2.x = 含 sensevoice-original + VAD + 标点。
 // 供 start-all.js 探测时判断 9528 上是否旧进程（旧代码无此字段/不同版本 → 视为残留，终止后重启）。
-const SERVER_VERSION = '2.10.0'; // 2.4.0 = S4：cosyvoice-clone 全自举链；2.5.0 = S5：缺失权重自动下载；2.6.0 = S7：安全加固（仅本机回环 + 入站鉴权）；2.7.0 = S8：sensevoice-original 模型下载闭环（二段式安装器：venv + 模型三件套）；2.8.0 = S9：056 Whisper 补齐安装器 + glob 检查跨平台修复（坑 U）+ mac site-packages 路径修复（坑 W）；2.9.0 = S10：Whisper 引擎换 sherpa-onnx（fp32 全精度 + 语言自动检测；与 SenseVoice 共用一套原生运行时，根治 onnxruntime-node DLL 冲突）；2.10.0 = S11：Whisper 指定语言配置（?lang= / ASR_WHISPER_LANG / 按语言识别器 Map 缓存 LRU≤3，非法语言回退自动检测不崩）
+const SERVER_VERSION = '2.10.1'; // 2.4.0 = S4：cosyvoice-clone 全自举链；2.5.0 = S5：缺失权重自动下载；2.6.0 = S7：安全加固（仅本机回环 + 入站鉴权）；2.7.0 = S8：sensevoice-original 模型下载闭环（二段式安装器：venv + 模型三件套）；2.8.0 = S9：056 Whisper 补齐安装器 + glob 检查跨平台修复（坑 U）+ mac site-packages 路径修复（坑 W）；2.9.0 = S10：Whisper 引擎换 sherpa-onnx（fp32 全精度 + 语言自动检测；与 SenseVoice 共用一套原生运行时，根治 onnxruntime-node DLL 冲突）；2.10.0 = S11：Whisper 指定语言配置（?lang= / ASR_WHISPER_LANG / 按语言识别器 Map 缓存 LRU≤3，非法语言回退自动检测不崩）；2.10.1 = S12：引擎就绪判定与启动器同口径（受管 venv 优先、代码目录 .venv-* 回退），修复 034 前旧位置 venv 能跑却报「环境缺失」
 // 031 跨平台：Win venv 可执行在 Scripts/ 而非 bin/（engineReadiness 的 runtime 检查据此判定）
 const IS_WIN = process.platform === 'win32';
 // 034 阶段3：uv 自举的受管 venv 落数据目录 venvs/（032 L3），引擎清单的 runtime.path 按此双位置判定：
@@ -1172,7 +1172,8 @@ async function engineReadiness(mf) {
       if (firstSeg.startsWith('.venv')) {
         const keyPkg = VENV_KEY_PKG[mf.id];
         if (keyPkg) {
-          if (!venvKeyPkgOk(firstSeg, keyPkg)) missingRuntime.push({ kind: '缺失', label: r.label || r.path });
+          // S12：双位置就绪判定（受管 venv 优先、代码目录旧 venv 回退，与 start-all venvPy 同口径）
+          if (!venvKeyPkgReadyOk(firstSeg, keyPkg)) missingRuntime.push({ kind: '缺失', label: r.label || r.path });
         } else if (!runtimePathExists(r.path)) {
           missingRuntime.push({ kind: '缺失', label: r.label || r.path });
         }
@@ -1189,9 +1190,9 @@ async function engineReadiness(mf) {
   if (legacy) { try { serviceUp = !!(await legacy.installed()); } catch {} }
   // 2026-08-28：cosyvoice 旧锁文件漏装的运行时依赖（坑 I 扩展）——venv 在但缺任一依赖 ≡ 缺环境，
   // 如实报出并让卡片出「检测/修复」按钮（此前 state=ready 时前端无按钮可点，服务又崩 → 用户陷入「启动中」死等）。
-  if (mf.id === 'cosyvoice-clone' && venvKeyPkgOk('.venv-cosyvoice', 'torch')) {
+  if (mf.id === 'cosyvoice-clone' && venvKeyPkgReadyOk('.venv-cosyvoice', 'torch')) {
     for (const p of COSYVOICE_RUNTIME_DEPS) {
-      if (!venvPkgPresent('.venv-cosyvoice', p)) {
+      if (!venvPkgReadyPresent('.venv-cosyvoice', p)) {
         missingRuntime.push({ kind: '缺失', label: `${p} 未安装（旧锁文件漏装，点「检测/修复」自动补）` });
       }
     }
@@ -1580,6 +1581,48 @@ function venvSpOf(name) {
     }
   } catch {}
   return path.join(lib, 'python3.11', 'site-packages');
+}
+// S12（2.10.1）：就绪判定与启动器同口径的双位置 venv 解析（只读判定用！）。
+// 背景：start-all.js venvPy 是「受管（数据根 venvs/）优先、代码目录 .venv-* 回退」；
+// 而 engineReadiness 此前只查受管位置 → 034 之前在代码目录建好的旧 venv（能真跑）被误报「环境缺失」。
+// 以下 *Ready 系列只用于 engineReadiness / cosyvoice 运行时依赖检查；installer/pip/卸载一律仍走
+// venvDirOf/venvPyOf（只写删受管位置），不扩大风险面。
+function venvRootReady(name) {
+  const managed = venvDirOf(name);
+  const mPy = IS_WIN ? path.join(managed, 'Scripts', 'python.exe') : path.join(managed, 'bin', 'python3');
+  return existsSync(mPy) ? managed : path.join(__dirname, name); // start-all venvPy 同款代码目录回退
+}
+function venvPyReady(name) {
+  const root = venvRootReady(name);
+  return IS_WIN ? path.join(root, 'Scripts', 'python.exe') : path.join(root, 'bin', 'python3');
+}
+function venvSpReady(name) {
+  const vd = venvRootReady(name);
+  if (IS_WIN) return path.join(vd, 'Lib', 'site-packages');
+  const lib = path.join(vd, 'lib');
+  try {
+    for (const d of readdirSync(lib)) {
+      const sp = path.join(lib, d, 'site-packages');
+      if (existsSync(sp)) return sp;
+    }
+  } catch {}
+  return path.join(lib, 'python3.11', 'site-packages');
+}
+// 关键包就绪（双位置）：venv python 在 且 site-packages 有引擎依赖包（防空壳假就绪）
+function venvKeyPkgReadyOk(name, keyPkg) {
+  const py = venvPyReady(name);
+  if (!existsSync(py)) return false;
+  const p = path.join(venvSpReady(name), keyPkg);
+  return existsSync(p) && (() => { try { return statSync(p).isDirectory(); } catch { return false; } })();
+}
+// 就绪用宽容版：包目录 / 单文件模块 / dist-info 任一命中即视为已装（cosyvoice 运行时依赖检查用）
+function venvPkgReadyPresent(name, pkg) {
+  const sp = venvSpReady(name);
+  try {
+    if (existsSync(path.join(sp, pkg)) && statSync(path.join(sp, pkg)).isDirectory()) return true;
+    if (existsSync(path.join(sp, pkg + '.py'))) return true;
+    return readdirSync(sp).some((x) => x.startsWith(pkg + '-') && x.endsWith('.dist-info'));
+  } catch { return false; }
 }
 // 034 防空壳假就绪：每个 python 引擎的关键依赖包名（engineReadiness 据此判定 venv 是否"真就绪"）
 const VENV_KEY_PKG = {
