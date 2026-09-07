@@ -781,8 +781,9 @@ use std::os::windows::process::CommandExt;
 fn quiet(c: Command) -> Command {
     #[cfg(windows)]
     let c = {
-        c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        c
+        let mut cmd = c;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        cmd
     };
     c
 }
@@ -1897,11 +1898,13 @@ fn listeners_on_port(port: u16) -> Vec<u32> {
     #[cfg(windows)]
     {
         let mut out = Vec::new();
-        if let Ok(o) = quiet(Command::new("netstat").arg("-ano")).output() {
+        let mut cmd = Command::new("netstat");
+        cmd.arg("-ano");
+        if let Ok(o) = quiet(cmd).output() {
             for line in String::from_utf8_lossy(&o.stdout).lines() {
                 let lower = line.to_ascii_lowercase();
                 if !lower.contains(&format!(":{port}")) || !lower.contains("listening") { continue; }
-                if let Some(pid) = line.rsplit_whitespace().next().and_then(|s| s.parse::<u32>().ok()) {
+                if let Some(pid) = line.split_whitespace().last().and_then(|s| s.parse::<u32>().ok()) {
                     if pid != std::process::id() && !out.contains(&pid) { out.push(pid); }
                 }
             }
