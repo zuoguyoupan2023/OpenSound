@@ -3,7 +3,7 @@ import type { PanelProps } from "../App";
 import { Icon } from "@iconify/react";
 import { transcribe, computeStarting, getPersistedSettings, switchEcoEngine, engineDisabledInEco, azureAsrConfigured, AZURE_ASR_LANGS, updateSettings, getBaseUrl, getToken, type EcoAsr } from "../api";
 import { langLabel } from "../langNames";
-import { createRecorder, pcmToWavBlob, type Recorder } from "../audio";
+import { createRecorder, pcmToWavBlob, blobToWav16k, type Recorder } from "../audio";
 import { saveRecording } from "../audioStore";
 import { Panel, Button, Select, Spinner, EngineBadge } from "../components/ui";
 import { showToast } from "../toast";
@@ -236,74 +236,8 @@ export default function AsrPanel(props: PanelProps) {
       const rec = recRef.current!;
       const wav = await rec.stop();
       recRef.current = null;
-      const t0 = Date.now();
       try {
-        if (engine === "azure") {
-          // Azure 云识别：本机录音 WAV → asr-server 转发到 Azure STT（自带标点，不走本地 VAD/标点）
-          const r = await transcribe(wav, "azure", false, false, "");
-          saveRecording(wav, "azure", r.text, { source: "asr" }).catch((e) =>
-            console.error("保存录音失败:", e)
-          );
-          setText(r.text);
-          setElapsed(Math.round((Date.now() - t0) / 100) / 10);
-          setState("done");
-          return;
-        }
-        if (engine === "sys") {
-          // 系统识别：Tauri 原生命令（SFSpeechRecognizer），不经 9528 服务
-          const { invoke } = await import("@tauri-apps/api/core");
-          const r = (await invoke("sys_transcribe", {
-            wavBase64: await blobToBase64(wav),
-            language: sysLang,
-          })) as { text: string; on_device: boolean | null };
-          saveRecording(wav, "sys", r.text, { source: "asr" }).catch((e) =>
-            console.error("保存录音失败:", e)
-          );
-          setSysOnDevice(r.on_device);
-          setText(r.text);
-          setElapsed(Math.round((Date.now() - t0) / 100) / 10);
-          setState("done");
-          return;
-        }
-        // 060 Stage 3：长录音自动分段（VAD 逐句识别、逐句回显；可点「停止识别」保留已识别部分）
-        if (segOn) {
-          segStopRef.current = false;
-          setSegInfo({ done: 0, total: 1 });
-          let segText = "";
-          try {
-            segText = await runSegmented(wav);
-          } catch (e) {
-            console.error("分段识别失败，回退整段识别:", e);
-            segText = "";
-          }
-          if (!segText.trim()) {
-            // VAD 无有效分段或失败 → 回退整段识别，保证仍能出结果
-            const r = await transcribe(
-              wav,
-              engine,
-              punc,
-              vad,
-              engine === "whisper" ? whisperLang : ""
-            );
-            segText = r.text;
-          }
-          saveRecording(wav, engine, segText, { source: "asr" }).catch((e) =>
-            console.error("保存录音失败:", e)
-          );
-          setText(segText);
-          setElapsed(Math.round((Date.now() - t0) / 100) / 10);
-          setState("done");
-          setSegInfo(null);
-          return;
-        }
-        const r = await transcribe(wav, engine, punc, vad, engine === "whisper" ? whisperLang : "");
-        // 顺手保存录音到音频库（不阻塞）
-        saveRecording(wav, engine, r.text, { source: "asr" }).catch((e) =>
-          console.error("保存录音失败:", e)
-        );
-        setText(r.text);
-        setElapsed(Math.round((Date.now() - t0) / 100) / 10);
-        setState("done");
+        await runRecognition(wav);
       } catch (e) {
         setError(String(e));
         setState("idle");
@@ -319,6 +253,99 @@ export default function AsrPanel(props: PanelProps) {
         setError("无法访问麦克风: " + e);
       }
     }
+  };
+
+  // 000-plan-13 P1：导入本地录音/音频文件 → 复用与"录音结束"完全相同的识别流程
+  const importRecording = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    // 允许连续选择同一文件
+    e.target.value = "";
+    if (!file) return;
+    if (state === "recording" || state === "processing") {
+      showToast("请先完成当前识别，再导入新文件");
+      return;
+    }
+    setError("");
+    setText("");
+    setState("processing");
+    try {
+      const wav = await blobToWav16k(file);
+      await runRecognition(wav);
+    } catch (err) {
+      setError("导入或识别失败: " + String(err));
+      setState("idle");
+    }
+  };
+
+  // 识别一条 16kHz 单声道 WAV（录音结束 / 导入文件共用）：按引擎分派 → 可选分段 → 整段
+  const runRecognition = async (wav: Blob): Promise<void> => {
+    const t0 = Date.now();
+    if (engine === "azure") {
+      // Azure 云识别：本机录音 WAV → asr-server 转发到 Azure STT（自带标点，不走本地 VAD/标点）
+      const r = await transcribe(wav, "azure", false, false, "");
+      saveRecording(wav, "azure", r.text, { source: "asr" }).catch((e) =>
+        console.error("保存录音失败:", e)
+      );
+      setText(r.text);
+      setElapsed(Math.round((Date.now() - t0) / 100) / 10);
+      setState("done");
+      return;
+    }
+    if (engine === "sys") {
+      // 系统识别：Tauri 原生命令（SFSpeechRecognizer），不经 9528 服务
+      const { invoke } = await import("@tauri-apps/api/core");
+      const r = (await invoke("sys_transcribe", {
+        wavBase64: await blobToBase64(wav),
+        language: sysLang,
+      })) as { text: string; on_device: boolean | null };
+      saveRecording(wav, "sys", r.text, { source: "asr" }).catch((e) =>
+        console.error("保存录音失败:", e)
+      );
+      setSysOnDevice(r.on_device);
+      setText(r.text);
+      setElapsed(Math.round((Date.now() - t0) / 100) / 10);
+      setState("done");
+      return;
+    }
+    // 060 Stage 3：长录音自动分段（VAD 逐句识别、逐句回显；可点「停止识别」保留已识别部分）
+    if (segOn) {
+      segStopRef.current = false;
+      setSegInfo({ done: 0, total: 1 });
+      let segText = "";
+      try {
+        segText = await runSegmented(wav);
+      } catch (e) {
+        console.error("分段识别失败，回退整段识别:", e);
+        segText = "";
+      }
+      if (!segText.trim()) {
+        // VAD 无有效分段或失败 → 回退整段识别，保证仍能出结果
+        const r = await transcribe(
+          wav,
+          engine,
+          punc,
+          vad,
+          engine === "whisper" ? whisperLang : ""
+        );
+        segText = r.text;
+      }
+      saveRecording(wav, engine, segText, { source: "asr" }).catch((e) =>
+        console.error("保存录音失败:", e)
+      );
+      setText(segText);
+      setElapsed(Math.round((Date.now() - t0) / 100) / 10);
+      setState("done");
+      setSegInfo(null);
+      return;
+    }
+    const r = await transcribe(wav, engine, punc, vad, engine === "whisper" ? whisperLang : "");
+    // 顺手保存到音频库（不阻塞）
+    saveRecording(wav, engine, r.text, { source: "asr" }).catch((e) =>
+      console.error("保存录音失败:", e)
+    );
+    setText(r.text);
+    setElapsed(Math.round((Date.now() - t0) / 100) / 10);
+    setState("done");
   };
 
   const cancel = () => {
@@ -476,6 +503,23 @@ export default function AsrPanel(props: PanelProps) {
             系统/云端识别暂不支持本项（本地 SenseVoice / Whisper 可用）。
           </span>
         )}
+      </div>
+
+      {/* 000-plan-13 P1：导入本地录音/音频 → 与录音结束走同一条识别流程（含分段模式） */}
+      <div className="import-audio-row">
+        <label className="file-btn">
+          <Icon icon="lucide:file-audio" width={14} height={14} /> 导入录音
+          <input
+            type="file"
+            hidden
+            accept="audio/*,.wav,.mp3,.m4a,.flac,.aac,.ogg"
+            disabled={state === "recording" || state === "processing"}
+            onChange={importRecording}
+          />
+        </label>
+        <span className="muted">
+          支持 wav/mp3/m4a/flac/aac/ogg…；导入后与「录音结束」同流程（可先勾选「长录音自动分段识别」处理长音频）。
+        </span>
       </div>
 
       <div className="engine-status">
