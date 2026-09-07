@@ -29,7 +29,7 @@ const ASR_ENGINE = (process.env.ASR_ENGINE || 'auto').toLowerCase(); // auto | s
 const ASR_WHISPER_LANG = (process.env.ASR_WHISPER_LANG || '').toLowerCase().trim();
 // asr-server 架构版本：2.x = 含 sensevoice-original + VAD + 标点。
 // 供 start-all.js 探测时判断 9528 上是否旧进程（旧代码无此字段/不同版本 → 视为残留，终止后重启）。
-const SERVER_VERSION = '2.10.1'; // 2.4.0 = S4：cosyvoice-clone 全自举链；2.5.0 = S5：缺失权重自动下载；2.6.0 = S7：安全加固（仅本机回环 + 入站鉴权）；2.7.0 = S8：sensevoice-original 模型下载闭环（二段式安装器：venv + 模型三件套）；2.8.0 = S9：056 Whisper 补齐安装器 + glob 检查跨平台修复（坑 U）+ mac site-packages 路径修复（坑 W）；2.9.0 = S10：Whisper 引擎换 sherpa-onnx（fp32 全精度 + 语言自动检测；与 SenseVoice 共用一套原生运行时，根治 onnxruntime-node DLL 冲突）；2.10.0 = S11：Whisper 指定语言配置（?lang= / ASR_WHISPER_LANG / 按语言识别器 Map 缓存 LRU≤3，非法语言回退自动检测不崩）；2.10.1 = S12：引擎就绪判定与启动器同口径（受管 venv 优先、代码目录 .venv-* 回退），修复 034 前旧位置 venv 能跑却报「环境缺失」
+const SERVER_VERSION = '2.10.2'; // 2.4.0 = S4：cosyvoice-clone 全自举链；2.5.0 = S5：缺失权重自动下载；2.6.0 = S7：安全加固（仅本机回环 + 入站鉴权）；2.7.0 = S8：sensevoice-original 模型下载闭环（二段式安装器：venv + 模型三件套）；2.8.0 = S9：056 Whisper 补齐安装器 + glob 检查跨平台修复（坑 U）+ mac site-packages 路径修复（坑 W）；2.9.0 = S10：Whisper 引擎换 sherpa-onnx（fp32 全精度 + 语言自动检测；与 SenseVoice 共用一套原生运行时，根治 onnxruntime-node DLL 冲突）；2.10.0 = S11：Whisper 指定语言配置（?lang= / ASR_WHISPER_LANG / 按语言识别器 Map 缓存 LRU≤3，非法语言回退自动检测不崩）；2.10.1 = S12：引擎就绪判定与启动器同口径（受管 venv 优先、代码目录 .venv-* 回退），修复 034 前旧位置 venv 能跑却报「环境缺失」；2.10.2 = S6′ 版本刷新验证用：内置 .version 指纹轮换 → 驱动物化目录「整目录重建」机制实测（代码无行为变化）
 // 031 跨平台：Win venv 可执行在 Scripts/ 而非 bin/（engineReadiness 的 runtime 检查据此判定）
 const IS_WIN = process.platform === 'win32';
 // 034 阶段3：uv 自举的受管 venv 落数据目录 venvs/（032 L3），引擎清单的 runtime.path 按此双位置判定：
