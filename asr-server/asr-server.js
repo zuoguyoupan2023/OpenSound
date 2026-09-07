@@ -2435,7 +2435,9 @@ const server = http.createServer(async (req, res) => {
   // 本服务默认绑定 127.0.0.1 仅本机，开放 CORS 不会带来外部网络风险。
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  // 识别(Azure STT)把 Key/Region/Language 放自定义请求头 x-os-azure-* 透传给 asr-server，
+  // 不在此放行会导致 WebView 预检(OPTIONS)被拒 → fetch 报 TypeError: Load failed（2026-09-07 修复）
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-os-azure-key, x-os-azure-region, x-os-azure-lang');
   // 预检请求直接放行
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
