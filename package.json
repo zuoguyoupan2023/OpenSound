@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "dev": "tauri dev",
-    "build": "tauri build",
+    "build": "npm run stage:server && tauri build",
+    "stage:server": "node scripts/stage-asr-server.mjs",
     "ui:dev": "npm --prefix ui run dev",
     "ui:build": "npm --prefix ui run build",
     "server:all": "npm --prefix asr-server run all"

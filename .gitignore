@@ -27,6 +27,9 @@ src-tauri/gen/
 .tauri-icons/
 ui/dist/
 
+# ===== S6′ 打包内置资源（stage 脚本每次现场生成，禁止提交/复用旧资源） =====
+src-tauri/resources/asr-server/
+
 # ===== 桌面 App 不需要的移动端图标（tauri icon 生成） =====
 src-tauri/icons/android/
 src-tauri/icons/ios/

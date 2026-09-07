@@ -588,6 +588,19 @@ fn clear_scope_targets(scope: &str, data_root: &Path) -> Vec<PathBuf> {
     out
 }
 
+// S6′：物化目录在 App 数据目录（app_data_dir/server，与便携 node 同处），不在数据根——
+// 随数据根各档一并清理：envs（卸载全部环境：venvs/runtime + 物化 server 含 node_modules）
+// 与 all（恢复出厂）两档都清它；下次启动自动从内置模板重物化，无损。
+fn app_private_scope_targets(app: &tauri::AppHandle, scope: &str) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if matches!(scope, "envs" | "all") {
+        if let Ok(d) = app.path().app_data_dir() {
+            out.push(d.join("server"));
+        }
+    }
+    out
+}
+
 // 预览：统计将释放空间（不停服务、不删除）
 #[tauri::command]
 fn clear_data_preview(app: tauri::AppHandle, scope: String) -> Result<u64, String> {
@@ -596,7 +609,10 @@ fn clear_data_preview(app: tauri::AppHandle, scope: String) -> Result<u64, Strin
     }
     let droot = data_root(&app);
     let mut est = 0u64;
-    for t in clear_scope_targets(&scope, &droot) {
+    for t in clear_scope_targets(&scope, &droot)
+        .into_iter()
+        .chain(app_private_scope_targets(&app, &scope))
+    {
         if t.exists() {
             est += path_total_size(&t);
         }
@@ -631,7 +647,10 @@ fn clear_data(app: tauri::AppHandle, state: State<'_, Arc<AppState>>, scope: Str
     }
     let mut freed = 0u64;
     let mut items = Vec::new();
-    for t in clear_scope_targets(&scope, &droot) {
+    for t in clear_scope_targets(&scope, &droot)
+        .into_iter()
+        .chain(app_private_scope_targets(&app, &scope))
+    {
         if !t.exists() {
             continue;
         }
@@ -1686,6 +1705,69 @@ fn open_data_dir(app: tauri::AppHandle) -> Result<String, String> {
     Ok(dir.to_string_lossy().into_owned())
 }
 
+// ---------- S6′：内置 asr-server 模板 → 物化到 App 数据目录 server/ ----------
+// 打包侧（stage 脚本每次现场生成）：.app 内置 <Resources>/resources/asr-server/（含 .version=SERVER_VERSION）。
+// 运行侧（仅 release .app 生效；002-plan S6′）：
+//   - 物化目录 = <app_data_dir>/server（mac ~/Library/Application Support/world.opensound.local/server/，
+//     Windows %APPDATA%\world.opensound.local\server\）——与便携 node/config.json 同处，不混入用户数据根
+//     （普通用户浏览「模型存放目录」不会看到代码/node_modules）；
+//   - 就绪判定 = 目录有 start-all.js 且 .version 与内置一致；缺目录或版本不符 → 整目录重建（升级 = 重发 .app，
+//     node_modules 一并清掉，之后走既有「一键安装」重装依赖）；
+//   - .version 最后写：复制中断/未完成时指纹缺失/不符 → 下次启动自动重物化；
+//   - dev（tauri dev / cargo run）编译期移除本分支，仍走仓库 exe 向上查找。
+#[cfg(not(debug_assertions))]
+const BUNDLED_SERVER_REL: &str = "resources/asr-server"; // 相对 Resource 根（tauri.conf bundle.resources）
+
+/// 物化互斥：首启/升级时并发调用（setup 与 check_runtime 等）不得同时重建同一目录
+#[cfg(not(debug_assertions))]
+static MATERIALIZE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 内置模板目录（Resources/resources/asr-server，含 start-all.js 才算有）
+#[cfg(not(debug_assertions))]
+fn bundled_server_template(app: &tauri::AppHandle) -> Option<PathBuf> {
+    let dir = app.path().resource_dir().ok()?.join(BUNDLED_SERVER_REL);
+    if dir.join("start-all.js").is_file() { Some(dir) } else { None }
+}
+
+/// 物化目录就绪判定（目录有 start-all.js 且 .version == 内置）
+#[cfg(not(debug_assertions))]
+fn materialized_server_ready(dest: &Path, version: &str) -> bool {
+    dest.join("start-all.js").is_file()
+        && fs::read_to_string(dest.join(".version"))
+            .map(|v| v.trim() == version)
+            .unwrap_or(false)
+}
+
+/// 定位（必要时重建）物化后的服务目录
+#[cfg(not(debug_assertions))]
+fn materialized_server_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
+    let template = bundled_server_template(app)?;
+    let version = fs::read_to_string(template.join(".version")).ok()?.trim().to_string();
+    if version.is_empty() { return None; }
+    let dest = app.path().app_data_dir().ok()?.join("server");
+    if materialized_server_ready(&dest, &version) {
+        return Some(dest);
+    }
+    // 整目录重建（互斥 + 双重检查，防并发重复物化）
+    let _g = MATERIALIZE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    if materialized_server_ready(&dest, &version) {
+        return Some(dest);
+    }
+    eprintln!("[opensound] S6′ 物化内置 asr-server 模板 → {}（内置 v{version}）", dest.display());
+    if dest.exists() {
+        if let Err(e) = fs::remove_dir_all(&dest) {
+            eprintln!("[opensound] 物化前清理旧目录失败：{e}");
+            return None;
+        }
+    }
+    if let Err(e) = copy_dir_recursive(&template, &dest) {
+        eprintln!("[opensound] 物化复制失败：{e}");
+        return None;
+    }
+    let _ = fs::write(dest.join(".version"), format!("{version}\n"));
+    Some(dest)
+}
+
 // ---------- 定位 asr-server 目录 ----------
 fn server_dir(app: &tauri::AppHandle, state: &Arc<AppState>) -> Option<PathBuf> {
     // 1) 用户配置的路径优先
@@ -1702,7 +1784,14 @@ fn server_dir(app: &tauri::AppHandle, state: &Arc<AppState>) -> Option<PathBuf> 
             return Some(cand);
         }
     }
-    // 3) 回退：从可执行文件所在目录向上逐级查找包含 asr-server 的项目根（开发模式）。
+    // 3) S6′（release only）：.app 内置模板 → 物化 App 数据目录 server/（dev 构建编译期移除本分支）
+    #[cfg(not(debug_assertions))]
+    {
+        if let Some(dir) = materialized_server_dir(app) {
+            return Some(dir);
+        }
+    }
+    // 4) 回退：从可执行文件所在目录向上逐级查找包含 asr-server 的项目根（开发模式）。
     //    深度 16：App Bundle（OpenSound.app/Contents/MacOS）到仓库根需要 8~9 级，
     //    旧值 8 在 bundle 运行时恰好差一级找不到 asr-server，导致服务静默起不来（改名后首次出现的"全部启动中"）。
     let mut dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
