@@ -1,0 +1,2869 @@
+// ========== OpenSound 本地语音识别服务（asr-server） ==========
+// 在电脑本地跑模型（隐私优先、中文友好），侧边栏通过 HTTP 调用。
+// 引擎：
+//   ① Whisper（transformers.js node 版 / onnxruntime-node，q8 量化）— 多语言兜底
+//   ② SenseVoice（sherpa-onnx 原生，中文/粤/日/韩最优）— 可选，需安装 sherpa-onnx 并下载模型
+//
+// 启动：cd asr-server && npm install && node asr-server.js [--port 9528]
+// 接口：
+//   POST /transcribe?engine=whisper|sensevoice&lang=zh   body = WAV/RAW PCM 音频 → { text, engine }
+//     其中 lang 仅 whisper 生效（'' = 自动检测；优先级 ?lang= > ASR_WHISPER_LANG > ''；非法码回退自动检测）
+//   POST /speak?engine=kokoro|qwen3             body = JSON { text, sid, speed, voice, language } → 帧流（octet-stream，每帧=4字节大端长度+WAV，逐句流式）
+//   GET  /models → { models: [{category, engine, label, size, installed}] }
+//   POST /install-model?engine=kokoro|sensevoice|llm|qwen3|whisper → NDJSON 安装进度
+//   GET  /health → { ok: true, engines: [...], tts: {...}, models: [...] }
+//
+// 模型默认从 hf-mirror 下载（国内可达）；可用 --model-size 指定 whisper 大小（tiny/base/small）。
+
+import http from 'node:http';
+import { execSync, spawn, spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, statfsSync, unlinkSync, rmSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { buildDeviceProfile } from './device-profile.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PORT = parsePort(process.argv);
+const ASR_ENGINE = (process.env.ASR_ENGINE || 'auto').toLowerCase(); // auto | sensevoice | whisper —— 选择默认识别模型
+// S11：Whisper 指定语言的默认值（环境变量）；优先级：请求参数 ?lang= > ASR_WHISPER_LANG > ''（自动检测）
+const ASR_WHISPER_LANG = (process.env.ASR_WHISPER_LANG || '').toLowerCase().trim();
+// asr-server 架构版本：2.x = 含 sensevoice-original + VAD + 标点。
+// 供 start-all.js 探测时判断 9528 上是否旧进程（旧代码无此字段/不同版本 → 视为残留，终止后重启）。
+const SERVER_VERSION = '2.10.0'; // 2.4.0 = S4：cosyvoice-clone 全自举链；2.5.0 = S5：缺失权重自动下载；2.6.0 = S7：安全加固（仅本机回环 + 入站鉴权）；2.7.0 = S8：sensevoice-original 模型下载闭环（二段式安装器：venv + 模型三件套）；2.8.0 = S9：056 Whisper 补齐安装器 + glob 检查跨平台修复（坑 U）+ mac site-packages 路径修复（坑 W）；2.9.0 = S10：Whisper 引擎换 sherpa-onnx（fp32 全精度 + 语言自动检测；与 SenseVoice 共用一套原生运行时，根治 onnxruntime-node DLL 冲突）；2.10.0 = S11：Whisper 指定语言配置（?lang= / ASR_WHISPER_LANG / 按语言识别器 Map 缓存 LRU≤3，非法语言回退自动检测不崩）
+// 031 跨平台：Win venv 可执行在 Scripts/ 而非 bin/（engineReadiness 的 runtime 检查据此判定）
+const IS_WIN = process.platform === 'win32';
+// 034 阶段3：uv 自举的受管 venv 落数据目录 venvs/（032 L3），引擎清单的 runtime.path 按此双位置判定：
+//   .venv-x/bin/python3（unix 形态）→ 数据目录 venvs/.venv-x/Scripts/python.exe（Win）或 bin/python3（unix）；
+//   代码目录 .venv-* 为历史兼容回退。
+function runtimePathExists(p) {
+  const cands = [path.join(__dirname, p)];
+  if (IS_WIN && /(^|[\\/])bin[\\/]python3$/.test(p)) {
+    const winInData = p.replace(/[\\/]bin[\\/]python3$/, path.sep + ['Scripts', 'python.exe'].join(path.sep));
+    cands.push(path.join(DATA_DIR, 'venvs', winInData));
+  } else {
+    cands.push(path.join(DATA_DIR, 'venvs', p));
+  }
+  return cands.some((c) => existsSync(c));
+}
+// 安全加固（S7）：入站鉴权 token —— Tauri 宿主注入；为空（手动 npm start 调试）时不校验
+const OPENSOUND_TOKEN = process.env.OPENSOUND_TOKEN || '';
+// S10：Whisper 用 sherpa-onnx 引擎（与 SenseVoice 共用同一套原生运行时，杜绝 onnxruntime-node DLL 冲突）。
+// 模型固定 base（fp32 全精度，sherpa 官方导出）。S11：语言可配——?lang= > ASR_WHISPER_LANG 环境变量 > ''（自动检测，已实测中文录音出中文）。
+// 路径常量见 CACHE_DIR 定义之后（SHERPA_WHISPER_DIR / WHISPER_FILES / WHISPER_LANGUAGES）。
+
+// 032 P3：数据目录 env 化——模型/缓存/音色等"用户数据"从 OPENSOUND_DATA_DIR 派生，
+// 不再写死在代码目录（asr-server 回归"代码"职责）；未设置（手动启动/老版本）时回退 __dirname。
+const DATA_DIR = process.env.OPENSOUND_DATA_DIR || __dirname;
+// 解析"用户数据"相对路径：models/、data/、cache/ 前缀 → 数据目录；其余（node_modules/vendor/engines）仍代码目录
+function resolveData(p) {
+  if (/^(models|data|cache)[\\/]/.test(p)) return path.join(DATA_DIR, p);
+  return path.join(__dirname, p);
+}
+
+// 模型缓存目录（模型/权重统一落盘 <数据目录>/models）
+const CACHE_DIR = path.join(DATA_DIR, 'models');
+mkdirSync(CACHE_DIR, { recursive: true });
+
+// S10：Whisper（sherpa 版）模型目录与文件（fp32 全精度，官方导出；与 checks/安装器一致）
+const SHERPA_WHISPER_DIR = path.join(CACHE_DIR, 'sherpa-whisper');
+const WHISPER_FILES = ['base-encoder.onnx', 'base-decoder.onnx', 'base-tokens.txt'];
+
+// S11：Whisper 语言白名单——sherpa-onnx whisper 与 OpenAI Whisper tokenizer 同源的 99 语言代码
+// （对应加载日志 all_language_codes）。空串 = 自动检测；'auto' 等非法码一律回退自动检测（不崩，坑预案 1）。
+const WHISPER_LANGUAGES = new Set([
+  'en','zh','de','es','ru','ko','fr','ja','pt','tr','pl','ca','nl','ar','sv','it','id','hi','fi','vi',
+  'he','uk','el','ms','cs','ro','da','hu','ta','no','th','ur','hr','bg','lt','la','mi','ml','cy','sk',
+  'te','fa','lv','bn','sr','az','sl','kn','et','mk','br','eu','is','hy','ne','mn','bs','kk','sq','sw',
+  'gl','mr','pa','si','km','sn','yo','so','af','oc','ka','be','tg','sd','gu','am','yi','lo','uz','fo',
+  'ht','ps','tk','nn','mt','sa','lb','my','bo','tl','mg','as','tt','haw','ln','ha','ba','jw','su'
+]);
+// 规范化 + 白名单校验：非法（含 'auto'、空、未知码）→ ''（自动检测）
+function normalizeWhisperLang(lang) {
+  const l = String(lang || '').toLowerCase().trim();
+  return WHISPER_LANGUAGES.has(l) ? l : '';
+}
+
+const SENSEVOICE_MODEL = path.join(CACHE_DIR, 'sensevoice/model.int8.onnx');
+const SENSEVOICE_TOKENS = path.join(CACHE_DIR, 'sensevoice/tokens.txt');
+// SenseVoice 原始版（funasr 独立 Python 服务）：/opt/homebrew/bin/python3 sensevoice-server.py --port 8002
+const SENSEVOICE_ORIGINAL_URL = (process.env.SENSEVOICE_ORIGINAL_URL || 'http://127.0.0.1:8002').replace(/\/+$/, '');
+// 识别后自动加标点（默认开，用 funasr 后端 /punc）；可用 PUNCTUATION=0 关闭，或用请求参数 ?punct=1|0 覆盖
+const PUNCTUATION = !['0', 'false', 'no'].includes(String(process.env.PUNCTUATION || '1').toLowerCase());
+// 识别前用 VAD 过滤静音（默认开）；可用 VAD=0 关闭，或用请求参数 ?vad=1|0 覆盖
+const VAD = !['0', 'false', 'no'].includes(String(process.env.VAD || '1').toLowerCase());
+
+// ---------- TTS ----------
+// Qwen3-TTS 转发地址（本地 Python 服务，npm run start-qwen3 启动）；可换 mlx-tts-server / vllm 等 OpenAI 兼容服务
+const QWEN3_TTS_URL = (process.env.QWEN3_TTS_URL || 'http://127.0.0.1:8001').replace(/\/+$/, '');
+// CosyVoice3 本地克隆服务（cosyvoice-tts-server.py，独立进程 8003）
+const COSYVOICE_URL = (process.env.COSYVOICE_URL || 'http://127.0.0.1:8003').replace(/\/+$/, '');
+// 克隆音色存储目录（与 cosyvoice-tts-server.py --voice-dir 一致；P3：env 注入，默认落数据目录）
+const COSYVOICE_VOICE_DIR = process.env.OPENSOUND_VOICE_DIR || resolveData('data/clone-voices');
+mkdirSync(COSYVOICE_VOICE_DIR, { recursive: true });
+const KOKORO_DIR = path.join(CACHE_DIR, 'tts', 'kokoro-multi-lang-v1_0');
+const KOKORO = {
+  model: path.join(KOKORO_DIR, 'model.onnx'),
+  voices: path.join(KOKORO_DIR, 'voices.bin'),
+  tokens: path.join(KOKORO_DIR, 'tokens.txt'),
+  dataDir: path.join(KOKORO_DIR, 'espeak-ng-data'),
+  // ⚠️ 必须是绝对路径：sherpa-onnx 从进程 cwd 解析 lexicon（而非模型目录）
+  lexicon: path.join(KOKORO_DIR, 'lexicon-us-en.txt') + ',' + path.join(KOKORO_DIR, 'lexicon-zh.txt')
+};
+// 032 修复：字节级就绪校验——与 engines/kokoro.json 的 checks 一致。
+// 下载中断会留下"存在但损坏"的文件（曾导致 voices.bin 3.2MB/应 27MB 被加载 → sherpa 原生崩溃 → 整个 9528 掉线）；
+// 只看 existsSync 无法发现，这里必须校验大小，损坏文件按"缺文件"处理（模型页可一键补齐）。
+const KOKORO_EXPECT = { model: 325630829, voices: 27678720, tokens: 687 };
+function kokoroReady() {
+  if (!existsSync(KOKORO.model) || !existsSync(KOKORO.voices) || !existsSync(KOKORO.tokens) || !existsSync(KOKORO.dataDir)) return false;
+  for (const [key, bytes] of Object.entries(KOKORO_EXPECT)) {
+    try { if (statSync(KOKORO[key]).size !== bytes) return false; } catch { return false; }
+  }
+  return true;
+}
+
+function parsePort(argv) {
+  const i = argv.indexOf('--port');
+  return i > -1 ? parseInt(argv[i + 1], 10) : 9528;
+}
+
+// ---------- 工具 ----------
+function log(msg) {
+  console.log('[' + new Date().toLocaleTimeString() + '] ' + msg);
+}
+
+// WAV/RAW → 16kHz 单声道 Float32Array
+function decodeToPcm16(buffer) {
+  // 判断是否 WAV（RIFF 头）
+  if (buffer.length > 12 && buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WAVE') {
+    return decodeWav(buffer);
+  }
+  // 否则按 16kHz 16-bit PCM 处理
+  const n = Math.floor(buffer.length / 2);
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) out[i] = buffer.readInt16LE(i * 2) / 32768;
+  return out;
+}
+
+function decodeWav(buf) {
+  let off = 12; // 跳过 RIFF/WAVE
+  let fmt = null;
+  while (off < buf.length) {
+    const id = buf.toString('ascii', off, off + 4);
+    const size = buf.readUInt32LE(off + 4);
+    if (id === 'fmt ') {
+      fmt = {
+        format: buf.readUInt16LE(off + 8),
+        channels: buf.readUInt16LE(off + 10),
+        sampleRate: buf.readUInt32LE(off + 12),
+        bits: buf.readUInt16LE(off + 22)
+      };
+    } else if (id === 'data') {
+      const data = buf.subarray(off + 8, off + 8 + size);
+      const samples = fmt.bits === 16
+        ? pcm16ToFloat(data, fmt.channels)
+        : pcm8ToFloat(data, fmt.channels);
+      return resampleTo16kMono(samples, fmt.sampleRate, fmt.channels);
+    }
+    off += 8 + size + (size % 2);
+  }
+  throw new Error('WAV 解析失败');
+}
+
+function pcm16ToFloat(data, channels) {
+  const n = Math.floor(data.length / 2);
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) out[i] = data.readInt16LE(i * 2) / 32768;
+  return out;
+}
+function pcm8ToFloat(data, channels) {
+  const out = new Float32Array(data.length);
+  for (let i = 0; i < data.length; i++) out[i] = (data[i] - 128) / 128;
+  return out;
+}
+function resampleTo16kMono(samples, rate, channels) {
+  // 多声道 → 平均
+  let mono = samples;
+  if (channels > 1) {
+    const n = Math.floor(samples.length / channels);
+    mono = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      let s = 0;
+      for (let c = 0; c < channels; c++) s += samples[i * channels + c];
+      mono[i] = s / channels;
+    }
+  }
+  if (rate === 16000) return mono;
+  const ratio = rate / 16000;
+  const outLen = Math.max(1, Math.floor(mono.length / ratio));
+  const out = new Float32Array(outLen);
+  for (let i = 0; i < outLen; i++) out[i] = mono[Math.min(mono.length - 1, Math.floor(i * ratio))];
+  return out;
+}
+
+// ---------- Whisper（sherpa-onnx，S10：与 SenseVoice 共用同一套原生运行时） ----------
+// S11：识别器按语言缓存 Map<lang, rec>——查证 sherpa-onnx-node 1.13.4：OfflineWhisperModelConfig.language
+// 是创建期配置，实例仅有语义未文档化的 setConfig（不保证重建生效），故语言必须烘焙进创建配置、按语言建识别器。
+// LRU 上限 3：防止"多语言都试过"时识别器常驻内存膨胀（每个约 300–400MB）；超限淘汰最久未用（再次使用重载 1–2s）。
+const whisperRecs = new Map(); // key = 规范化语言码（'' = 自动检测）
+const WHISPER_MAX_CACHED = 3;
+async function getWhisper(lang) {
+  const key = normalizeWhisperLang(lang);
+  const cached = whisperRecs.get(key);
+  if (cached) {
+    // LRU：访问即置顶（Map 迭代序 = 插入序，删除再插入 = 移到末尾）
+    whisperRecs.delete(key);
+    whisperRecs.set(key, cached);
+    return cached;
+  }
+  log(`加载 Whisper(base, fp32)（sherpa-onnx${key ? '，语言=' + key : '，语言自动检测'}）…`);
+  let sherpa;
+  try { sherpa = (await import('sherpa-onnx')).default; } catch (e) {
+    throw new Error('未安装 sherpa-onnx，请 cd asr-server && npm i sherpa-onnx');
+  }
+  const missing = WHISPER_FILES.filter((f) => !existsSync(path.join(SHERPA_WHISPER_DIR, f)));
+  if (missing.length) {
+    throw new Error('Whisper 模型缺失：' + SHERPA_WHISPER_DIR + '（缺 ' + missing.join('、') + '）\n请在模型页点「补齐」下载');
+  }
+  const rec = sherpa.createOfflineRecognizer({
+    modelConfig: {
+      whisper: {
+        encoder: path.join(SHERPA_WHISPER_DIR, 'base-encoder.onnx'),
+        decoder: path.join(SHERPA_WHISPER_DIR, 'base-decoder.onnx'),
+        language: key, // S11：指定语言；'' = 自动检测（S10 已实测：中文录音出中文）；'auto' 会崩 → 已由白名单回退
+        task: 'transcribe',
+        tailPaddings: -1,
+      },
+      tokens: path.join(SHERPA_WHISPER_DIR, 'base-tokens.txt'),
+      numThreads: 2,
+      provider: 'cpu',
+    }
+  });
+  whisperRecs.set(key, rec);
+  if (whisperRecs.size > WHISPER_MAX_CACHED) {
+    const oldest = whisperRecs.keys().next().value;
+    whisperRecs.delete(oldest);
+    log(`Whisper 识别器缓存超限（>${WHISPER_MAX_CACHED}），已淘汰语言「${oldest || '自动检测'}」（下次使用需重新加载 1–2s）`);
+  }
+  log('Whisper 就绪' + (key ? '（语言=' + key + '）' : ''));
+  return rec;
+}
+
+// ---------- SenseVoice（sherpa-onnx 原生，可选） ----------
+let sensevoiceRec = null;
+async function getSenseVoice() {
+  if (sensevoiceRec) return sensevoiceRec;
+  let sherpa;
+  try { sherpa = (await import('sherpa-onnx')).default; } catch (e) {
+    throw new Error('未安装 sherpa-onnx，请 cd asr-server && npm i sherpa-onnx');
+  }
+  if (!existsSync(SENSEVOICE_MODEL)) {
+    throw new Error('SenseVoice 模型缺失：' + SENSEVOICE_MODEL + '\n请运行 node asr-server-download.js');
+  }
+  log('加载 SenseVoice（sherpa-onnx 原生）…');
+  const rec = sherpa.createOfflineRecognizer({
+    modelConfig: { senseVoice: { model: SENSEVOICE_MODEL }, tokens: SENSEVOICE_TOKENS, numThreads: 2, provider: 'cpu' }
+  });
+  sensevoiceRec = rec;
+  log('SenseVoice 就绪');
+  return rec;
+}
+
+async function transcribeSenseVoice(pcm16) {
+  const rec = await getSenseVoice();
+  const stream = rec.createStream();
+  stream.acceptWaveform(16000, pcm16);
+  rec.decode(stream);
+  const res = rec.getResult(stream);
+  // 去 SenseVoice 富文本标记 <|zh|> <|NEUTRAL|> 等
+  return String(res.text || '').replace(/<\|[^|]*\|>/g, '').replace(/\s+/g, ' ').trim();
+}
+
+// ---------- SenseVoice 原始版（funasr 独立 Python 服务，转发） ----------
+let svOriginalCache = { t: 0, status: 'unreachable' };
+async function checkSenseVoiceOriginal() {
+  const now = Date.now();
+  if (now - svOriginalCache.t < 30000) return svOriginalCache.status;
+  let status = 'unreachable';
+  try {
+    const r = await fetch(SENSEVOICE_ORIGINAL_URL + '/health', { signal: AbortSignal.timeout(2000) });
+    if (r.ok) status = 'reachable';
+  } catch (e) { /* unreachable */ }
+  svOriginalCache = { t: now, status };
+  return status;
+}
+
+// Float32Array([-1,1]) → 16kHz 单声道 Int16 raw PCM Buffer（funasr 服务按 int16 解析）
+function float32ToPcm16Bytes(samples) {
+  const buf = Buffer.alloc(samples.length * 2);
+  for (let i = 0; i < samples.length; i++) {
+    const v = Math.max(-1, Math.min(1, samples[i]));
+    buf.writeInt16LE(Math.round(v * 32767), i * 2);
+  }
+  return buf;
+}
+
+async function transcribeSenseVoiceOriginal(pcm16) {
+  if ((await checkSenseVoiceOriginal()) !== 'reachable') {
+    throw new Error('SenseVoice 原始版服务不可达：' + SENSEVOICE_ORIGINAL_URL + '\n请运行 cd asr-server && /opt/homebrew/bin/python3 sensevoice-server.py --port 8002');
+  }
+  const res = await fetch(SENSEVOICE_ORIGINAL_URL + '/transcribe', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: float32ToPcm16Bytes(pcm16),
+    signal: AbortSignal.timeout(60000),
+  });
+  if (!res.ok) {
+    const d = await res.json().catch(() => ({}));
+    throw new Error('SenseVoice 原始版服务错误：' + (d.error || 'HTTP ' + res.status));
+  }
+  const d = await res.json();
+  return String(d.text || '').trim();
+}
+
+// ---------- 标点（可选）：转发 funasr /punc 给无标点文本加标点 ----------
+async function punctuate(text) {
+  if (!text) return text;
+  try {
+    const res = await fetch(SENSEVOICE_ORIGINAL_URL + '/punc', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: String(text) }),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) return text;
+    const d = await res.json();
+    return String(d.text || text).trim();
+  } catch (e) { return text; } // 标点服务不可用时回退原文，不影响识别
+}
+
+// ---------- VAD（可选）：转发 funasr /vad 获取语音段，过滤静音 ----------
+async function getVadSegments(pcm16) {
+  try {
+    const res = await fetch(SENSEVOICE_ORIGINAL_URL + '/vad', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: float32ToPcm16Bytes(pcm16),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return [];
+    const d = await res.json();
+    return Array.isArray(d.speech) ? d.speech : [];
+  } catch (e) { return []; }
+}
+
+// 按 VAD 语音段裁剪 pcm16（16k）：只保留有效语音，各段前后各留 padMs 毫秒过渡
+function trimPcmByVad(pcm16, segs, padMs = 200) {
+  if (!segs || !segs.length) return pcm16;
+  const sr = 16000;
+  const pad = Math.round((padMs * sr) / 1000);
+  const parts = [];
+  for (const s of segs) {
+    if (!Array.isArray(s) || s.length < 2) continue;
+    const a = Math.max(0, Math.round((s[0] / 1000) * sr) - pad);
+    const b = Math.min(pcm16.length, Math.round((s[1] / 1000) * sr) + pad);
+    for (let i = a; i < b; i++) parts.push(pcm16[i]);
+  }
+  if (!parts.length) return pcm16;
+  return Float32Array.from(parts);
+}
+
+// ---------- TTS 工具 ----------
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+// float32 采样 → WAV Buffer（16-bit PCM 单声道）
+function float32ToWav(samples, sampleRate) {
+  const n = samples.length;
+  const dataSize = n * 2;
+  const buf = Buffer.alloc(44 + dataSize);
+  buf.write('RIFF', 0);
+  buf.writeUInt32LE(36 + dataSize, 4);
+  buf.write('WAVE', 8);
+  buf.write('fmt ', 12);
+  buf.writeUInt32LE(16, 16);
+  buf.writeUInt16LE(1, 20);
+  buf.writeUInt16LE(1, 22);
+  buf.writeUInt32LE(sampleRate, 24);
+  buf.writeUInt32LE(sampleRate * 2, 28);
+  buf.writeUInt16LE(2, 32);
+  buf.writeUInt16LE(16, 34);
+  buf.write('data', 36);
+  buf.writeUInt32LE(dataSize, 40);
+  for (let i = 0; i < n; i++) buf.writeInt16LE(clamp(Math.round(samples[i] * 32768), -32768, 32767), 44 + i * 2);
+  return buf;
+}
+
+// 写一帧（013-P1 流式协议）：4 字节大端长度 + 一段 WAV 负载；客户端按帧解析
+function writeWavFrame(res, wav) {
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(wav.length, 0);
+  res.write(len);
+  res.write(wav);
+}
+
+// 按句子切块（Kokoro 单次文本长度受限），每块 ≤ maxChars 字（非流式整段合成用）
+function splitSentences(text, maxChars = 150) {
+  const sentences = String(text).split(/[。！？；….!?;\n]+/).map(s => s.trim()).filter(s => s.length > 0);
+  const chunks = [];
+  let cur = '';
+  for (const s of sentences) {
+    if (cur && cur.length + s.length + 1 > maxChars) { chunks.push(cur); cur = ''; }
+    cur += (cur ? '。' : '') + s;
+  }
+  if (cur) chunks.push(cur);
+  return chunks.length ? chunks : [String(text).slice(0, maxChars)];
+}
+
+// 逐句切分（013-P1 流式用）：不跨句合并，每句独立成帧、首句尽早流出；长句再按 ≤maxChars 截断
+function splitSentencesOnly(text, maxChars = 150) {
+  const sentences = String(text).split(/[。！？；….!?;\n]+/).map(s => s.trim()).filter(s => s.length > 0);
+  const out = [];
+  for (const s of sentences) {
+    if (s.length <= maxChars) { out.push(s); continue; }
+    for (let i = 0; i < s.length; i += maxChars) out.push(s.slice(i, i + maxChars));
+  }
+  return out.length ? out : [String(text).slice(0, maxChars)];
+}
+
+function concatFloat32(arrays) {
+  let len = 0;
+  for (const a of arrays) len += a.length;
+  const out = new Float32Array(len);
+  let off = 0;
+  for (const a of arrays) { out.set(a, off); off += a.length; }
+  return out;
+}
+
+// ---------- TTS 引擎：Kokoro（sherpa-onnx-node 原生绑定，CPU 可跑，中英混合） ----------
+// ⚠️ 用原生 sherpa-onnx-node（sherpa-onnx-darwin-arm64），不用 wasm 版 sherpa-onnx：
+//   wasm 版加载 Kokoro 325M 模型报 wasm trap（unreachable），原生绑定正常。
+let kokoroTts = null;
+let kokoroSherpa = null;    // sherpa-onnx-node 模块引用（new GenerationConfig 用）
+let kokoroTtsError = null;  // 加载失败缓存，避免每次请求重试
+async function getKokoroTts() {
+  if (kokoroTts) return kokoroTts;
+  if (kokoroTtsError) throw new Error(kokoroTtsError);
+  try {
+    const { createRequire } = await import('node:module');
+    kokoroSherpa = createRequire(import.meta.url)('sherpa-onnx-node');
+  } catch (e) {
+    kokoroTtsError = '未安装 sherpa-onnx-node，请 cd asr-server && npm i sherpa-onnx-node sherpa-onnx-darwin-arm64';
+    throw new Error(kokoroTtsError);
+  }
+  if (!kokoroReady()) {
+    kokoroTtsError = 'Kokoro 模型缺失：' + KOKORO_DIR + '\n请运行 npm run download-kokoro';
+    throw new Error(kokoroTtsError);
+  }
+  log('加载 Kokoro TTS（sherpa-onnx-node 原生）…');
+  try {
+    kokoroTts = new kokoroSherpa.OfflineTts({
+      model: {
+        kokoro: {
+          model: KOKORO.model,
+          voices: KOKORO.voices,
+          tokens: KOKORO.tokens,
+          dataDir: KOKORO.dataDir,
+          lexicon: KOKORO.lexicon,
+          lang: ''
+        }
+      },
+      numThreads: 2,
+      provider: 'cpu'
+    });
+  } catch (e) {
+    kokoroTtsError = 'Kokoro 模型加载失败：' + e.message;
+    throw new Error(kokoroTtsError);
+  }
+  log('Kokoro TTS 就绪（' + kokoroTts.numSpeakers + ' 个音色，' + kokoroTts.sampleRate + 'Hz）');
+  // 预热：首次推理含 onnxruntime 初始化开销，用一句短文本提前跑一次，避免首个用户请求被冷启动拖慢
+  try {
+    const warmGen = new kokoroSherpa.GenerationConfig({ sid: 18, speed: 1, silenceScale: 0.2 });
+    kokoroTts.generate({ text: '你好。', generationConfig: warmGen });
+    log('Kokoro TTS 预热完成');
+  } catch (e) { /* 预热失败不影响使用 */ }
+  return kokoroTts;
+}
+
+async function synthesizeKokoro(text, sid, speed) {
+  const tts = await getKokoroTts();
+  const sidNum = (sid === undefined || sid === null || isNaN(Number(sid)))
+    ? 18
+    : Math.max(0, Math.min(tts.numSpeakers - 1, Math.floor(Number(sid))));
+  const spd = clamp(Number(speed) || 1, 0.5, 2);
+  const chunks = splitSentences(text);
+  const parts = [];
+  for (const chunk of chunks) {
+    const gen = new kokoroSherpa.GenerationConfig({ sid: sidNum, speed: spd, silenceScale: 0.2 });
+    const r = tts.generate({ text: chunk, generationConfig: gen });
+    if (r && r.samples && r.samples.length) parts.push(r.samples);
+  }
+  if (!parts.length) throw new Error('Kokoro 合成失败：无音频输出');
+  return float32ToWav(concatFloat32(parts), tts.sampleRate || 24000);
+}
+
+// ---------- TTS 引擎：Qwen3-TTS（转发本地 Python 服务，低延迟） ----------
+async function synthesizeQwen3(text, voice, language) {
+  const res = await fetch(QWEN3_TTS_URL + '/speak', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, voice: voice || 'Vivian', language: language || 'Auto' }),
+    signal: AbortSignal.timeout(60000)
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error('Qwen3-TTS 服务错误：' + (data.error || 'HTTP ' + res.status) + '（请确认已运行 npm run start-qwen3）');
+  }
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (!buf.length) throw new Error('Qwen3-TTS 服务未返回音频');
+  return buf;
+}
+
+// Qwen3 可达性探测（缓存 30s，避免 /health 每次阻塞）
+let qwen3Cache = { t: 0, status: 'unreachable' };
+async function checkQwen3() {
+  const now = Date.now();
+  if (now - qwen3Cache.t < 30000) return qwen3Cache.status;
+  let status = 'unreachable';
+  try {
+    const r = await fetch(QWEN3_TTS_URL + '/health', { signal: AbortSignal.timeout(2000) });
+    if (r.ok) status = 'reachable';
+  } catch (e) { /* unreachable */ }
+  qwen3Cache = { t: now, status };
+  return status;
+}
+
+// CosyVoice3 克隆服务可达性探测（缓存 30s）；status: reachable | missing
+let cosyvoiceCache = { t: 0, status: 'missing' };
+async function checkCosyvoice() {
+  const now = Date.now();
+  if (now - cosyvoiceCache.t < 30000) return cosyvoiceCache.status;
+  let status = 'missing';
+  try {
+    const r = await fetch(COSYVOICE_URL + '/health', { signal: AbortSignal.timeout(2000) });
+    if (r.ok) status = 'reachable';
+  } catch (e) { /* missing */ }
+  cosyvoiceCache = { t: now, status };
+  return status;
+}
+
+// 云端 TTS（OpenAI 兼容 /v1/audio/speech）：cfg = { baseUrl, apiKey, model, voice }；返回 mp3/WAV Buffer
+async function cloudTtsCall(cfg, text) {
+  if (!cfg || !cfg.baseUrl || !cfg.apiKey) throw new Error('云端 TTS 未配置（Base URL / API Key）');
+  const base = String(cfg.baseUrl).replace(/\/+$/, '');
+  const res = await fetch(base + '/audio/speech', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + cfg.apiKey },
+    body: JSON.stringify({ model: cfg.model || 'tts-1', input: text, voice: cfg.voice || 'alloy', response_format: 'wav' }),
+  });
+  if (!res.ok) {
+    const d = await res.json().catch(() => ({}));
+    throw new Error('云端 TTS 错误：' + ((d.error && d.error.message) || d.message || ('HTTP ' + res.status)));
+  }
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (!buf.length) throw new Error('云端 TTS 未返回音频');
+  return buf;
+}
+
+// 微软 Azure 语音合成 REST（独立协议，SSML）：cfg = { key, region, voice }；返回 MP3 Buffer
+function xmlEscape(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[c]));
+}
+async function azureTtsCall(cfg, text) {
+  const region = String(cfg && cfg.region || '').replace(/[^a-zA-Z0-9-]/g, '');
+  if (!cfg || !cfg.key || !region) throw new Error('Azure TTS 未配置（Subscription Key / Region）');
+  const voice = cfg.voice || 'zh-CN-XiaoxiaoNeural';
+  const ssml = `<speak version='1.0' xml:lang='zh-CN'><voice name='${xmlEscape(voice)}'>${xmlEscape(text)}</voice></speak>`;
+  const res = await fetch('https://' + region + '.tts.speech.microsoft.com/cognitiveservices/v1', {
+    method: 'POST',
+    headers: {
+      'Ocp-Apim-Subscription-Key': cfg.key,
+      'Content-Type': 'application/ssml+xml',
+      // 000-plan-11：必须返回 WAV（riff-24khz-16bit-mono-pcm）；此前 mp3 与帧流协议不兼容（每帧须为完整 WAV）
+      'X-Microsoft-OutputFormat': 'riff-24khz-16bit-mono-pcm',
+      'User-Agent': 'opensound-asr-server'
+    },
+    body: ssml,
+  });
+  if (!res.ok) {
+    const d = await res.text().catch(() => '');
+    throw new Error('Azure TTS 错误：HTTP ' + res.status + (d ? ' · ' + d.slice(0, 200) : ''));
+  }
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (!buf.length) throw new Error('Azure TTS 未返回音频');
+  return buf;
+}
+
+// 微软 Azure 语音识别 REST（同步单段）：cfg = { key, region, language }；body=16kHz 单声道 WAV；返回文本
+// 000-plan-11 A-1：识别面板「Azure 语音识别（云）」走此通道；Key/Region 与 Azure TTS 共用同一语音资源
+async function azureSttCall(wav, cfg) {
+  const region = String(cfg && cfg.region || '').replace(/[^a-zA-Z0-9-]/g, '');
+  if (!cfg || !cfg.key || !region) throw new Error('Azure 识别未配置（请到 设置 → 云端能力 填写 Azure Key 与 Region）');
+  const lang = cfg.language || 'zh-CN';
+  const res = await fetch('https://' + region + '.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=' + encodeURIComponent(lang), {
+    method: 'POST',
+    headers: {
+      'Ocp-Apim-Subscription-Key': cfg.key,
+      'Content-Type': 'audio/wav; codecs=audio/pcm; samplerate=16000',
+      'Accept': 'application/json',
+      'User-Agent': 'opensound-asr-server'
+    },
+    body: wav,
+  });
+  if (!res.ok) {
+    const d = await res.text().catch(() => '');
+    throw new Error('Azure 识别错误：HTTP ' + res.status + (d ? ' · ' + d.slice(0, 200) : ''));
+  }
+  const j = await res.json().catch(() => ({}));
+  if (j.RecognitionStatus !== 'Success') throw new Error('Azure 识别失败：' + (j.RecognitionStatus || '未知状态'));
+  return String(j.DisplayText || '').trim();
+}
+
+// 阿里云 DashScope CosyVoice（独立协议，multimodal-generation）：cfg = { key, model, voice }；返回 MP3 Buffer
+async function cosyvoiceTtsCall(cfg, text) {
+  if (!cfg || !cfg.key) throw new Error('CosyVoice 未配置（DashScope API Key）');
+  const res = await fetch('https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + cfg.key },
+    body: JSON.stringify({
+      model: cfg.model || 'cosyvoice-v1',
+      input: { text: String(text) },
+      voice: cfg.voice || 'longxiaochun',
+      parameters: { format: 'mp3', sample_rate: 48000 },
+    }),
+  });
+  if (!res.ok) {
+    const d = await res.json().catch(() => ({}));
+    throw new Error('CosyVoice 错误：' + ((d && (d.message || d.code)) || ('HTTP ' + res.status)));
+  }
+  const data = await res.json().catch(() => ({}));
+  const out = data && data.output || {};
+  let audio = out.audio || out.audio_url;
+  if (!audio) throw new Error('CosyVoice 未返回音频' + (data.message ? '（' + data.message + '）' : ''));
+  if (typeof audio === 'string' && /^https?:\/\//i.test(audio)) {
+    const a = await fetch(audio);
+    if (!a.ok) throw new Error('CosyVoice 音频下载失败：HTTP ' + a.status);
+    return Buffer.from(await a.arrayBuffer());
+  }
+  return Buffer.from(audio, 'base64');
+}
+
+// ---------- TTS 引擎注册表（014 §5.2 统一引擎抽象） ----------
+// 每个引擎：stream(res, body) 写帧流（013-P1 帧协议，自己写响应头；错误时抛异常，未发头则 500 JSON）；
+//           wav(body) 返回整段 WAV Buffer（/voice-chat 全链路用）。
+// 新增引擎（MOSS-Nano / IndexTTS2 / 云端 OpenAI 兼容）只需在此注册 stream + wav。
+const TTS_ENGINES = {
+  kokoro: {
+    name: 'kokoro',
+    label: 'Kokoro（CPU 轻量兜底）',
+    stream: async (res, body) => {
+      const tts = await getKokoroTts();
+      const sidNum = (body.sid === undefined || body.sid === null || isNaN(Number(body.sid)))
+        ? 18
+        : Math.max(0, Math.min(tts.numSpeakers - 1, Math.floor(Number(body.sid))));
+      const spd = clamp(Number(body.speed) || 1, 0.5, 2);
+      res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
+      res.flushHeaders(); // 立即推响应头，避免缓存到首帧才发（否则客户端 fetch 会等到首句合成完）
+      // 逐句流式：每句一帧，合成完立即 flush，首帧延迟 ≈ 首句合成时间
+      const sentences = splitSentencesOnly(body.text);
+      for (const chunk of sentences) {
+        const gen = new kokoroSherpa.GenerationConfig({ sid: sidNum, speed: spd, silenceScale: 0.2 });
+        const r = tts.generate({ text: chunk, generationConfig: gen });
+        if (r && r.samples && r.samples.length) {
+          writeWavFrame(res, float32ToWav(r.samples, tts.sampleRate || 24000));
+        }
+      }
+      res.end();
+    },
+    wav: (body) => synthesizeKokoro(body.text, body.sid, body.speed),
+  },
+  qwen3: {
+    name: 'qwen3',
+    label: 'Qwen3-TTS（MPS · 流式）',
+    stream: async (res, body) => {
+      // 013-P2①：转发 qwen3-tts-server.py 的 ?stream=1 帧流，原样透传给客户端（两端协议一致）
+      const up = await fetch(QWEN3_TTS_URL + '/speak?stream=1', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: body.text,
+          voice: body.voice || 'Vivian',
+          language: body.language || 'Auto',
+          roles: body.roles,        // 'auto'|'on'|'off' 多角色朗读（015 §五）
+          roleMap: body.roleMap,    // 角色名 → speaker（可选）
+        }),
+        // 不设硬超时：客户端断开时 fetch 响应体自然被取消
+      });
+      if (!up.ok) {
+        const data = await up.json().catch(() => ({}));
+        throw new Error('Qwen3-TTS 服务错误：' + (data.error || 'HTTP ' + up.status) + '（请确认已运行 npm run start-qwen3）');
+      }
+      res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
+      res.flushHeaders();
+      for await (const chunk of up.body) res.write(chunk);
+      res.end();
+    },
+    wav: (body) => synthesizeQwen3(body.text, body.voice, body.language),
+  },
+  cloud: {
+    name: 'cloud',
+    label: '🌐 云端 TTS（OpenAI 兼容）',
+    stream: async (res, body) => {
+      // 逐句调云端 /audio/speech → 帧流：首帧 ≈ 首句云端 TTFB（100-500ms），支持长文本
+      const cfg = body.cloud || {};
+      if (!cfg.baseUrl || !cfg.apiKey) throw new Error('云端 TTS 未配置（Base URL / API Key）'); // 头未发 → 500 JSON
+      res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
+      res.flushHeaders();
+      const sentences = splitSentencesOnly(body.text);
+      for (const s of sentences) {
+        writeWavFrame(res, await cloudTtsCall(cfg, s));
+      }
+      res.end();
+    },
+    wav: async (body) => cloudTtsCall(body.cloud || {}, body.text),
+  },
+  azure: {
+    name: 'azure',
+    label: '🟦 Azure TTS（独立协议）',
+    stream: async (res, body) => {
+      // 逐句 SSML 合成 → MP3 帧流（帧协议格式无关，客户端 decodeAudioData 直接解码）
+      const cfg = body.azure || {};
+      if (!cfg.key || !cfg.region) throw new Error('Azure TTS 未配置（Subscription Key / Region）'); // 头未发 → 500 JSON
+      res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
+      res.flushHeaders();
+      const sentences = splitSentencesOnly(body.text);
+      for (const s of sentences) {
+        writeWavFrame(res, await azureTtsCall(cfg, s));
+      }
+      res.end();
+    },
+    wav: async (body) => azureTtsCall(body.azure || {}, body.text),
+  },
+  cosyvoice: {
+    name: 'cosyvoice',
+    label: '🔵 阿里云 CosyVoice（独立协议）',
+    stream: async (res, body) => {
+      // 逐句 DashScope multimodal-generation → MP3 帧流
+      const cfg = body.cosyvoice || {};
+      if (!cfg.key) throw new Error('CosyVoice 未配置（DashScope API Key）'); // 头未发 → 500 JSON
+      res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
+      res.flushHeaders();
+      const sentences = splitSentencesOnly(body.text);
+      for (const s of sentences) {
+        writeWavFrame(res, await cosyvoiceTtsCall(cfg, s));
+      }
+      res.end();
+    },
+    wav: async (body) => cosyvoiceTtsCall(body.cosyvoice || {}, body.text),
+  },
+  clone: {
+    name: 'clone',
+    label: '🎨 克隆音色（CosyVoice3 本地）',
+    // body.voice = 克隆音色 id；转发 cosyvoice-tts-server.py(8003)，透传帧流（两端协议一致）
+    stream: async (res, body) => {
+      if (!body.voice) throw new Error('克隆引擎需要指定音色（voice=克隆音色id）');
+      const up = await fetch(COSYVOICE_URL + '/speak?stream=1', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: body.text, voice: body.voice }),
+      });
+      if (!up.ok) {
+        const data = await up.json().catch(() => ({}));
+        throw new Error('克隆音色服务错误：' + (data.error || 'HTTP ' + up.status));
+      }
+      res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
+      res.flushHeaders();
+      for await (const chunk of up.body) res.write(chunk);
+      res.end();
+    },
+    wav: async (body) => {
+      if (!body.voice) throw new Error('克隆引擎需要指定音色（voice=克隆音色id）');
+      const up = await fetch(COSYVOICE_URL + '/speak', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: body.text, voice: body.voice }),
+        signal: AbortSignal.timeout(120000),
+      });
+      if (!up.ok) {
+        const data = await up.json().catch(() => ({}));
+        throw new Error('克隆音色服务错误：' + (data.error || 'HTTP ' + up.status));
+      }
+      const buf = Buffer.from(await up.arrayBuffer());
+      if (!buf.length) throw new Error('克隆音色服务未返回音频');
+      return buf;
+    },
+  },
+};
+
+
+// ---------- LLM：node-llama-cpp 内嵌（单进程自控，引擎可插拔） ----------
+// 抽象层 /chat 支持两种引擎：llama-cpp（内嵌默认）/ ollama（转发，后备，需 ollama serve）
+const LLM_DIR = path.join(CACHE_DIR, 'llm');
+// 默认 LLM 模型（env LLM_MODEL 可覆盖为具体 gguf 文件名/路径）
+const LLM_MODEL = process.env.LLM_MODEL || path.join(LLM_DIR, 'qwen2.5-0.5b-instruct-q4_k_m.gguf');
+// 可选 LLM 档位注册表（key → 下载信息）；前端模型管理 UI 据此展示/安装
+const LLM_MODELS = {
+  'llm-0.5b': {
+    label: 'Qwen2.5-0.5B-Instruct（默认 · 兜底）',
+    size: '~469MB',
+    file: 'qwen2.5-0.5b-instruct-q4_k_m.gguf',
+    url: 'https://hf-mirror.com/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf',
+  },
+  'llm-qwen3-8b': {
+    label: 'Qwen3-8B Q4_K_M（推荐 · 对话更强）',
+    size: '~4.9GB',
+    file: 'Qwen3-8B-Q4_K_M.gguf',
+    url: 'https://hf-mirror.com/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf',
+  },
+};
+const OLLAMA_URL = (process.env.OLLAMA_URL || 'http://127.0.0.1:11434').replace(/\/+$/, '');
+
+// 云端 LLM（OpenAI 兼容协议）：DeepSeek / 智谱 GLM，与本地引擎并列可选
+// API Key 优先由前端请求传入（用户在设置面板填写），环境变量作兜底
+const CLOUD_ENGINES = {
+  deepseek: {
+    label: 'DeepSeek',
+    url: 'https://api.deepseek.com/chat/completions',
+    envKey: 'DEEPSEEK_API_KEY',
+    defaultModel: 'deepseek-v4-flash',
+    models: ['deepseek-v4-flash', 'deepseek-v4-pro'],
+  },
+  zhipu: {
+    label: '智谱 GLM',
+    url: 'https://open.bigmodel.cn/api/paas/v4/chat/completions',
+    envKey: 'ZHIPU_API_KEY',
+    defaultModel: 'glm-4.7',
+    models: ['glm-4.7', 'glm-4.6'],
+  },
+};
+
+function llmPathOf(key) { const m = LLM_MODELS[key]; return m ? path.join(LLM_DIR, m.file) : null; }
+function llmReady(keyOrPath) {
+  const p = keyOrPath && LLM_MODELS[keyOrPath] ? llmPathOf(keyOrPath) : (keyOrPath || LLM_MODEL);
+  return existsSync(p);
+}
+// /chat 的 model 参数 → 具体 gguf 路径（支持注册表 key / 文件名 / 绝对路径）
+function resolveLlmPath(model) {
+  if (!model) return LLM_MODEL;
+  if (LLM_MODELS[model]) return llmPathOf(model);
+  if (model.includes('/') || model.includes('\\')) return model; // 绝对/相对路径
+  return path.join(LLM_DIR, model); // 按文件名
+}
+
+let llmSession = null;
+let llmSessionPath = null;
+let llmInitPromise = null;
+let llmInitError = null;
+
+// 安装新 LLM 模型后调用：清空加载缓存，让下次对话重新加载（无需重启 App/服务）
+function llmInvalidate() {
+  llmSession = null;
+  llmSessionPath = null;
+  llmInitPromise = null;
+  llmInitError = null;
+}
+
+async function getLlamaSession(modelPath) {
+  // 若已加载且路径一致则复用；否则换模型重载（同一时间只保留一个活跃模型，省内存）
+  if (llmSession && llmSessionPath === modelPath) return llmSession;
+  // 模型文件被替换/新装后，之前缓存的失败原因不再成立 → 重置以便重试
+  if (llmInitError) {
+    const stillMissing = !existsSync(modelPath);
+    if (stillMissing) throw new Error(llmInitError);
+    llmInitError = null; // 文件已就位，允许重新尝试加载
+  }
+  if (llmInitPromise) return llmInitPromise;
+  llmInitPromise = (async () => {
+    if (!existsSync(modelPath)) throw new Error('LLM 模型缺失：' + modelPath + '\n请在模型管理里下载，或把 GGUF 放到 models/llm/');
+    const { getLlama, LlamaChatSession } = await import('node-llama-cpp');
+    const llama = await getLlama();
+    log('加载 LLM：' + path.basename(modelPath) + '（首次加载较慢）…');
+    const model = await llama.loadModel({ modelPath });
+    const context = await model.createContext({ contextSize: 2048 });
+    llmSession = new LlamaChatSession({ contextSequence: context.getSequence() });
+    llmSessionPath = modelPath;
+    log('LLM 就绪（' + path.basename(modelPath) + '）');
+    return llmSession;
+  })();
+  return llmInitPromise.catch((e) => { llmInitError = e.message; throw e; });
+}
+
+async function chatLlamaCpp(messages, opts = {}) {
+  const modelPath = resolveLlmPath(opts.model);
+  const session = await getLlamaSession(modelPath);
+  const system = messages.find(m => m.role === 'system')?.content;
+  const userText = messages.filter(m => m.role === 'user').map(m => String(m.content)).join('\n');
+  const full = (system ? String(system) + '\n\n' : '') + userText;
+  const res = await session.prompt(full, {
+    temperature: opts.temperature ?? 0.7,
+    topP: opts.top_p ?? 0.9,
+    maxTokens: opts.maxTokens ?? 256,
+  });
+  const out = String(res || '').trim();
+  // 2026-09-05：空返回日志钩子（voice-chat 偶发 LLM 空回答排查用）
+  if (!out) log('[llm] ⚠️ ' + path.basename(modelPath) + ' 返回空回答（prompt 前 80 字:' + full.slice(0, 80).replace(/\n/g, ' ') + '）');
+  return out;
+}
+
+async function chatOllama(messages, opts = {}) {
+  const res = await fetch(OLLAMA_URL + '/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: opts.model || 'qwen3', messages, stream: false }),
+    signal: AbortSignal.timeout(60000)
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error('Ollama 服务错误：' + (data.error || 'HTTP ' + res.status) + '（请确认 ollama serve 且 ollama pull qwen3）');
+  }
+  const data = await res.json();
+  return String(data.message?.content || '').trim();
+}
+
+// 云端引擎通用调用（DeepSeek / 智谱均为 OpenAI 兼容 chat/completions）
+async function chatCloud(engine, messages, opts = {}) {
+  const conf = CLOUD_ENGINES[engine];
+  const apiKey = opts.apiKey || process.env[conf.envKey];
+  if (!apiKey) throw new Error(conf.label + ' 未配置 API Key：请在设置面板填写，或设置环境变量 ' + conf.envKey);
+  const body = {
+    model: opts.model || conf.defaultModel,
+    messages,
+    temperature: opts.temperature ?? 0.7,
+    top_p: opts.top_p ?? 0.9,
+    max_tokens: opts.maxTokens ?? 512,
+    stream: false,
+    // 语音助手场景默认关闭深度思考，降低首字延迟
+    thinking: { type: 'disabled' },
+  };
+  const res = await fetch(conf.url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + apiKey },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(60000),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const detail = data.error?.message || data.message || JSON.stringify(data).slice(0, 200);
+    throw new Error(conf.label + ' API 错误：HTTP ' + res.status + ' ' + detail);
+  }
+  return String(data.choices?.[0]?.message?.content || '').trim();
+}
+
+async function llmChat(engine, messages, opts = {}) {
+  const e = (engine || 'llama-cpp').toLowerCase();
+  if (e === 'llama-cpp') {
+    // 000-plan-3 §一：节能 = 每类同时仅启用 1 个模型，不是禁用——LLM 类别内 llama-cpp 天然同刻只加载一个 GGUF
+    //（getLlamaSession 按 modelPath 换模型重载），故不再对 8B 做任何节能拦截；选哪个就加载哪个。
+    return chatLlamaCpp(messages, opts);
+  }
+  if (e === 'ollama') return chatOllama(messages, opts);
+  if (CLOUD_ENGINES[e]) return chatCloud(e, messages, opts);
+  throw new Error('未知 LLM 引擎: ' + e + '（支持 llama-cpp / ollama / deepseek / zhipu）');
+}
+
+// Ollama 可达性（缓存 30s）
+let ollamaCache = { t: 0, status: 'unreachable' };
+async function checkOllama() {
+  const now = Date.now();
+  if (now - ollamaCache.t < 30000) return ollamaCache.status;
+  let status = 'unreachable';
+  try {
+    const r = await fetch(OLLAMA_URL + '/api/tags', { signal: AbortSignal.timeout(2000) });
+    if (r.ok) status = 'reachable';
+  } catch (e) { /* unreachable */ }
+  ollamaCache = { t: now, status };
+  return status;
+}
+
+// ---------- 模型清单与安装（014 §5.2：/models + /install-model，服务端按名拉取） ----------
+// S10：whisper 由 sherpa-onnx 加载 models/sherpa-whisper/ 三件套（与 engines/whisper.json 的 checks 同一路径与字节）
+function whisperInstalled() {
+  try {
+    return WHISPER_FILES.every((f) => existsSync(path.join(SHERPA_WHISPER_DIR, f)));
+  } catch { return false; }
+}
+
+const MODEL_ITEMS = [
+  { category: 'tts', engine: 'kokoro',     label: 'Kokoro（中英混合 · 53 音色）',   size: '~350MB', installed: () => kokoroReady() },
+  { category: 'tts', engine: 'qwen3',      label: 'Qwen3-TTS 0.6B（MPS · 流式）',    size: '~1.2GB', installed: async () => (await checkQwen3()) === 'reachable' },
+  { category: 'tts', engine: 'cosyvoice-clone', label: 'CosyVoice3 语音克隆（0.5B · MPS）', size: '~9.1GB', installed: async () => (await checkCosyvoice()) === 'reachable' },
+  { category: 'asr', engine: 'sensevoice', label: 'SenseVoice（中文/粤/日/韩最优）', size: '~228MB', installed: () => existsSync(SENSEVOICE_MODEL) },
+  { category: 'asr', engine: 'sensevoice-original', label: 'SenseVoice 原始版（funasr · 高精度）', size: '~900MB', installed: async () => (await checkSenseVoiceOriginal()) === 'reachable' },
+  { category: 'asr', engine: 'whisper',    label: 'Whisper base（多语兜底）',        size: '~280MB', installed: () => whisperInstalled() },
+  { category: 'llm', engine: 'llm-0.5b',   label: 'Qwen2.5-0.5B-Instruct（默认 · 兜底）', size: '~469MB', installed: () => llmReady('llm-0.5b') },
+  { category: 'llm', engine: 'llm-qwen3-8b', label: 'Qwen3-8B Q4_K_M（推荐 · 对话更强）', size: '~4.9GB', installed: () => llmReady('llm-qwen3-8b') },
+];
+
+async function collectModels() {
+  const out = [];
+  const byId = new Map(MODEL_ITEMS.map((m) => [m.engine, m]));
+  // S2：以 engines/*.json 为主，逐引擎输出就绪明细（state / missingFiles / missingRuntime）
+  for (const mf of ENGINE_MANIFESTS) {
+    const legacy = byId.get(mf.id);
+    const d = await engineReadiness(mf);
+    let installed = d.state === 'running' || d.state === 'ready';
+    if (legacy) { try { installed = !!(await legacy.installed()); } catch {} }
+    out.push({
+      category: mf.category || legacy?.category || '',
+      engine: mf.id,
+      label: mf.label || legacy?.label || mf.id,
+      size: mf.sizeHint || legacy?.size || '',
+      license: mf.license || '',
+      installed,
+      state: d.state,
+      serviceUp: d.serviceUp,
+      missingFiles: d.missingFiles,
+      missingRuntime: d.missingRuntime,
+      totalMissingBytes: d.totalMissingBytes,
+      // 000-plan-3：模型资源画像（主文件大小/内存需求等，engines/*.json 的 profile）——
+      // 前端「节能默认启用已装最小模型」回落排序与后续「每类三表」均以此为依据
+      profile: mf.profile || null,
+      // 000-plan-3：主文件清单（checks 里 file 型路径）——模型页「每类三表」主文件列数据源
+      mainFiles: (mf.checks || []).filter((c) => c.type === "file").map((c) => c.path),
+      // 035：N 卡机器 + venv 依赖已就绪但 torch 为 CPU 版 → 前端显示「升级 GPU 加速」按钮
+      gpuUpgrade: HAS_NVIDIA && !d.missingRuntime.length
+        ? ((mf.runtime?.[0]?.path || '').split(/[\\/]/)[0] || '').startsWith('.venv')
+          && torchIsCpuOnly((mf.runtime?.[0]?.path || '').split(/[\\/]/)[0])
+        : false,
+      // 036：加速版本标记——torch 是 CUDA 版（+cuXXX）还是 CPU 版（+cpu/无后缀），前端据此显示徽标区分
+      accelTag: (() => {
+        const vn = (mf.runtime?.[0]?.path || '').split(/[\\/]/)[0] || '';
+        if (!vn.startsWith('.venv') || d.missingRuntime.length) return null;
+        const tag = torchBuildTag(vn);
+        if (!tag) return null;
+        if (/[+]cu\d/.test(tag)) return { kind: 'cuda', label: `CUDA ${tag.match(/\+cu\d+/)[0]}` };
+        return { kind: 'cpu', label: 'CPU' };
+      })(),
+      // S3：安装方式与可选镜像名（UI 据此渲染镜像切换下拉）
+      // 2026-08-31：所有 install kind 都从清单读 mirrors（url-multi 取 files[0].mirrors，其余取 install.mirrors）
+      install: mf.install ? {
+        kind: mf.install.kind,
+        mirrors: mf.install.kind === 'url-multi'
+          ? (mf.install.files?.[0]?.mirrors || []).map((x) => x.name)
+          : (mf.install.mirrors || [])
+      } : null
+    });
+  }
+  // 兜底：MODEL_ITEMS 里没有对应 manifest 的条目按旧格式输出（防漏）
+  for (const m of MODEL_ITEMS) {
+    if (!ENGINE_MANIFESTS.some((x) => x.id === m.engine)) {
+      out.push({ category: m.category, engine: m.engine, label: m.label, size: m.size, installed: !!(await m.installed()) });
+    }
+  }
+  return out;
+}
+
+// ---------- S2 引擎清单（engines/*.json）与就绪明细（002-plan §三） ----------
+// 每引擎一份 JSON：checks=必需文件/目录逐项核对；runtime=运行时依赖；
+// install.kind: script(现有下载脚本) / url-multi(通用多镜像下载) / hint(提示) / legacy(沿用 INSTALLERS)
+const ENGINES_DIR = path.join(__dirname, 'engines');
+function loadEngineManifests() {
+  try {
+    return readdirSync(ENGINES_DIR).filter((f) => f.endsWith('.json')).sort()
+      .map((f) => {
+        const mf = JSON.parse(readFileSync(path.join(ENGINES_DIR, f), 'utf8'));
+        return mf;
+      });
+  } catch (e) {
+    console.error('[manifests] 引擎清单加载失败:', e.message);
+    return [];
+  }
+}
+const ENGINE_MANIFESTS = loadEngineManifests();
+console.log(`[manifests] 已加载 ${ENGINE_MANIFESTS.length} 份引擎清单（engines/*.json）`);
+
+// 000-device-vs-model.md §四：设备画像（4.1）——启动时探测一次并缓存；失败不阻塞服务（路由返回 503）
+let DEVICE_PROFILE = null;
+try {
+  DEVICE_PROFILE = await buildDeviceProfile(ENGINE_MANIFESTS);
+  console.log(`[device-profile] ${DEVICE_PROFILE.os} · accel=${DEVICE_PROFILE.accel} · ram=${DEVICE_PROFILE.ramGB}GB · tier=${DEVICE_PROFILE.tier} · 可装 ${DEVICE_PROFILE.canInstall.length}/${ENGINE_MANIFESTS.length}`);
+} catch (e) {
+  console.error('[device-profile] 设备探测失败（/device-profile 将返回 503）:', e.message);
+}
+
+// 最小 glob：仅支持「目录/*」一段通配（够 whisper 场景）。
+// 056 坑 U 修复：必须与 file/dir 型 checkEntry 同一套路径解析（resolveData → 数据目录），
+// 此前 `path.join(__dirname, pattern)` 走代码目录，与 transformers.js 落盘的数据目录不一致 → whisper 永远「无匹配」。
+function globExists(pattern) {
+  const abs = resolveData(pattern);
+  if (!pattern.includes('*')) return existsSync(abs);
+  const sep = abs.lastIndexOf(path.sep, abs.indexOf('*'));
+  const baseDir = abs.slice(0, sep);
+  const tail = abs.slice(sep + 1);
+  const rx = new RegExp('^' + tail.split('*').map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$');
+  try {
+    return readdirSync(baseDir).some((n) => rx.test(n) && existsSync(path.join(baseDir, n)));
+  } catch { return false; }
+}
+
+// 目录内文件计数（含子目录，设上限防呆）
+function countFilesDeep(dir, cap = 5000) {
+  let n = 0;
+  const walk = (d) => {
+    if (n >= cap) return;
+    let items;
+    try { items = readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const it of items) {
+      if (n >= cap) return;
+      if (it.isDirectory()) walk(path.join(d, it.name));
+      else n++;
+    }
+  };
+  walk(dir);
+  return n;
+}
+
+// 目录内总字节（递归；含子目录；不存在/读取失败返回 0）——qwen3 hub 缓存等目录型 checks 的 minBytes 用
+function bytesDeep(dir) {
+  let b = 0;
+  try {
+    for (const it of readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, it.name);
+      if (it.isDirectory()) b += bytesDeep(p);
+      else { try { b += statSync(p).size; } catch {} }
+    }
+  } catch {}
+  return b;
+}
+
+// 单项校验：null=通过；否则返回缺失描述
+function checkEntry(c) {
+  if (c.type === 'file') {
+    const p = resolveData(c.path);
+    if (!existsSync(p)) return { path: c.path, type: '缺文件', expectBytes: c.bytes || 0 };
+    if (c.bytes) {
+      try {
+        const s = statSync(p).size;
+        if (s !== c.bytes) return { path: c.path, type: '大小不符', expectBytes: c.bytes, actualBytes: s };
+      } catch { return { path: c.path, type: '不可读', expectBytes: c.bytes }; }
+    }
+    return null;
+  }
+  if (c.type === 'dir') {
+    const p = resolveData(c.path);
+    if (!existsSync(p)) return { path: c.path, type: '缺目录', expectFiles: c.minFiles || 1 };
+    if (c.minFiles && countFilesDeep(p) < c.minFiles) return { path: c.path, type: '目录不完整', expectFiles: c.minFiles };
+    // 2026-09-05：dir 型支持 minBytes——只数文件不够（如 qwen3 hub 缓存 10 个配置小文件≈1.6MB 也算"够 10 个"，
+    // 实际主权重没下）→ 递归总字节未达下限即视为不完整，直到权重真正落地
+    if (c.minBytes) {
+      const actual = bytesDeep(p);
+      if (actual < c.minBytes) return { path: c.path, type: '目录不完整（字节不足）', expectFiles: c.minBytes, actualBytes: actual };
+    }
+    return null;
+  }
+  if (c.type === 'glob') return globExists(c.pattern) ? null : { path: c.pattern, type: '无匹配' };
+  return null;
+}
+
+// 就绪检查：state ∈ running | ready | partial-files | missing-runtime | incomplete
+async function engineReadiness(mf) {
+  const missingFiles = [];
+  const missingRuntime = [];
+  for (const c of mf.checks || []) {
+    const r = checkEntry(c);
+    if (r) missingFiles.push(r);
+  }
+  for (const r of mf.runtime || []) {
+    if (r.kind === 'path') {
+      // 034 防空壳假就绪：仅当 runtime 项是引擎 venv（路径首段 .venv-*，bin/python3 或 Scripts/python.exe 形态）时，
+      // 必须"venv python 在 且 关键依赖包已装"才算就绪——只建了目录没装依赖的 venv 会如实报缺环境。
+      // 2026-08-28 修复：此前按"引擎有无 VENV_KEY_PKG"判断，把非 venv 项（如 cosyvoice 的
+      // vendor/cosyvoice/... 源码路径，首段 'vendor'）误当 venv 检查 → venvs/vendor 必然缺失 →
+      // cosyvoice 权重 + venv + 源码全就绪仍误报「缺环境」（坑 L 同族）。改为按路径形态（首段 .venv-*）判断。
+      const firstSeg = r.path.split(/[\\/]/)[0];
+      if (firstSeg.startsWith('.venv')) {
+        const keyPkg = VENV_KEY_PKG[mf.id];
+        if (keyPkg) {
+          if (!venvKeyPkgOk(firstSeg, keyPkg)) missingRuntime.push({ kind: '缺失', label: r.label || r.path });
+        } else if (!runtimePathExists(r.path)) {
+          missingRuntime.push({ kind: '缺失', label: r.label || r.path });
+        }
+      } else if (!runtimePathExists(r.path)) {
+        missingRuntime.push({ kind: '缺失', label: r.label || r.path });
+      }
+    } else if (r.kind === 'bin') {
+      try { execSync(IS_WIN ? `where ${r.name}` : `which ${r.name}`, { stdio: 'ignore' }); } catch { missingRuntime.push({ kind: '缺失', label: r.label || ('命令 ' + r.name) }); }
+    }
+  }
+  // 服务是否在跑：复用 MODEL_ITEMS 的探针（多数即 /health 健康检查）
+  const legacy = MODEL_ITEMS.find((x) => x.engine === mf.id);
+  let serviceUp = false;
+  if (legacy) { try { serviceUp = !!(await legacy.installed()); } catch {} }
+  // 2026-08-28：cosyvoice 旧锁文件漏装的运行时依赖（坑 I 扩展）——venv 在但缺任一依赖 ≡ 缺环境，
+  // 如实报出并让卡片出「检测/修复」按钮（此前 state=ready 时前端无按钮可点，服务又崩 → 用户陷入「启动中」死等）。
+  if (mf.id === 'cosyvoice-clone' && venvKeyPkgOk('.venv-cosyvoice', 'torch')) {
+    for (const p of COSYVOICE_RUNTIME_DEPS) {
+      if (!venvPkgPresent('.venv-cosyvoice', p)) {
+        missingRuntime.push({ kind: '缺失', label: `${p} 未安装（旧锁文件漏装，点「检测/修复」自动补）` });
+      }
+    }
+  }
+  const state = missingRuntime.length
+    ? (missingFiles.length ? 'incomplete' : 'missing-runtime')
+    : missingFiles.length ? 'partial-files'
+      : (serviceUp ? 'running' : 'ready');
+  const totalMissingBytes = missingFiles.reduce((a, b) => a + (b.expectBytes || 0), 0);
+  return { state, missingFiles, missingRuntime, totalMissingBytes, serviceUp };
+}
+
+// 子进程下载器 → NDJSON 流式进度；退出码 0 视为完成
+function runDownload(cmd, args) {
+  return (ctx) => new Promise((resolve, reject) => {
+    ctx.nd({ type: 'log', message: '开始下载…' });
+    const p = spawn(cmd, args, { cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'] });
+    let buf = '';
+    const onData = (chunk) => {
+      buf += chunk.toString();
+      let idx;
+      while ((idx = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, idx).replace(/\r$/, '').trim();
+        buf = buf.slice(idx + 1);
+        if (line) ctx.nd({ type: 'log', message: line });
+      }
+    };
+    p.stdout.on('data', onData);
+    p.stderr.on('data', onData);
+    p.on('error', (e) => reject(new Error('无法启动下载器：' + e.message)));
+    p.on('exit', (code) => {
+      if (buf.trim()) ctx.nd({ type: 'log', message: buf.trim() });
+      if (code === 0) ctx.nd({ type: 'done', message: '安装完成' });
+      else reject(new Error('下载失败（退出码 ' + code + '）'));
+    });
+  });
+}
+
+// 通用子进程执行（带 env）→ NDJSON 行级进度；退出码 0 视为成功（034 阶段3：uv envenv 安装用）
+function runCmdWithEnv(cmd, args, envAdd = {}, cwdOverride = __dirname, opts = {}) {
+  return (ctx) => new Promise((resolve, reject) => {
+    ctx.nd({ type: 'log', message: `> ${cmd.split(/[\\/]/).pop()} ${args.join(' ')}` });
+    const p = spawn(cmd, args, {
+      cwd: cwdOverride,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, ...envAdd },
+    });
+    let buf = '';
+    const onData = (chunk) => {
+      buf += chunk.toString();
+      let idx;
+      while ((idx = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, idx).replace(/\r$/, '').trim();
+        buf = buf.slice(idx + 1);
+        if (line) ctx.nd({ type: 'log', message: line });
+      }
+    };
+    p.stdout.on('data', onData);
+    p.stderr.on('data', onData);
+    // 035 坑 O：uv pip 大文件下载无实时进度——用 uv 缓存目录字节增长发 type:'progress'
+    // （uv 下载时先落 cache/.tmp*，装完移入 wheels-v6；我们只计 .tmp* 累加作为"已下载"）
+    let progTimer = null;
+    if (opts.progressDir) {
+      progTimer = setInterval(() => {
+        try {
+          const tmpDirs = readdirSync(opts.progressDir).filter((x) => x.startsWith('.tmp'));
+          let bytes = 0;
+          for (const t of tmpDirs) {
+            try {
+              const full = path.join(opts.progressDir, t);
+              bytes += statSync(full).size; // 目录本身忽略，下面递归求和
+              for (const f of readdirSync(full)) {
+                try { bytes += statSync(path.join(full, f)).size; } catch {}
+              }
+            } catch {}
+          }
+          ctx.nd({ type: 'progress', received: bytes, total: (opts.progressTotal || 0) });
+        } catch {}
+      }, 800);
+    }
+    // 2026-09-05：watchDir = 监控某目录（如 huggingface_hub 快照缓存）递归字节发进度；
+    //   判据与下载源原则统一：连接/启动 15s 无任何字节 → 判死；之后无进展超过 noProgressMs（默认 30s）→ 判死。
+    //   被杀进程 exit 非 0 → 下方 reject → 调用方（qwen3 安装器端点循环）捕获后自动切换下一端点/镜像。
+    else if (opts.watchDir) {
+      const startedAt = Date.now();
+      let lastBytes = 0;
+      let lastGrowthAt = Date.now();
+      let gotAny = false;
+      const killNote = (why) => {
+        ctx.nd({ type: 'log', message: why + '，结束该端点尝试（将自动切换下一端点/镜像）…' });
+        try { p.kill(); } catch {}
+      };
+      progTimer = setInterval(() => {
+        try {
+          let bytes = 0;
+          try {
+            for (const it of readdirSync(opts.watchDir, { withFileTypes: true })) {
+              const full = path.join(opts.watchDir, it.name);
+              if (it.isDirectory()) bytes += bytesDeep(full);
+              else { try { bytes += statSync(full).size; } catch {} }
+            }
+          } catch {}
+          ctx.nd({ type: 'progress', received: bytes, total: (opts.progressTotal || 0) });
+          if (bytes > lastBytes) { lastBytes = bytes; lastGrowthAt = Date.now(); gotAny = true; }
+          const connStall = !gotAny && Date.now() - startedAt > 15_000;
+          const stall = Date.now() - lastGrowthAt > (opts.noProgressMs || DL_NO_PROGRESS_MS);
+          if (connStall) killNote('⚠️ 连接 ' + Math.round((Date.now() - startedAt) / 1000) + 's 无任何数据');
+          else if (stall) killNote(`⚠️ 无进展超过 ${(opts.noProgressMs || DL_NO_PROGRESS_MS) / 1000}s`);
+        } catch {}
+      }, 800);
+    }
+    p.on('error', (e) => { if (progTimer) clearInterval(progTimer); reject(new Error('无法启动命令：' + e.message)); });
+    p.on('exit', (code) => {
+      if (progTimer) clearInterval(progTimer);
+      if (buf.trim()) ctx.nd({ type: 'log', message: buf.trim() });
+      if (code === 0) {
+        ctx.nd({ type: 'log', message: '✓ 命令完成（exit 0）' });
+        resolve();
+      } else {
+        reject(new Error(`命令失败（退出码 ${code}）：${args.slice(0, 4).join(' ')}…`));
+      }
+    });
+  });
+}
+
+// 字节 → 人类可读（B/KB/MB/GB）
+function fmtMB(n) {
+  if (!n || n <= 0) return '0B';
+  const u = ['B', 'KB', 'MB', 'GB'];
+  let i = 0; let v = n;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return `${v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)} ${u[i]}`;
+}
+
+// 当前活动下载进程（S3：供 /install-cancel 终止；.part 保留可续传）
+const ACTIVE_DOWNLOAD = { proc: null, cancelled: false };
+
+// S2/S3 通用单文件多镜像下载器（manifest install.kind=url-multi 专用）：
+// .part 临时文件 → 完成后原子 rename；curl -C - 断点续传；
+// 下载源原则（2026-08-31 用户拍板，写进 000/AGENTS/043）：官方优先，失败立即换源；
+//   无进展（30s 无字节增长）换源；低速（<100KB/s 持续 60s）换源；
+// opts.mirror：指定镜像排到最前（UI 用户自选源；默认空 = 自动 = 官方优先顺序）；
+// 进度：每 800ms 读 .part 实际大小，发 NDJSON {type:'progress', received, total}。
+const DL_NO_PROGRESS_MS = 30_000;   // 无进展（字节不增长）超过该时长 → 杀 curl 换源
+const DL_SPEED_LIMIT = 102_400;     // 低速阈值：<100KB/s
+const DL_SPEED_TIME = 60;           // 持续该秒数 → 判死换源
+function downloadOneFile(fileSpec, ctx, opts = {}) {
+  const target = resolveData(fileSpec.file);
+  // 2026-08-31 防御：父路径被同名"文件"挡住（如动态清单目录条目被误下载成文件）→ 删掉重建目录，
+  // 否则 mkdir 抛 EEXIST（"file already exists, mkdir ..."）。磁盘残留也能自愈，无需用户手动删。
+  const parent = path.dirname(target);
+  try {
+    const st = statSync(parent);
+    if (!st.isDirectory()) {
+      ctx.nd({ type: 'log', message: `⚠️ 父路径 ${path.basename(parent)} 是文件（残留），删除后重建目录…` });
+      rmSync(parent, { force: true });
+    }
+  } catch {}
+  mkdirSync(parent, { recursive: true });
+  return new Promise((resolve, reject) => {
+    const mirrors = [...(fileSpec.mirrors || [])];
+    if (opts.mirror) {
+      const mi = mirrors.findIndex((m) => m.name === opts.mirror);
+      if (mi > 0) mirrors.unshift(...mirrors.splice(mi, 1));
+      else if (mi === -1) ctx.nd({ type: 'log', message: `⚠️ 镜像 ${opts.mirror} 不在清单中，按默认顺序下载` });
+    }
+    // 2026-09-05 智能换源：一次安装请求内某源失败即判死，后续文件自动跳过该源（如官方源整体不可达时，
+    // 不再逐文件先白等 10s+ 再切镜像）。判死集合挂在本次请求的 ctx 上，下次安装自动恢复官方优先。
+    const deadRun = ctx.deadMirrors || (ctx.deadMirrors = new Set());
+    const part = target + '.part';
+    const total = fileSpec.bytes || 0;
+    let finished = false;
+    let lastSize = 0;
+    let lastGrowthAt = Date.now();
+    const timer = setInterval(() => {
+      if (finished) return;
+      try {
+        const s = statSync(part).size;
+        ctx.nd({ type: 'progress', file: path.basename(fileSpec.file), received: s, total });
+        if (s > lastSize) {
+          lastSize = s;
+          lastGrowthAt = Date.now();
+        } else if (Date.now() - lastGrowthAt > DL_NO_PROGRESS_MS) {
+          // 无进展超时：杀当前 curl（exit 非 0 → 自动换下一镜像），保留 .part 续传
+          if (ACTIVE_DOWNLOAD.proc) { try { ACTIVE_DOWNLOAD.proc.kill(); } catch {} }
+          ctx.nd({ type: 'log', message: `⚠️ 无进展超过 ${DL_NO_PROGRESS_MS / 1000}s（${path.basename(fileSpec.file)} 无字节增长），切换下一镜像…` });
+          lastSize = s;
+          lastGrowthAt = Date.now(); // 重置，避免重复触发
+        }
+      } catch {}
+    }, 800);
+    const finish = (fn, arg) => { finished = true; clearInterval(timer); ACTIVE_DOWNLOAD.proc = null; fn(arg); };
+    const tryMirror = () => {
+      if (ACTIVE_DOWNLOAD.cancelled) {
+        ACTIVE_DOWNLOAD.cancelled = false;
+        return finish(reject, new Error('已取消（保留 .part，可重新安装续传）'));
+      }
+      // 跳过已判死源（本请求内其余文件不再尝试）；全部判死/无镜像 → 直接失败（保留 .part 续传）
+      const alive = mirrors.filter((mm) => !deadRun.has(mm.name));
+      if (!alive.length) {
+        return finish(reject, new Error(`所有镜像均已失败/判死：${fileSpec.file}（已保留 .part，可重试续传）`));
+      }
+      if (alive.length !== mirrors.length && !ctx._deadInfoShown) {
+        ctx._deadInfoShown = true;
+        const deadNames = mirrors.filter((mm) => deadRun.has(mm.name)).map((mm) => mm.name).join('、');
+        ctx.nd({ type: 'log', message: `⚡ ${deadNames} 已判死——本次安装剩余文件自动跳过该源（下次安装恢复官方优先）` });
+      }
+      const m = alive[0];
+      ctx.nd({ type: 'log', message: `下载 ${path.basename(fileSpec.file)} ← ${m.name}${opts.mirror === m.name ? '（用户指定）' : ''} …` });
+      // -sS：静默 curl 进度动画（+cu 下载时 % Total 表头刷日志是坑），但保留真实错误输出；
+      // 进度由下方每 800ms 读 .part 大小发 type:'progress'（App 进度条），不靠 curl 打印。
+      const p = spawn('curl', ['-sS', '-L', '-C', '-', '--connect-timeout', '15', '--max-time', '14400',
+        '--speed-limit', String(DL_SPEED_LIMIT), '--speed-time', String(DL_SPEED_TIME), // <100KB/s 持续 60s 判死 → 换源
+        '-o', part, m.url], { cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'] });
+      ACTIVE_DOWNLOAD.proc = p;
+      let buf = '';
+      const onData = (chunk) => {
+        buf += chunk.toString();
+        let idx;
+        while ((idx = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, idx).replace(/\r$/, '').trim();
+          buf = buf.slice(idx + 1);
+          if (line) ctx.nd({ type: 'log', message: line });
+        }
+      };
+      p.stdout.on('data', onData);
+      p.stderr.on('data', onData);
+      p.on('error', (e) => { try { p.kill(); } catch {} finish(reject, new Error('无法启动 curl：' + e.message)); });
+      p.on('exit', (code) => {
+        if (buf.trim()) ctx.nd({ type: 'log', message: buf.trim() });
+        if (ACTIVE_DOWNLOAD.cancelled) {
+          ACTIVE_DOWNLOAD.cancelled = false;
+          return finish(reject, new Error('已取消（保留 .part，可重新安装续传）'));
+        }
+        if (code === 0) {
+          try { renameSync(part, target); } catch (e) { return finish(reject, new Error('改名失败：' + e.message)); }
+          return finish(resolve, target);
+        }
+        // 失败保留 .part 供断点续传；该源本请求内判死，自动换下一个健康镜像
+        deadRun.add(m.name);
+        ctx.nd({ type: 'log', message: `镜像 ${m.name} 失败（exit=${code}）${alive.length > 1 ? '→ 判死，改走剩余源' : '，全部源均失败'}…` });
+        tryMirror();
+      });
+    };
+    tryMirror();
+  });
+}
+
+// manifest install.kind=url-multi 的安装器工厂（opts.mirror 由 /install-model?mirror= 透传）
+function manifestUrlMultiInstaller(mf) {
+  return async (ctx, opts = {}) => {
+    for (const f of mf.install.files || []) {
+      // 坑 U 同族（S9 修复）：跳过检查必须与 downloadOneFile 同一套路径解析（resolveData → 数据目录）
+      const target = resolveData(f.file);
+      // 2026-08-31 修复：跳过判断加字节校验——存在但大小不符的损坏文件删掉重下（此前被"已存在"跳过 → 死循环）
+      if (existsSync(target)) {
+        if (f.bytes) {
+          try {
+            if (statSync(target).size !== f.bytes) {
+              ctx.nd({ type: 'log', message: `⚠️ ${f.file} 存在但大小不符（期望 ${f.bytes} / 实际 ${statSync(target).size}），删除重下…` });
+              rmSync(target, { force: true });
+            } else {
+              ctx.nd({ type: 'log', message: `已存在且完整，跳过：${f.file}` });
+              continue;
+            }
+          } catch {
+            rmSync(target, { force: true });
+          }
+        } else {
+          ctx.nd({ type: 'log', message: `已存在，跳过：${f.file}` });
+          continue;
+        }
+      }
+      await downloadOneFile(f, ctx, opts);
+      if (f.bytes) {
+        const s = statSync(target).size;
+        if (s !== f.bytes) ctx.nd({ type: 'log', message: `⚠️ 大小不符（期望 ${f.bytes} / 实际 ${s}），建议删除后重新安装` });
+        else ctx.nd({ type: 'log', message: `✓ 字节数校验通过（${s}）` });
+      }
+    }
+    ctx.nd({ type: 'done', message: `安装完成：${mf.id}` });
+  };
+}
+
+mkdirSync(LLM_DIR, { recursive: true }); // 供 LLM 模型落盘
+
+// S5：CosyVoice3 权重下载规格（bytes 与 engines/cosyvoice-clone.json 的 checks 保持一致）
+const CV_MODEL_SUBDIR = 'models/cosyvoice/Fun-CosyVoice3-0.5B';
+// 2026-08-28：**全量下载**（废除"必需子集 + 缺啥补啥"打地鼠式维护——S4 曾筛"必需"导致漏 BlankEN/漏其它，
+// 实测加载逐个崩；用户明确要求完整下载）。清单 = ModelScope FunAudioLLM/Fun-CosyVoice3-0.5B-2512 整仓 20 个文件
+// （字节数实录，含 llm.rl.pt / flow.decoder.estimator.fp32.onnx / speech_tokenizer_v3.batch.onnx 等原"可选"文件）。
+// 安装器 keyFiles 由本清单派生：以后整仓增删文件只需同步本表 + engines json。
+const CV_WEIGHTS = {
+  'llm.pt': { bytes: 2024669519 },
+  'llm.rl.pt': { bytes: 2024682701 },
+  'flow.pt': { bytes: 1329116148 },
+  'flow.decoder.estimator.fp32.onnx': { bytes: 1326216933 },
+  'hift.pt': { bytes: 83202622 },
+  'speech_tokenizer_v3.onnx': { bytes: 969451503 },
+  'speech_tokenizer_v3.batch.onnx': { bytes: 969451579 },
+  'campplus.onnx': { bytes: 28303423 },
+  'cosyvoice3.yaml': { bytes: 6934 },
+  'configuration.json': { bytes: 47 },
+  'CosyVoice-BlankEN/config.json': { bytes: 659 },
+  'CosyVoice-BlankEN/generation_config.json': { bytes: 242 },
+  'CosyVoice-BlankEN/model.safetensors': { bytes: 988097824 },
+  'CosyVoice-BlankEN/tokenizer_config.json': { bytes: 1287 },
+  'CosyVoice-BlankEN/vocab.json': { bytes: 2776833 },
+  'CosyVoice-BlankEN/merges.txt': { bytes: 1402109 },
+};
+// 2026-08-28：cosyvoice 旧锁文件漏装的运行时依赖（坑 I 扩展）——
+// 安装器补装 与 engineReadiness 就绪检查 共用这份清单，避免两处漂移。
+// 缺任一 → 卡片如实报「缺环境」并出「检测/修复」按钮（此前 state=ready 时前端不渲染按钮，用户无入口，陷入「启动中」死等）。
+// 2026-09-05 追加探针 'pkg_resources'：uv venv 的 setuptools≥81 已移除 pkg_resources，而 pyworld 0.3.5 仍
+// `import pkg_resources` → 8003 cosyvoice 启动即崩（mac 实测 ModuleNotFoundError）。按模块探针而非 setuptools
+// 版本探针，已装 84 的 venv 点「检测/修复」也会自动降级补装（spec 见 COSYVOICE_EXTRA_SPEC）。
+const COSYVOICE_RUNTIME_DEPS = ['modelscope', 'onnxruntime', 'omegaconf', 'librosa', 'soundfile', 'unidecode', 'pkg_resources'];
+// 2026-08-29：torchaudio 2.11 load() 强制 torchcodec，而 torchcodec 在 Win 需系统 FFmpeg full-shared DLL（随包不可保证）
+// → 不走依赖路线；已在 vendor file_utils.load_wav 改为 soundfile 直读（自带 libsndfile，零系统依赖）。勿再加 torchcodec。
+// 'pkg_resources' 不是独立 PyPI 包：真正要装的是仍带 pkg_resources 的 setuptools（<81；81 起已移除）。
+const COSYVOICE_EXTRA_SPEC = { pkg_resources: 'setuptools<81' };
+
+// 2026-08-28：元数据/展示类文件跨镜像必然不同（.gitattributes / README.md / asset/* 实测：HF 与 ModelScope 内容不一致），
+// 非运行必需 → 不进校验清单、不强制下载（消除"大小不符"红字与打地鼠）。
+const CV_COSMETIC_RE = /^(\.gitattributes|README\.md|asset\/)/;
+
+// 2026-08-28：**动态清单（正确方式）**——安装时从 ModelScope 整仓文件 API 拉取 Path+Size，
+// 仓库文件变动自动跟随；API 不可用/无 Data 时回退代码内静态清单 CV_WEIGHTS（兜底，非首选）。
+async function cosyVoiceManifest() {
+  try {
+    const d = JSON.parse(await fetchText('https://modelscope.cn/api/v1/models/FunAudioLLM/Fun-CosyVoice3-0.5B-2512/repo/files?Revision=master&Recursive=true', 20000));
+    // 2026-08-31 修复：过滤目录条目（如 'CosyVoice-BlankEN' 无扩展名）——此前目录被当文件下载，
+    // 磁盘生成同名"文件" → 后续 mkdir 父目录 EEXIST（"file already exists, mkdir ...CosyVoice-BlankEN"）。
+    // 只保留带扩展名的文件路径（排除 cosmetic：.gitattributes/README.md/asset/*）。
+    const list = (d && d.Data && d.Data.Files || []).filter((f) =>
+      f.Path && !CV_COSMETIC_RE.test(f.Path) && /[^/\\]+\.[A-Za-z0-9]+$/.test(f.Path));
+    if (list.length) {
+      const map = {};
+      for (const f of list) map[f.Path] = { bytes: Number(f.Size) || 0 };
+      return map;
+    }
+  } catch (e) {
+    // API 失败 → 静态兜底（不静默吞：下一行由调用方打日志）
+  }
+  return CV_WEIGHTS;
+}
+
+const cvWeightSpec = (name, bytes) => ({
+  file: `${CV_MODEL_SUBDIR}/${name}`,
+  // 2026-08-31 修复：bytes 由调用方传入（动态清单 weightsManifest[f]?.bytes）；
+  // 此前写死 CV_WEIGHTS[name].bytes——动态清单比静态清单多出的文件（整仓 20 vs 静态 16）
+  // 在 CV_WEIGHTS 里不存在 → undefined.bytes 崩溃（"Cannot read properties of undefined (reading 'bytes')"）。
+  bytes: Number(bytes) || (CV_WEIGHTS[name]?.bytes || 0),
+  // 镜像顺序：modelscope 优先（2026-08-28 实测登记：`FunAudioLLM/Fun-CosyVoice3-0.5B-2512` 六项必需权重
+  // 字节与 HF `Fun-CosyVoice3-0.5B` 完全一致（llm.pt 2024669519 / flow.pt 1329116148 / hift.pt 83202622 /
+  // speech_tokenizer_v3.onnx 969451503 / campplus.onnx 28303423 / cosyvoice3.yaml 6934），国内直连快、
+  // 支持 Range 续传（HTTP 206）；hf-mirror 偶发低速（<20KB/s 90s 判死换源）排第二；huggingface 直连国内不通，兜底）
+  mirrors: [
+    { name: 'modelscope', url: `https://modelscope.cn/models/FunAudioLLM/Fun-CosyVoice3-0.5B-2512/resolve/master/${name}` },
+    { name: 'hf-mirror', url: `https://hf-mirror.com/FunAudioLLM/Fun-CosyVoice3-0.5B/resolve/main/${name}` },
+    { name: 'huggingface', url: `https://huggingface.co/FunAudioLLM/Fun-CosyVoice3-0.5B/resolve/main/${name}` },
+  ],
+});
+
+// ---------- 034 阶段3：引擎 venv（uv 受管）安装器 ----------
+// 分层重申：全局「安装 Python 基础」按钮只装 uv + CPython 3.11；
+// 这里负责"模型管理页对应卡片"的引擎自身 venv + 依赖（含 torch 等大流量，二次确认后执行）。
+// 与 Rust 侧一致：uv 走数据目录 runtime/uv，受管 CPython 走 runtime/python，venv 走数据目录 venvs/。
+const UV_EXE = path.join(DATA_DIR, 'runtime', 'uv', IS_WIN ? 'uv.exe' : 'uv');
+const UV_PY_HOME = path.join(DATA_DIR, 'runtime', 'python');
+const UV_INDEX = process.env.OPENSOUND_UV_INDEX || 'https://pypi.tuna.tsinghua.edu.cn/simple';
+const venvDirOf = (name) => path.join(DATA_DIR, 'venvs', name);
+const venvPyOf = (name) => (IS_WIN
+  ? path.join(venvDirOf(name), 'Scripts', 'python.exe')
+  : path.join(venvDirOf(name), 'bin', 'python3'));
+// 055 mac 兼容（坑 W）：venv site-packages 路径 Win=`Lib/site-packages`，mac/Linux=`lib/python3.x/site-packages`。
+// uv 受管 CPython 固定 3.11，但按 lib/ 下实际 python3*/site-packages 扫描更稳（版本升级不破）；找不到兜底 3.11。
+function venvSpOf(name) {
+  const vd = venvDirOf(name);
+  if (IS_WIN) return path.join(vd, 'Lib', 'site-packages');
+  const lib = path.join(vd, 'lib');
+  try {
+    for (const d of readdirSync(lib)) {
+      const sp = path.join(lib, d, 'site-packages');
+      if (existsSync(sp)) return sp;
+    }
+  } catch {}
+  return path.join(lib, 'python3.11', 'site-packages');
+}
+// 034 防空壳假就绪：每个 python 引擎的关键依赖包名（engineReadiness 据此判定 venv 是否"真就绪"）
+const VENV_KEY_PKG = {
+  'qwen3': 'qwen_tts',
+  'sensevoice-original': 'funasr',
+  'cosyvoice-clone': 'torch',
+};
+// 关键包就绪 = venv python 在 且 site-packages 有引擎依赖包（防空壳假就绪）
+function venvKeyPkgOk(name, keyPkg) {
+  const py = venvPyOf(name);
+  if (!existsSync(py)) return false;
+  const sp = path.join(venvSpOf(name), keyPkg);
+  return existsSync(sp) && (() => { try { return statSync(sp).isDirectory(); } catch { return false; } })();
+}
+// 2026-08-28：防空壳检查的宽容版（运行时依赖用）——「包目录」或「单文件模块」或「dist-info」任一命中即视为已装。
+// 原因：soundfile 0.14.0 以 soundfile.py 单文件形态安装（无 site-packages/soundfile/ 目录），
+// 纯目录判定会把它误报为缺失（2026-08-28 实测：App 补装后报「仍缺 soundfile」，实际 import 正常）。
+function venvPkgPresent(name, pkg) {
+  const sp = venvSpOf(name);
+  try {
+    if (existsSync(path.join(sp, pkg)) && statSync(path.join(sp, pkg)).isDirectory()) return true;
+    if (existsSync(path.join(sp, pkg + '.py'))) return true;
+    return readdirSync(sp).some((x) => x.startsWith(pkg + '-') && x.endsWith('.dist-info'));
+  } catch { return false; }
+}
+// ---------- 035 阶段：N 卡机器上 torch 是否 CPU 版（无 CUDA 加速）→ 引导升级 ----------
+// 本机是否有 NVIDIA GPU：nvidia-smi 可执行即视为有（模块加载时探测一次，缓存）
+const HAS_NVIDIA = (() => {
+  try { execSync(IS_WIN ? 'where nvidia-smi' : 'which nvidia-smi', { stdio: 'ignore' }); return true; } catch { return false; }
+})();
+// NVIDIA 驱动版本（如 "616.56"）：用于选合适的 PyTorch CUDA wheel（cu121/cu124/cu126/cu128）
+const NVIDIA_DRIVER = (() => {
+  if (!HAS_NVIDIA) return null;
+  try {
+    const out = execSync('nvidia-smi --query-gpu=driver_version --format=csv,noheader', { encoding: 'utf8' }).trim().split('\n')[0];
+    return /^\d+(\.\d+)?/.test(out) ? out : null;
+  } catch { return null; }
+})();
+// ✅ 035 平台原则：不能写死 cu 版本——按驱动选 cu 目录（Win/CUDA 门槛）：
+//   cu128 ← 驱动 ≥ 570；cu126 ← ≥ 560；cu124 ← ≥ 550；更老 → null（提示升级驱动）
+function torchCuDirForDriver(driverVer) {
+  const v = parseFloat(String(driverVer || '0'));
+  if (v >= 570) return 'cu128';
+  if (v >= 560) return 'cu126';
+  if (v >= 550) return 'cu124';
+  return null;
+}
+// PyTorch wheel 镜像 base（每个都是 PEP 503 目录列表，可直接拼文件直链下载）：
+//   阿里云 pytorch-wheels（国内快）→ 清华 pytorch-wheels → 官方
+const TORCH_WHEEL_MIRRORS = [
+  { name: 'aliyun', base: 'https://mirrors.aliyun.com/pytorch-wheels', layout: 'flat' },
+  { name: 'tsinghua', base: 'https://mirrors.tuna.tsinghua.edu.cn/pytorch-wheels', layout: 'flat' },
+  { name: 'official', base: 'https://download.pytorch.org/whl', layout: 'simple' },
+];
+// ✅ 035 实测：阿里云/清华 pytorch-wheels 是**平铺目录**（/cuXXX/xxx.whl，无 torch/ 子目录），
+// 官方是 PEP 503（/cuXXX/torch/xxx.whl）。layout 决定 URL 拼法——
+// 之前统一按官方结构拼 → 阿里云/清华全 404，这就是"镜像失败而且不报错"的真相（原因被我 catch 吞了，已修：全部打日志）。
+// 目录页文本抓取（Node fetch；超时保护）
+async function fetchText(url, timeoutMs = 20000) {
+  const r = await fetch(url, { signal: AbortSignal.timeout(timeoutMs), redirect: 'follow' });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.text();
+}
+// 从某镜像目录页解析 pkg（torch/torchaudio）在 cuXXX 下最新 cp311 win_amd64 wheel
+// 返回 { name, url, bytes, mirror, version } 或 null；不抛错（失败 = 该镜像无此包/不可达）
+async function probeWheelOnMirror(m, cuDir, pkg, log) {
+  const dirUrl = m.layout === 'simple' ? `${m.base}/${cuDir}/${pkg}/` : `${m.base}/${cuDir}/`;
+  try {
+    const html = await fetchText(dirUrl);
+    // ⚠️ 阿里云/清华页面里 wheel 名的 "+" 被编码成 HTML 实体 &#43;（实测）——必须兼容三种：&#43; / %2B / +
+    const re = new RegExp(`${pkg}-(\\d+\\.\\d+\\.\\d+)(?:&#43;|%2B|\\+)${cuDir}-cp311-cp311-win_amd64\\.whl`, 'g');
+    const versions = [];
+    let mm;
+    while ((mm = re.exec(html))) versions.push(mm[1]);
+    if (!versions.length) return null;
+    versions.sort((a, b) => {
+      const pa = a.split('.').map(Number), pb = b.split('.').map(Number);
+      for (let i = 0; i < 3; i++) if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0);
+      return 0;
+    });
+    const ver = versions[versions.length - 1];
+    const name = `${pkg}-${ver}%2B${cuDir}-cp311-cp311-win_amd64.whl`;
+    const url = m.layout === 'simple' ? `${m.base}/${cuDir}/${pkg}/${name}` : `${m.base}/${cuDir}/${name}`;
+    let bytes = 0;
+    try {
+      const hr = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(15000), redirect: 'follow' });
+      bytes = Number(hr.headers.get('content-length') || 0);
+    } catch {}
+    if (log) log(`镜像探测：${m.name} ${cuDir} ${pkg} → v${ver}（${fmtMB(bytes)}）`);
+    return { name, url, bytes, mirror: m.name, version: ver };
+  } catch (e) {
+    if (log) log(`镜像探测 ${m.name} ${pkg} 失败：${String((e && e.message) || e)}`);
+    return null;
+  }
+}
+// torch + torchaudio 两个包的完整候选（各镜像都探测，收集成功项）
+async function resolveTorchWheels(cuDir, log) {
+  const out = { torch: { candidates: [] }, torchaudio: { candidates: [] } };
+  for (const pkg of ['torch', 'torchaudio']) {
+    for (const m of TORCH_WHEEL_MIRRORS) {
+      const hit = await probeWheelOnMirror(m, cuDir, pkg, log);
+      if (hit) out[pkg].candidates.push(hit);
+    }
+  }
+  return out;
+}
+// CUDA torch 重装源列表（兼容旧引用：uv pip --index-url 用；但新版走 downloadOneFile 直下 wheel）
+function torchIndexList() {
+  if (process.env.OPENSOUND_TORCH_INDEX) return [process.env.OPENSOUND_TORCH_INDEX];
+  const cu = torchCuDirForDriver(NVIDIA_DRIVER);
+  if (!cu) return [];
+  return TORCH_WHEEL_MIRRORS.map((m) => `${m.base}/${cu}`);
+}
+// venv 内 torch 是否为 CPU 版：site-packages 里 torch-*.dist-info 目录名
+//   +cu126/+cu128 等 = CUDA 版；纯版本号或 +cpu = CPU 版（PyPI 默认在 Win 无 CUDA）
+function torchBuildTag(venvName) {
+  const sp = venvSpOf(venvName);
+  try {
+    const d = readdirSync(sp).find((x) => /^torch-\d/.test(x));
+    if (!d) return null;
+    const m = /^torch-(.+?)(?:\.dist-info)?$/.exec(d);
+    return m ? m[1] : null;
+  } catch { return null; }
+}
+function torchIsCpuOnly(venvName) {
+  const tag = torchBuildTag(venvName);
+  if (!tag) return false;
+  return !/[+]cu\d/.test(tag); // 无 +cuXXX 后缀 → CPU 版
+}
+// 引擎 venv 安装器工厂：{ name, pkgs?, lockRel, keyPkg, label, estGB }
+//  - 未确认大流量 → 抛 BIG_DOWNLOAD_CONFIRM 给前端二次确认（带 confirm=1 重试）
+//  - uv 缺失 → 明确提示先装全局 Python 基础（不静默）
+//  - 2026-09-05 语义重构（用户拍板，000-plan-2 变更记录）：**安装即选择 torch 口味**——opts.torch：
+//      auto（默认）= 本机有 N 卡 → 装 CUDA 版，无 → CPU 版；cuda = 显式要求 CUDA（无 N 卡 → 报错）；
+//      cpu = 显式 CPU 版。不再需要"先装 CPU 再点升级"两步：N 卡首次安装装完 venv 后**同一请求内**直接换装 CUDA。
+//    已装口味与选择不符时 = 换装（CPU→CUDA 走 wheel 链；CUDA→CPU 走 PyPI 重装），模型文件不受影响。
+function uvVenvInstaller({ name, pkgs, lockRel, keyPkg, label, estGB }) {
+  return async (ctx, opts = {}) => {
+    const ready = venvKeyPkgOk(name, keyPkg);
+    const tag = torchBuildTag(name);                     // '2.x.x+cpu' / '2.x.x+cu128' / null（未装/损坏）
+    const isCuda = !!(tag && /[+]cu\d/.test(tag));
+    const choice = String(opts.torch || 'auto').toLowerCase();
+    const hasGpu = HAS_NVIDIA;
+    const wantCuda = choice === 'cpu' ? false : hasGpu; // auto/cuda：有 N 卡才走 CUDA（cuda 且无 N 卡回落 CPU 并提示见下）
+    if (choice === 'cuda' && !hasGpu) {
+      ctx.nd({ type: 'log', message: `${label}：本机未检测到 NVIDIA 显卡，忽略「GPU 版」选择，安装 CPU 版。` });
+    }
+    // 已就绪且口味一致 → 完成；口味不符 → 换装
+    if (ready) {
+      if (wantCuda && !isCuda) {
+        // CPU → CUDA 换装（wheel 链：停引擎 → 缓存/下载 cu wheel → 本地安装 → 校验 +cu）
+        await swapTorchFlavor(name, label, ctx, opts, { toCuda: true, curTag: tag });
+        return;
+      }
+      if (!wantCuda && isCuda) {
+        // CUDA → CPU 换装（罕见：用户显式选 CPU 版）
+        await swapTorchFlavor(name, label, ctx, opts, { toCuda: false, curTag: tag });
+        return;
+      }
+      ctx.nd({ type: 'log', message: `${label} 引擎环境已就绪 ✓（${name}，torch ${tag || '?'}）` });
+      ctx.nd({ type: 'done', message: '环境就绪' });
+      return;
+    }
+    // ---- 首次安装（venv 缺失/不完整）----
+    ctx.nd({ type: 'log', message: `${label} 缺引擎环境（${name}）→ 开始检测/安装…` });
+    if (!existsSync(UV_EXE)) {
+      throw new Error('未安装受管 Python 基础（uv）。请先在设置页/引导条点「安装 Python 基础」（uv + CPython 3.11，约 100MB），再回来装引擎环境。');
+    }
+    const totalEst = estGB ? `（约 ${estGB}GB，含 torch 等大依赖）` : '';
+    if (estGB && !opts.confirmBigDownload) {
+      ctx.nd({ type: 'log', message: `${label} 需安装引擎依赖${totalEst}，等二次确认…` });
+      throw new Error(`BIG_DOWNLOAD_CONFIRM:${estGB}GB:${name}`);
+    }
+    ctx.nd({ type: 'log', message: `已确认，创建 ${name}（uv venv --python 3.11 --clear）…` });
+    await runCmdWithEnv(UV_EXE, ['venv', '--python', '3.11', '--clear', venvDirOf(name)],
+      { UV_PYTHON_INSTALL_DIR: UV_PY_HOME, UV_INDEX_URL: UV_INDEX })(ctx);
+    ctx.nd({ type: 'log', message: `venv 创建完成，安装 ${name} 依赖${totalEst}（pip 走镜像 ${UV_INDEX}）…` });
+    const pipArgs = lockRel
+      ? ['pip', 'install', '--python', venvPyOf(name), '-r', path.join(__dirname, lockRel)]
+      : ['pip', 'install', '--python', venvPyOf(name), ...pkgs];
+    await runCmdWithEnv(UV_EXE, pipArgs,
+      { UV_PYTHON_INSTALL_DIR: UV_PY_HOME, UV_INDEX_URL: UV_INDEX })(ctx);
+    if (!venvKeyPkgOk(name, keyPkg)) {
+      throw new Error(`${label} 依赖安装后仍未就绪（${name} 缺 ${keyPkg}），查看上方日志`);
+    }
+    // 2026-09-05：安装即选择——N 卡（wantCuda）首装后 torch 是 CPU（清华源）→ 同一请求内直接换装 CUDA，
+    // 不再要求用户"装完再点一次升级"；纯 CPU 机器不会走到这里。
+    if (wantCuda && torchIsCpuOnly(name)) {
+      await swapTorchFlavor(name, label, ctx, opts, { toCuda: true, curTag: torchBuildTag(name) });
+      return;
+    }
+    ctx.nd({ type: 'log', message: `${label} 引擎环境就绪 ✓（${name}${wantCuda ? '' : ' · CPU 版'}）` });
+    ctx.nd({ type: 'done', message: '环境就绪，重启服务后生效' });
+  };
+}
+
+// ---- 2026-09-05：torch 口味换装共享执行体（uvVenvInstaller 与 cosyvoice 安装器共用）----
+// toCuda=true：CPU→CUDA（缓存 wheel 复用优先 → 无缓存二次确认 2.5GB → 镜像探测下载 → 本地安装 → 校验 +cu）
+// toCuda=false：CUDA→CPU（PyPI 重装 torch/torchaudio，--reinstall-package 防坑 N 秒跳）
+async function swapTorchFlavor(venvName, label, ctx, opts, { toCuda, curTag }) {
+  if (!toCuda) {
+    // CUDA → CPU：uv pip 从 PyPI 镜像重装 CPU torch/torchaudio（--reinstall-package 真重下，坑 N）
+    ctx.nd({ type: 'log', message: `${label} 当前为 CUDA 版 torch（${curTag || '?'}），按选择换装 CPU 版（PyPI 镜像重装）…` });
+    const ENG_PORTS = [8001, 8002, 8003];
+    await stopEnginesOnPorts(ENG_PORTS, ctx);
+    await runCmdWithEnv(UV_EXE, ['pip', 'install', '--python', venvPyOf(venvName),
+      '--reinstall-package', 'torch', '--reinstall-package', 'torchaudio', 'torch', 'torchaudio'],
+      { UV_PYTHON_INSTALL_DIR: UV_PY_HOME, UV_INDEX_URL: UV_INDEX })(ctx);
+    const t2 = torchBuildTag(venvName);
+    if (t2 && /[+]cu\d/.test(t2)) throw new Error(`${label} torch 换装 CPU 后仍为 CUDA 版（${t2}），查看上方日志`);
+    ctx.nd({ type: 'log', message: `${label} torch 已换装为 CPU 版 ✓（${t2 || '?'}）` });
+    ctx.nd({ type: 'done', message: 'CPU 版 torch 就绪，重启服务后生效' });
+    return;
+  }
+  // CPU → CUDA
+  ctx.nd({ type: 'log', message: `${label} 当前 torch 为 CPU 版（${curTag || '未知'}），按选择换装 CUDA 版（GPU 加速）…` });
+  const cu = torchCuDirForDriver(NVIDIA_DRIVER);
+  if (!cu) {
+    throw new Error(`${label}：本机 NVIDIA 驱动（${NVIDIA_DRIVER || '未知'}）过旧，无法安装新版 CUDA torch。请先升级显卡驱动（NVIDIA App/官网，560+ 可跑 cu126），或改选「CPU 版」安装。`);
+  }
+  // ⚠️ 坑 P：torch 换装时引擎服务占用 site-packages（_C.pyd 锁）→ 自动停 8001/8002/8003 + 按 venv 命令行清残留 python
+  const ENG_PORTS = [8001, 8002, 8003];
+  await stopEnginesOnPorts(ENG_PORTS, ctx);
+  try {
+    const ps = spawnSync('powershell', ['-NoProfile', '-Command',
+      `Get-CimInstance Win32_Process -Filter "name='python.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match '${venvName}|tts-server|sensevoice-server' } | ForEach-Object { $_.ProcessId }`],
+      { encoding: 'utf8', timeout: 15000 });
+    const killed = [];
+    for (const tok of String(ps.stdout || '').split(/\s+/)) {
+      const pid = Number(tok);
+      if (pid > 0) { try { execSync(`taskkill /PID ${pid} /T /F`, { stdio: ['ignore', 'pipe', 'ignore'] }); killed.push(pid); } catch {} }
+    }
+    if (killed.length) {
+      ctx.nd({ type: 'log', message: `✓ 已按 venv 进程清理停止 ${killed.length} 个 python（PID ${killed.join('、')}）` });
+      await new Promise((r) => setTimeout(r, 1200));
+    }
+  } catch (e) { ctx.nd({ type: 'log', message: `⚠️ venv 进程枚举跳过：${String((e && e.message) || e)}` }); }
+  // 缓存复用优先（cache/torch-wheels 已有 cuXXX cp311 win wheel → 零下载秒装）
+  const wheelDir = path.join(DATA_DIR, 'cache', 'torch-wheels');
+  const cacheHit = (pkg) => {
+    try {
+      const f = readdirSync(wheelDir).find((x) => new RegExp(`^${pkg}-\\d.*\\+${cu}-cp311-cp311-win_amd64\\.whl$`).test(x));
+      return f ? path.join(wheelDir, f) : null;
+    } catch { return null; }
+  };
+  let torchWheel = cacheHit('torch');
+  let audioWheel = cacheHit('torchaudio');
+  if (torchWheel && audioWheel) {
+    ctx.nd({ type: 'log', message: `复用缓存 wheel：${path.basename(torchWheel)} + ${path.basename(audioWheel)} → 本地安装（零下载，秒级）…` });
+  } else {
+    if (!opts.confirmBigDownload) {
+      ctx.nd({ type: 'log', message: `${label} 需下载 CUDA torch（${cu}，约 2.5GB），等二次确认…` });
+      throw new Error(`BIG_DOWNLOAD_CONFIRM:2.5GB:${venvName}-torch-cuda`);
+    }
+    ctx.nd({ type: 'log', message: `探测 PyTorch ${cu} wheel 镜像（按真实目录结构逐个探测）…` });
+    const wheels = await resolveTorchWheels(cu, (s) => ctx.nd({ type: 'log', message: s }));
+    if (!wheels.torch.candidates.length || !wheels.torchaudio.candidates.length) {
+      const missing = [];
+      if (!wheels.torch.candidates.length) missing.push('torch');
+      if (!wheels.torchaudio.candidates.length) missing.push('torchaudio');
+      throw new Error(`${label}：无法在任何镜像（阿里云/清华/官方）找到 ${cu} 的 cp311 win_amd64 wheel（缺 ${missing.join('、')}）。查看上方日志或设 OPENSOUND_TORCH_INDEX 手动指定源。`);
+    }
+    mkdirSync(wheelDir, { recursive: true });
+    for (const pkg of ['torch', 'torchaudio']) {
+      const cand = wheels[pkg].candidates;
+      const local = path.join(wheelDir, cand[0].name.replace(/%2B/g, '+'));
+      const rel = `cache/torch-wheels/${cand[0].name.replace(/%2B/g, '+')}`;
+      if (existsSync(local) && statSync(local).size > 0) {
+        ctx.nd({ type: 'log', message: `复用已下载 wheel：${path.basename(local)}` });
+      } else {
+        ctx.nd({ type: 'log', message: `开始下载 ${pkg} wheel（${cand.map((c) => c.mirror).join(', ')}，约 ${fmtMB(cand[0].bytes)}）…` });
+        await downloadOneFile({ file: rel, mirrors: cand.map((c) => ({ name: c.mirror, url: c.url })), bytes: cand[0].bytes }, ctx, opts);
+        ctx.nd({ type: 'log', message: `✓ ${cand[0].name.replace(/%2B/g, '+')} 就位（${fmtMB(statSync(resolveData(rel)).size)}）` });
+      }
+    }
+    torchWheel = cacheHit('torch');
+    audioWheel = cacheHit('torchaudio');
+    if (!torchWheel || !audioWheel) throw new Error(`${label} wheel 下载后仍未就位，查看上方日志`);
+  }
+  ctx.nd({ type: 'log', message: `wheel 就位，本地安装到 ${venvName}（uv pip install 本地文件）…` });
+  await runCmdWithEnv(UV_EXE, ['pip', 'install', '--python', venvPyOf(venvName), torchWheel, audioWheel],
+    { UV_PYTHON_INSTALL_DIR: UV_PY_HOME })(ctx);
+  const after = torchBuildTag(venvName);
+  if (!after || /[+]cu\d/.test(after) === false) {
+    throw new Error(`${label} torch 换装后仍非 CUDA 版（${after || '未知'}）。排查：wheel 与驱动 ${cu} 匹配、uv 本地安装报错（看上方日志）；可设 OPENSOUND_TORCH_INDEX 手动指定源。`);
+  }
+  ctx.nd({ type: 'log', message: `${label} torch 已换装为 CUDA 版 ✓（${after}），重启服务后 GPU 加速生效` });
+  ctx.nd({ type: 'done', message: 'GPU（CUDA）版 torch 就绪，重启服务后生效' });
+}
+
+// 停占用端口（8001/8002/8003）的引擎服务（坑 P：torch 换装前必须释放 .pyd 文件锁）
+async function stopEnginesOnPorts(ports, ctx) {
+  const pids = [];
+  for (const p of ports) {
+    try {
+      const out = execSync(IS_WIN
+        ? `netstat -ano -p tcp | findstr ":${p}" | findstr LISTENING`
+        : `lsof -ti tcp:${p} -sTCP:LISTEN`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+      const pid = String(out).split(/\s+/).filter(Boolean).pop();
+      if (pid && /^\d+$/.test(pid)) pids.push({ port: p, pid: Number(pid) });
+    } catch { /* 端口未占用 */ }
+  }
+  if (pids.length) {
+    ctx.nd({ type: 'log', message: `检测到引擎服务占用 venv（${pids.map((e) => `:${e.port} PID ${e.pid}`).join('、')}）→ 换装前自动停止，完成后请「重启服务」重新拉起…` });
+    for (const e of pids) {
+      try {
+        if (IS_WIN) execSync(`taskkill /PID ${e.pid} /F`, { stdio: ['ignore', 'pipe', 'ignore'] });
+        else process.kill(e.pid, 'SIGTERM');
+        ctx.nd({ type: 'log', message: `✓ 已停止端口 ${e.port}（PID ${e.pid}）` });
+      } catch (err) {
+        ctx.nd({ type: 'log', message: `⚠️ 停止端口 ${e.port}（PID ${e.pid}）失败：${String((err && err.message) || err)}（可手动重启 App 释放）` });
+      }
+    }
+    await new Promise((r) => setTimeout(r, 1200));
+  }
+}
+
+// qwen3 二段式安装器：① 引擎 venv（uvVenvInstaller，含大流量二次确认）
+// ② 模型文件 —— hf hub 快照缓存（models/hf/hub/models--Qwen--Qwen3-TTS-12Hz-0.6B-CustomVoice），
+//    由 .venv-qwen3 内 huggingface_hub snapshot_download 拉取。
+//    下载源原则（2026-08-31）：官方 huggingface.co 优先，失败自动切 hf-mirror 重试；
+//    opts.mirror（用户自选源）→ 只用该端点。注：huggingface_hub 无内置低速检测，靠"失败切换"兜底。
+//    此前模型只能靠"重启服务时 qwen3-tts-server.py 顺带拉取"，点「补齐」会静默 done（用户实测"晃一下没反应"）。
+function qwen3ModelInstaller(venvInst) {
+  return async (ctx, opts = {}) => {
+    await venvInst(ctx, opts); // ① 引擎环境（未就绪时走 uv 安装，含 2.5GB 二次确认）
+    const mf = ENGINE_MANIFESTS.find((x) => x.id === 'qwen3');
+    const missing = (mf?.checks || []).map(checkEntry).filter(Boolean);
+    if (!missing.length) {
+      ctx.nd({ type: 'log', message: 'Qwen3 模型文件完整 ✓（models/hf/hub/）' });
+      ctx.nd({ type: 'done', message: '引擎环境与模型均已就绪' });
+      return;
+    }
+    ctx.nd({ type: 'log', message: `Qwen3 模型文件缺失 ${missing.length} 项（约 2.3GB，hf 快照缓存）→ 需二次确认下载…` });
+    if (!opts.confirmBigDownload) {
+      throw new Error('BIG_DOWNLOAD_CONFIRM:2.3GB:qwen3-model');
+    }
+    const py = venvPyOf('.venv-qwen3');
+    if (!existsSync(py)) throw new Error('.venv-qwen3 python 不存在，请先完成引擎环境安装');
+    // 端点顺序：用户指定 > 环境变量 > 官方 huggingface.co → hf-mirror
+    const MIRROR_ENDPOINT = { huggingface: 'https://huggingface.co', 'hf-mirror': 'https://hf-mirror.com' };
+    const endpoints = opts.mirror
+      ? [MIRROR_ENDPOINT[opts.mirror]].filter(Boolean)
+      : [process.env.HF_ENDPOINT || 'https://huggingface.co', 'https://hf-mirror.com'];
+    ctx.nd({ type: 'log', message: `已确认，用 huggingface_hub 拉取模型（端点：${endpoints.join(' → ')}，写入 models/hf/hub/；失败自动切换）…` });
+    let lastErr = null;
+    for (const ep of endpoints) {
+      ctx.nd({ type: 'log', message: `huggingface_hub ← ${ep} …` });
+      try {
+        // 2026-09-05：watchDir 监控 hf hub 快照目录实时进度；官方直连连接挂起/无进展 15s/30s 自动判死 →
+        // 进程非 0 退出 → 捕获 → 切下一端点（此前无判据，官方被墙时永久挂起无输出）
+        const hubRepo = path.join(CACHE_DIR, 'hf', 'hub', 'models--Qwen--Qwen3-TTS-12Hz-0.6B-CustomVoice');
+        await runCmdWithEnv(py, ['-c',
+          "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice'))"],
+          { HF_HOME: path.join(CACHE_DIR, 'hf'), HF_ENDPOINT: ep }, __dirname, {
+            watchDir: hubRepo,
+            progressTotal: Math.round((mf.profile?.diskGB || 2.3) * 1024 * 1024 * 1024),
+          })(ctx);
+        lastErr = null;
+        break;
+      } catch (e) {
+        lastErr = e;
+        ctx.nd({ type: 'log', message: `端点 ${ep} 失败（${e.message.split('\n')[0]}）${endpoints.length > 1 ? '，切换下一端点…' : ''}` });
+      }
+    }
+    if (lastErr && endpoints.length > 1) {
+      ctx.nd({ type: 'log', message: '所有端点均失败：' + lastErr.message.split('\n')[0] });
+    }
+    const after = (mf?.checks || []).map(checkEntry).filter(Boolean);
+    if (after.length) throw new Error('模型拉取后仍未就绪：' + after.map((r) => r.path).join('、') + '，查看上方日志');
+    ctx.nd({ type: 'log', message: 'Qwen3 模型就绪 ✓，重启服务后引擎可用' });
+    ctx.nd({ type: 'done', message: '模型就绪，重启服务后生效' });
+  };
+}
+
+// 055 §三 第3步：SenseVoice 原始版模型三件套文件清单（字节与 download-all-models.ps1 完全一致，ModelScope 实录）。
+// 镜像：modelscope 首选（ps1 实测可用、支持 Range 206 续传）；sensevoice-original 主模型组另加 hf-mirror 兜底
+// （HF FunAudioLLM/SenseVoiceSmall 官方镜像仓，字节与 ModelScope 一致；fsmn-vad/punc 未核 HF 镜像 → 仅 modelscope）。
+// ⚠️ 新增/改名文件时须同步 engines/sensevoice-original.json 的 checks（engineReadiness 与安装器共用）。
+const SENSEVOICE_ORIGINAL_FILES = [
+  // ---- 主模型（ModelScope iic/SenseVoiceSmall）----
+  { file: 'models/sensevoice-original/model.pt', bytes: 936291369, mirrors: [
+    { name: 'modelscope', url: 'https://modelscope.cn/models/iic/SenseVoiceSmall/resolve/master/model.pt' },
+    { name: 'hf-mirror', url: 'https://hf-mirror.com/FunAudioLLM/SenseVoiceSmall/resolve/main/model.pt' },
+  ] },
+  { file: 'models/sensevoice-original/config.yaml', bytes: 1855, mirrors: [
+    { name: 'modelscope', url: 'https://modelscope.cn/models/iic/SenseVoiceSmall/resolve/master/config.yaml' },
+    { name: 'hf-mirror', url: 'https://hf-mirror.com/FunAudioLLM/SenseVoiceSmall/resolve/main/config.yaml' },
+  ] },
+  { file: 'models/sensevoice-original/am.mvn', bytes: 11203, mirrors: [
+    { name: 'modelscope', url: 'https://modelscope.cn/models/iic/SenseVoiceSmall/resolve/master/am.mvn' },
+    { name: 'hf-mirror', url: 'https://hf-mirror.com/FunAudioLLM/SenseVoiceSmall/resolve/main/am.mvn' },
+  ] },
+  { file: 'models/sensevoice-original/chn_jpn_yue_eng_ko_spectok.bpe.model', bytes: 377341, mirrors: [
+    { name: 'modelscope', url: 'https://modelscope.cn/models/iic/SenseVoiceSmall/resolve/master/chn_jpn_yue_eng_ko_spectok.bpe.model' },
+    { name: 'hf-mirror', url: 'https://hf-mirror.com/FunAudioLLM/SenseVoiceSmall/resolve/main/chn_jpn_yue_eng_ko_spectok.bpe.model' },
+  ] },
+  { file: 'models/sensevoice-original/tokens.json', bytes: 352064, mirrors: [
+    { name: 'modelscope', url: 'https://modelscope.cn/models/iic/SenseVoiceSmall/resolve/master/tokens.json' },
+    { name: 'hf-mirror', url: 'https://hf-mirror.com/FunAudioLLM/SenseVoiceSmall/resolve/main/tokens.json' },
+  ] },
+  // ---- VAD（ModelScope iic/speech_fsmn_vad_zh-cn-16k-common-pytorch）----
+  { file: 'models/fsmn-vad/model.pt', bytes: 1721366, mirrors: [
+    { name: 'modelscope', url: 'https://modelscope.cn/models/iic/speech_fsmn_vad_zh-cn-16k-common-pytorch/resolve/master/model.pt' },
+  ] },
+  { file: 'models/fsmn-vad/config.yaml', bytes: 1215, mirrors: [
+    { name: 'modelscope', url: 'https://modelscope.cn/models/iic/speech_fsmn_vad_zh-cn-16k-common-pytorch/resolve/master/config.yaml' },
+  ] },
+  { file: 'models/fsmn-vad/am.mvn', bytes: 8040, mirrors: [
+    { name: 'modelscope', url: 'https://modelscope.cn/models/iic/speech_fsmn_vad_zh-cn-16k-common-pytorch/resolve/master/am.mvn' },
+  ] },
+  { file: 'models/fsmn-vad/configuration.json', bytes: 365, mirrors: [
+    { name: 'modelscope', url: 'https://modelscope.cn/models/iic/speech_fsmn_vad_zh-cn-16k-common-pytorch/resolve/master/configuration.json' },
+  ] },
+  // ---- 标点（ModelScope iic/punc_ct-transformer_cn-en-common-vocab471067-large）----
+  { file: 'models/punc-cn-en/model.pt', bytes: 1125507622, mirrors: [
+    { name: 'modelscope', url: 'https://modelscope.cn/models/iic/punc_ct-transformer_cn-en-common-vocab471067-large/resolve/master/model.pt' },
+  ] },
+  { file: 'models/punc-cn-en/config.yaml', bytes: 812, mirrors: [
+    { name: 'modelscope', url: 'https://modelscope.cn/models/iic/punc_ct-transformer_cn-en-common-vocab471067-large/resolve/master/config.yaml' },
+  ] },
+  { file: 'models/punc-cn-en/configuration.json', bytes: 450, mirrors: [
+    { name: 'modelscope', url: 'https://modelscope.cn/models/iic/punc_ct-transformer_cn-en-common-vocab471067-large/resolve/master/configuration.json' },
+  ] },
+  { file: 'models/punc-cn-en/tokens.json', bytes: 8280697, mirrors: [
+    { name: 'modelscope', url: 'https://modelscope.cn/models/iic/punc_ct-transformer_cn-en-common-vocab471067-large/resolve/master/tokens.json' },
+  ] },
+  { file: 'models/punc-cn-en/jieba.c.dict', bytes: 41536866, mirrors: [
+    { name: 'modelscope', url: 'https://modelscope.cn/models/iic/punc_ct-transformer_cn-en-common-vocab471067-large/resolve/master/jieba.c.dict' },
+  ] },
+  { file: 'models/punc-cn-en/jieba_usr_dict', bytes: 11280857, mirrors: [
+    { name: 'modelscope', url: 'https://modelscope.cn/models/iic/punc_ct-transformer_cn-en-common-vocab471067-large/resolve/master/jieba_usr_dict' },
+  ] },
+];
+
+// 055：SenseVoice 原始版二段式安装器——① 引擎 venv（uvVenvInstaller，含 2.5GB 二次确认）；
+// ② 模型权重三件套（约 2.1GB，downloadOneFile 多镜像 + .part 续传 + 逐文件字节校验，大流量二次确认）。
+// 此前只有 venv 安装器、模型文件无安装器（036 §7.1 待办「模型 900MB 的安装器要接上」）——
+// 装完 venv 后 funasr AutoModel 无权重可加载 → 8002 起不来，本次补齐模型下载闭环。
+function sensevoiceOriginalInstaller(venvInst) {
+  return async (ctx, opts = {}) => {
+    await venvInst(ctx, opts); // ① 引擎环境（未就绪时 uv 安装，含大流量二次确认；就绪则秒过）
+    const mf = ENGINE_MANIFESTS.find((x) => x.id === 'sensevoice-original');
+    const missing = (mf?.checks || []).map(checkEntry).filter(Boolean);
+    if (!missing.length) {
+      ctx.nd({ type: 'log', message: 'SenseVoice 原始版模型文件完整 ✓（sensevoice-original + fsmn-vad + punc-cn-en）' });
+      ctx.nd({ type: 'done', message: '引擎环境与模型均已就绪' });
+      return;
+    }
+    const totalBytes = missing.reduce((s, r) => s + (r.expectBytes || 0), 0);
+    const gb = (totalBytes / 1e9).toFixed(1);
+    ctx.nd({ type: 'log', message: `SenseVoice 原始版模型缺失 ${missing.length} 项（约 ${gb}GB，主模型+VAD+标点）→ 需二次确认下载…` });
+    if (!opts.confirmBigDownload) {
+      throw new Error(`BIG_DOWNLOAD_CONFIRM:${gb}GB:sensevoice-original-model`);
+    }
+    ctx.nd({ type: 'log', message: '已确认，开始下载模型（modelscope 首选 + hf-mirror 兜底，断点续传）…' });
+    for (const spec of SENSEVOICE_ORIGINAL_FILES) {
+      const t = resolveData(spec.file);
+      if (existsSync(t) && statSync(t).size === spec.bytes) {
+        ctx.nd({ type: 'log', message: `已存在且完整，跳过：${spec.file}` });
+        continue;
+      }
+      await downloadOneFile(spec, ctx, opts);
+      const got = statSync(t).size;
+      if (got !== spec.bytes) {
+        throw new Error(`大小不符：${spec.file} 期望 ${spec.bytes} / 实际 ${got}。已保留 .part，可重试或删除后重新安装。`);
+      }
+      ctx.nd({ type: 'log', message: `✓ 字节数校验通过：${spec.file}（${fmtMB(got)}）` });
+    }
+    const after = (mf?.checks || []).map(checkEntry).filter(Boolean);
+    if (after.length) {
+      throw new Error('模型下载后仍未就绪：' + after.map((r) => r.path).join('、') + '，查看上方日志');
+    }
+    ctx.nd({ type: 'log', message: 'SenseVoice 原始版模型就绪 ✓，重启服务后引擎可用' });
+    ctx.nd({ type: 'done', message: '模型就绪，重启服务后生效' });
+  };
+}
+
+// ─────────────────────────────────────────────────────────────
+// 【新增模型接入约定 · 必读】（S5 起，本区域顶部常驻）
+// 未来在 INSTALLERS 里注册任何新模型/引擎时，都必须做到"开箱即用"：
+//   1. 用户点击「安装」→ 自动下载权重文件等全部必要文件，
+//      下载完成即启用对应服务，不允许再要求用户手动去外网找文件放置；
+//   2. 大流量（约 >1GB）必须走二次确认：安装器首调检测到大流量缺失时
+//      抛 BIG_DOWNLOAD_CONFIRM:<大小>:<文件清单> 标记，前端弹确认框，
+//      用户同意后带 confirm=1 重试才真正下载（参照下方 cosyvoice-clone 的 S5 实现）；
+//   3. 下载一律复用 downloadOneFile：多镜像自动换源 + .part 断点续传 + 可取消；
+//   4. 下载完成后逐文件做字节数校验，并把体积/内存需求同步登记到
+//      engines/<engine>.json 与文档 000-device-vs-model.md；
+//   5. 确有无法自动化的例外（体积超大/合规限制），须在 UI 明示原因并保留手动兜底指引。
+// ─────────────────────────────────────────────────────────────
+const INSTALLERS = {
+  // 2026-08-31：脚本型安装器接收 --mirror（用户自选源）；默认自动 = 官方优先 + 失败/无进展/低速自动切换
+  kokoro: (ctx, opts = {}) => runDownload(process.execPath, ['download-kokoro.js', ...(opts.mirror ? ['--mirror', opts.mirror] : [])])(ctx),
+  sensevoice: (ctx, opts = {}) => runDownload(process.execPath, ['asr-server-download.js', ...(opts.mirror ? ['--mirror', opts.mirror] : [])])(ctx),
+  // 多档位 LLM：S2 起由 engines/llm-*.json 驱动（install.kind=url-multi，多镜像自动换源 + 字节数校验）
+  ...Object.fromEntries(
+    ENGINE_MANIFESTS.filter((mf) => mf.install && mf.install.kind === 'url-multi')
+      .map((mf) => [mf.id, manifestUrlMultiInstaller(mf)])
+  ),
+  // 034 阶段3：引擎 venv 安装走 uv（受管 CPython）；qwen3 模型文件此前仅靠重启服务顺带拉取，
+  // 点「补齐」静默 done → 现改为二段式：venv（uvVenvInstaller）+ 模型缺失走二次确认+huggingface_hub 拉取
+  qwen3: qwen3ModelInstaller(uvVenvInstaller({
+    name: '.venv-qwen3',
+    pkgs: ['qwen-tts', 'torch', 'torchaudio'],
+    keyPkg: 'qwen_tts',
+    label: 'Qwen3-TTS',
+    estGB: 2.5,
+  })),
+  // 034/055：sensevoice-original（funasr）二段式安装器：
+  // ① 引擎 venv（uvVenvInstaller：funasr/torch/torchaudio + 显式 numpy/soundfile —— 055 坑3/坑4：
+  //    035 实测 .venv-funasr 空壳缺 numpy → 8002 秒退 No module named 'numpy'；torchaudio 无后端 → 预装 soundfile）；
+  // ② 模型权重三件套（主模型 ~900MB + fsmn-vad + punc-cn-en，合计约 2.1GB，见 sensevoiceOriginalInstaller）。
+  'sensevoice-original': sensevoiceOriginalInstaller(uvVenvInstaller({
+    name: '.venv-funasr',
+    pkgs: ['funasr', 'torch', 'torchaudio', 'numpy', 'soundfile'],
+    keyPkg: 'funasr',
+    label: 'SenseVoice 原始版',
+    estGB: 2.5,
+  })),
+  // S10：Whisper 安装器改走 engines/whisper.json 的 url-multi（manifestUrlMultiInstaller 自动注册）——
+  // fp32 三件套（sherpa 官方导出）多镜像下载。此前 transformers.js 预下载脚本（download-whisper.js）已废弃。
+  // （此处不再显式注册 whisper，避免覆盖 json 驱动的 url-multi 安装器）
+  // CosyVoice3 克隆：双依赖检查——① 9GB 模型（005 手动预下载，缺失时不自动下，避免误触大流量）；
+  // ② CosyVoice 源码仓库（cosyvoice 包 + Matcha-TTS 子模块，运行时 import 必需），缺失则自动浅克隆补齐。
+  // 完成后若 8003 未监听，需托盘「重启服务」拉起（模型加载约数分钟）。
+  // S4：CosyVoice3 克隆 —— 全自举链（vendor 优先 → clone 兜底 → venv 自建 → 模型校验）
+  // ①② 源码：vendor/cosyvoice（随包分发的裁剪子集，见 VENDOR_COMMIT）；缺失则浅克隆进 vendor（兜底）
+  // ③ venv：.venv-cosyvoice/bin/python3 缺失 → 自动 python3 -m venv + pip install -r requirements-cosyvoice.lock
+  // ④ 模型：必需权重逐项校验（S4 源码甄别：llm.pt/flow.pt/hift.pt/speech_tokenizer_v3.onnx/campplus.onnx/yaml，
+  //    llm.rl.pt/.batch.onnx/fp32.onnx 为非必需，不校验不下载）
+  //    S5：缺失权重支持自动下载 —— 走 downloadOneFile 多镜像（hf-mirror→huggingface）+ .part 断点续传；
+  //        因属大流量（约 4.4GB），首次调用不带 opts.confirmBigDownload 时仅返回 BIG_DOWNLOAD_CONFIRM 标记，
+  //        由前端弹二次确认后带 confirm=1 重试才真正下载。
+  'cosyvoice-clone': async (ctx, opts = {}) => {
+    const modelDir = path.join(CACHE_DIR, 'cosyvoice', 'Fun-CosyVoice3-0.5B');
+    const vendorDir = path.join(__dirname, 'vendor', 'cosyvoice');
+    const srcDir = vendorDir;
+    // 必需权重：**动态清单**（2026-08-28 起，正确方式，铁律 13）——安装时从 ModelScope 整仓文件 API 拉取
+    // Path+Size（仓库变动自动跟随）；API 失败回退静态清单 CV_WEIGHTS（兜底）。
+    // 元数据/展示文件（.gitattributes / README.md / asset/*）跨镜像不同且非运行必需：不下载不校验。
+    const weightsManifest = await cosyVoiceManifest();
+    const keyFiles = Object.keys(weightsManifest);
+    // 2026-08-31 修复：缺失判断 = 不存在 **或 存在但大小不符**（与 engineReadiness 口径一致）——
+    // 此前只看 existsSync，损坏/中断的假文件会被"已存在"跳过 → 永远修不好（死循环）。
+    const missing = keyFiles.filter((f) => {
+      const p = path.join(modelDir, f);
+      if (!existsSync(p)) return true;
+      const expect = weightsManifest[f]?.bytes;
+      if (expect) {
+        try { if (statSync(p).size !== expect) return true; } catch { return true; }
+      }
+      return false;
+    });
+    if (missing.length) {
+      const totalBytes = missing.reduce((s, f) => s + (weightsManifest[f]?.bytes || 0), 0);
+      const gb = (totalBytes / 1e9).toFixed(1);
+      if (!opts.confirmBigDownload) {
+        ctx.nd({ type: 'log', message: `检测到缺失权重 ${missing.length} 项（动态清单，合计约 ${gb}GB）` });
+        ctx.nd({ type: 'log', message: `等待确认后自动下载；也可按 005 文档手动放置到: ${modelDir}` });
+        throw new Error(`BIG_DOWNLOAD_CONFIRM:${gb}GB:${missing.join(',')}`);
+      }
+      ctx.nd({ type: 'log', message: `已确认大流量下载（约 ${gb}GB），按动态清单拉取缺失 ${missing.length} 项…` });
+      for (const f of missing) {
+        await downloadOneFile(cvWeightSpec(f, weightsManifest[f]?.bytes), ctx, opts);
+        const got = statSync(path.join(modelDir, f)).size;
+        const expect = weightsManifest[f]?.bytes || 0;
+        if (expect && got !== expect) {
+          // 字节不符 = 失败而非警告（防"下了 2MB 却说 200MB 完成"）。先自动换第二镜像重下一次再校验，
+          // 仍不符才报错（保留 .part / 文件，App 内可重试，无需用户手动删文件）。
+          ctx.nd({ type: 'log', message: `⚠️ ${f} 大小不符（期望 ${expect} / 实际 ${got}）→ 自动换镜像重下一次…` });
+          try { unlinkSync(path.join(modelDir, f)); } catch {}
+          try { await downloadOneFile(cvWeightSpec(f, weightsManifest[f]?.bytes), ctx, { ...opts, mirror: 'hf-mirror' }); } catch (e) {
+            throw new Error(`${f} 换镜像重下失败：${String((e && e.message) || e)}`);
+          }
+          const got2 = statSync(path.join(modelDir, f)).size;
+          if (got2 !== expect) {
+            throw new Error(`${f} 大小不符（期望 ${expect} / 实际 ${got2}，已验证两个镜像）：文件可疑。已保留现场，可重试「检测/修复」。`);
+          }
+          ctx.nd({ type: 'log', message: `✓ ${f} 换镜像后就位（字节数校验通过 ${got2}）` });
+        } else {
+          ctx.nd({ type: 'log', message: `✓ ${f} 就位（字节数校验通过 ${got}）` });
+        }
+      }
+    } else {
+      const total = Object.values(weightsManifest).reduce((s, w) => s + (w.bytes || 0), 0);
+      ctx.nd({ type: 'log', message: `模型文件完整 ✓（动态清单 ${keyFiles.length} 项，${fmtMB(total)}）` });
+    }
+
+    // ① 源码：vendor 优先
+    if (!existsSync(path.join(srcDir, 'cosyvoice', 'cli', 'cosyvoice.py'))) {
+      // ② 兜底：浅克隆进 vendor（含 Matcha-TTS 子模块）
+      ctx.nd({ type: 'log', message: 'vendor 源码缺失 → git clone（浅克隆 + 子模块）进 vendor/cosyvoice …' });
+      mkdirSync(path.dirname(srcDir), { recursive: true });
+      await new Promise((resolve, reject) => {
+        const p = spawn('git', ['clone', '--depth', '1', '--recursive', '--shallow-submodules',
+          'https://github.com/FunAudioLLM/CosyVoice.git', srcDir],
+          { cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'] });
+        const onData = (chunk) => String(chunk).split('\n').filter(Boolean)
+          .forEach((line) => ctx.nd({ type: 'log', message: line }));
+        p.stdout.on('data', onData);
+        p.stderr.on('data', onData);
+        p.on('error', (e) => reject(new Error('无法启动 git：' + e.message)));
+        p.on('exit', (code) => code === 0
+          ? resolve()
+          : reject(new Error(`git clone 失败（退出码 ${code}）；可手动执行: git clone --depth 1 --recursive https://github.com/FunAudioLLM/CosyVoice.git ${srcDir}`)));
+      });
+      try { execSync('git -C ' + vendorDir + ' rev-parse HEAD > ' + path.join(vendorDir, 'VENDOR_COMMIT') + ' 2>/dev/null'); } catch {}
+      // 克隆的是整仓，顺手修剪到运行时最小集（与随包 vendoring 一致）
+      try {
+        const rmAbs = ['.git', 'third_party/Matcha-TTS/.git', 'third_party/Matcha-TTS/synthesis.ipynb', 'third_party/Matcha-TTS/scripts', 'third_party/Matcha-TTS/data'];
+        for (const r of rmAbs) execSync(`rm -rf "${path.join(vendorDir, r)}"`);
+      } catch {}
+      ctx.nd({ type: 'log', message: '源码就绪 ✓（vendored，见 VENDOR_COMMIT）' });
+    } else {
+      ctx.nd({ type: 'log', message: 'CosyVoice 源码已存在（vendor/cosyvoice）✓' });
+    }
+
+    // ③ venv 自建：缺失才装（含 torch，首次可能几分钟）；031 跨平台：Win 用 Scripts/python.exe。
+    // 034 阶段3：受管 venv 一律落数据目录 venvs/（uv 自举目标路径），与 uvVenvInstaller / venvKeyPkgOk /
+    // start-all venvPy 的就绪、启动口径完全一致。此前 cosyvoice 独有"代码目录 .venv-cosyvoice 历史回退"
+    // 候选：mac 上第一阶段残留的代码目录 venv 存在时，会把 venv 建到代码目录，而就绪检查只认数据目录 →
+    // 依赖明明装好（torch 已在）仍报"缺 torch"（2026-09-05 mac 实测）。代码目录旧 venv 属遗留，不再作为创建目标。
+    const venvDir = venvDirOf('.venv-cosyvoice');
+    const venvPy = venvPyOf('.venv-cosyvoice');
+    if (!venvKeyPkgOk('.venv-cosyvoice', 'torch')) {
+      // 034：优先 uv（受管 CPython）建引擎环境；uv 未装 → 明确提示先装全局 Python 基础
+      ctx.nd({ type: 'log', message: '.venv-cosyvoice 缺失/不完整 → 用 uv 创建并安装锁定依赖（含 torch，较大，首次约几分钟）…' });
+      if (!existsSync(UV_EXE)) {
+        throw new Error('未安装受管 Python 基础（uv）。请先在设置页/引导条点「安装 Python 基础」（uv + CPython 3.11），再回来装引擎环境。');
+      }
+      // venv 创建 + 锁文件依赖（torch 等大流量在这个分支里属于"已确认的引擎安装"，不再单独二次确认——
+      // cosyvoice 模型权重才是最大头，已在上面走 BIG_DOWNLOAD_CONFIRM）
+      await runCmdWithEnv(UV_EXE, ['venv', '--python', '3.11', '--clear', venvDir],
+        { UV_PYTHON_INSTALL_DIR: UV_PY_HOME, UV_INDEX_URL: UV_INDEX })(ctx);
+      ctx.nd({ type: 'log', message: 'venv 创建完成，pip 安装锁定依赖（requirements-cosyvoice.lock，镜像 ' + UV_INDEX + '）…' });
+      await runCmdWithEnv(UV_EXE, ['pip', 'install', '--python', venvPy, '-r', path.join(__dirname, 'requirements-cosyvoice.lock')],
+        { UV_PYTHON_INSTALL_DIR: UV_PY_HOME, UV_INDEX_URL: UV_INDEX })(ctx);
+      if (!venvKeyPkgOk('.venv-cosyvoice', 'torch')) {
+        throw new Error('.venv-cosyvoice 依赖安装后仍未就绪（缺 torch），查看上方日志');
+      }
+    }
+    // 2026-08-31 修复：运行时依赖查缺补漏从 else 分支提出来，**新建或已存在都统一执行**——
+    // 此前只在 venv 已存在时补（旧锁文件漏装，坑 I 同族：modelscope/onnxruntime/omegaconf/librosa/soundfile/unidecode，
+    // onnxruntime 缺则 vendor frontend.py `import onnxruntime` 崩 → 8003 秒退）。
+    // 锁文件本身漏 modelscope → 全新安装走"新建"分支只装锁文件 → 装完缺 modelscope → 就绪检查报缺环境 → 用户要再点一次才补。
+    {
+      const missingExtras = COSYVOICE_RUNTIME_DEPS.filter((p) => !venvPkgPresent('.venv-cosyvoice', p));
+      if (missingExtras.length) {
+        if (!existsSync(UV_EXE)) {
+          throw new Error('未安装受管 Python 基础（uv）。请先在设置页/引导条点「安装 Python 基础」后重试。');
+        }
+        ctx.nd({ type: 'log', message: `.venv-cosyvoice 缺运行时依赖：${missingExtras.join(' / ')}（锁文件漏装，坑 I 同族）→ 补装…` });
+        for (const p of missingExtras) {
+          await runCmdWithEnv(UV_EXE, ['pip', 'install', '--python', venvPy, COSYVOICE_EXTRA_SPEC[p] || p],
+            { UV_PYTHON_INSTALL_DIR: UV_PY_HOME, UV_INDEX_URL: UV_INDEX })(ctx);
+        }
+        const stillMissing = COSYVOICE_RUNTIME_DEPS.filter((p) => !venvPkgPresent('.venv-cosyvoice', p));
+        if (stillMissing.length) {
+          throw new Error('.venv-cosyvoice 补装依赖失败（仍缺 ' + stillMissing.join(' / ') + '），查看上方日志');
+        }
+        ctx.nd({ type: 'log', message: '.venv-cosyvoice 运行时依赖补装完成 ✓（' + COSYVOICE_RUNTIME_DEPS.join(' / ') + '）' });
+      }
+    }
+    ctx.nd({ type: 'log', message: '.venv-cosyvoice 依赖就绪 ✓' });
+
+    // ④ vendor Matcha-TTS 完整性修复（2026-08-28 实测）：
+    //    vendored Matcha-TTS 缺 matcha/models（仅有 hifigan/text/utils）→ cosyvoice.flow.flow_matching / decoder
+    //    `from matcha.models.components.flow_matching import BASECFM` 等在 hyperpyyaml 构造时 pydoc import 崩 → 8003 秒退。
+    //    修复 = 从 jsdelivr（GitHub CDN，国内实测可达）枚举 matcha/models/** 全量补进 vendor，再用 venv python 校验 import。
+    const matchaV = path.join(vendorDir, 'third_party', 'Matcha-TTS', 'matcha');
+    if (!existsSync(path.join(matchaV, 'models'))) {
+      ctx.nd({ type: 'log', message: 'vendor Matcha-TTS 缺 matcha/models（S4 vendoring 漏拷，CosyVoice flow/decoder 加载必需）→ 从 jsdelivr 拉全量补齐…' });
+      let files = [];
+      try {
+        const tree = JSON.parse(await fetchText('https://data.jsdelivr.com/v1/packages/gh/shivammehta25/Matcha-TTS@main?structure=flat', 30000));
+        files = (tree.files || []).map((f) => f.name).filter((n) => n.startsWith('matcha/models/'));
+      } catch (e) {
+        throw new Error('jsdelivr 文件清单拉取失败（' + String((e && e.message) || e) + '），无法补 matcha/models；可稍后重试「检测/修复」');
+      }
+      if (!files.length) throw new Error('jsdelivr 返回 matcha/models 清单为空，异常中止');
+      let n = 0;
+      for (const f of files) {
+        const rel = 'vendor/cosyvoice/third_party/Matcha-TTS/' + f;
+        if (existsSync(path.join(__dirname, rel))) continue;
+        await downloadOneFile({ file: rel, mirrors: [{ name: 'jsdelivr', url: `https://cdn.jsdelivr.net/gh/shivammehta25/Matcha-TTS@main/${f}` }] }, ctx, opts);
+        n++;
+        if (n % 5 === 0 || n === files.length) ctx.nd({ type: 'log', message: `matcha/models 已拉取 ${n}/${files.length} 文件…` });
+      }
+      ctx.nd({ type: 'log', message: `matcha/models 补齐 ${n} 个文件 ✓` });
+    }
+
+    // ---- §四 CUDA 升级（038 §一：承接 037 #10——「升级 GPU 加速」此前对 cosyvoice 是空壳）----
+    // matcha import 校验已挪到下方 CUDA 升级之后执行：升级中途的半成品 torch（torch.__version__=None，uv 删包被
+    // .pyd 锁打断时会发生）会让 transformers/diffusers import 崩（InvalidVersion），校验须等 torch 修复后再跑。
+    // 复用 uvVenvInstaller torchCpuHere 分支已验证全套：cache/torch-wheels 复用优先 → 零下载秒装；
+    // 无缓存 → 二次确认 2.5GB → resolveTorchWheels 镜像探测（阿里云/清华平铺 + 官方 simple，坑 O 结构）→ 直下 → 本地安装 → 校验 +cu。
+    // torch CPU 版、或 dist-info 缺失（= 上次升级被 .pyd 锁打断留下的半成品，torch.__version__=None）都走 CUDA 修复/升级。
+    const cosyTorchTag = torchBuildTag('.venv-cosyvoice');
+    // 2026-09-05：尊重"安装即选择"——opts.torch='cpu'（用户显式选 CPU 版）时跳过本 CUDA 段；
+    // auto/默认 = N 卡走 CUDA（现状行为不变）；cosyvoice 首次安装即含此段（一次装成 GPU 版）
+    if (HAS_NVIDIA && String(opts.torch || 'auto').toLowerCase() !== 'cpu'
+      && (cosyTorchTag === null || !/[+]cu\d/.test(cosyTorchTag))) {
+      const cur = cosyTorchTag === null ? '缺失/损坏' : cosyTorchTag;
+      const cu = torchCuDirForDriver(NVIDIA_DRIVER);
+      ctx.nd({ type: 'log', message: `检测到 NVIDIA 显卡，但 cosyvoice torch 为 CPU 版（${cur}）→ 升级 CUDA 版（驱动 ${NVIDIA_DRIVER || '未知'} → ${cu}）…` });
+      if (!cu) {
+        throw new Error(`cosyvoice：本机 NVIDIA 驱动（${NVIDIA_DRIVER || '未知'}）过旧，无法安装新版 CUDA torch。请先升级显卡驱动（NVIDIA App/官网，560+ 可跑 cu126），再回来点「升级 GPU 加速」。`);
+      }
+      // 坑 P：升级 torch 前自动停 8001/8002/8003（site-packages .pyd 文件锁）
+      const ENG_PORTS = [8001, 8002, 8003];
+      const engPids = [];
+      for (const p of ENG_PORTS) {
+        try {
+          const out = execSync(IS_WIN
+            ? `netstat -ano -p tcp | findstr ":${p}" | findstr LISTENING`
+            : `lsof -ti tcp:${p} -sTCP:LISTEN`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+          const pid = String(out).split(/\s+/).filter(Boolean).pop();
+          if (pid && /^\d+$/.test(pid)) engPids.push({ port: p, pid: Number(pid) });
+        } catch { /* 端口空闲 */ }
+      }
+      if (engPids.length) {
+        ctx.nd({ type: 'log', message: `检测到引擎服务占用 venv（${engPids.map((e) => `:${e.port} PID ${e.pid}`).join('、')}）→ 升级前自动停止，完成后请「重启服务」重新拉起…` });
+        for (const e of engPids) {
+          try {
+            if (IS_WIN) execSync(`taskkill /PID ${e.pid} /F`, { stdio: ['ignore', 'pipe', 'ignore'] });
+            else process.kill(e.pid, 'SIGTERM');
+            ctx.nd({ type: 'log', message: `✓ 已停止端口 ${e.port}（PID ${e.pid}）` });
+          } catch (err) {
+            ctx.nd({ type: 'log', message: `⚠️ 停止端口 ${e.port}（PID ${e.pid}）失败：${String((err && err.message) || err)}（可手动重启 App 释放）` });
+          }
+        }
+        await new Promise((r) => setTimeout(r, 1200));
+      }
+      // 坑 P 加强（037 #10 变体）：端口探测会漏"加载中未监听/孤儿"的 venv python 进程——
+      // 它们同样持有 site-packages/torch/_C.pyd → uv 报"拒绝访问"（2026-08-29 实测：8003 存活却漏停）。
+      // 补救：按命令行（cosyvoice-tts-server / .venv-cosyvoice）枚举 python 进程并 taskkill /T（App 拉起的子服务）。
+      try {
+        const ps = spawnSync('powershell', ['-NoProfile', '-Command',
+          `Get-CimInstance Win32_Process -Filter "name='python.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match 'cosyvoice-tts-server|.venv-cosyvoice' } | ForEach-Object { $_.ProcessId }`],
+          { encoding: 'utf8', timeout: 15000 });
+        const vkilled = [];
+        for (const tok of String(ps.stdout || '').split(/\s+/)) {
+          const pid = Number(tok);
+          if (pid > 0 && !engPids.some((e) => e.pid === pid)) {
+            try { execSync(`taskkill /PID ${pid} /T /F`, { stdio: ['ignore', 'pipe', 'ignore'] }); vkilled.push(pid); } catch {}
+          }
+        }
+        if (vkilled.length) {
+          ctx.nd({ type: 'log', message: `✓ 已按 venv 进程清理停止 ${vkilled.length} 个 python（PID ${vkilled.join('、')}）` });
+          await new Promise((r) => setTimeout(r, 1200));
+        }
+      } catch (e) { ctx.nd({ type: 'log', message: `⚠️ venv 进程枚举跳过：${String((e && e.message) || e)}` }); }
+      // ① 缓存复用优先（cache/torch-wheels 已有 cuXXX cp311 win wheel → 零下载秒装）
+      const wheelDir = path.join(DATA_DIR, 'cache', 'torch-wheels');
+      const cacheHit = (pkg) => {
+        try {
+          const f = readdirSync(wheelDir).find((x) => new RegExp(`^${pkg}-\\d.*\\+${cu}-cp311-cp311-win_amd64\\.whl$`).test(x));
+          return f ? path.join(wheelDir, f) : null;
+        } catch { return null; }
+      };
+      let torchWheel = cacheHit('torch');
+      let audioWheel = cacheHit('torchaudio');
+      if (torchWheel && audioWheel) {
+        ctx.nd({ type: 'log', message: `复用缓存 wheel：${path.basename(torchWheel)} + ${path.basename(audioWheel)} → 本地安装（零下载，秒级）…` });
+      } else {
+        // ② 无缓存 → 二次确认 + 镜像探测下载（与 uvVenvInstaller 同款）
+        if (!opts.confirmBigDownload) {
+          ctx.nd({ type: 'log', message: `cosyvoice 需升级 CUDA torch（${cu}，约 2.5GB），等二次确认…` });
+          throw new Error(`BIG_DOWNLOAD_CONFIRM:2.5GB:.venv-cosyvoice-torch-cuda`);
+        }
+        ctx.nd({ type: 'log', message: `探测 PyTorch ${cu} wheel 镜像（按真实目录结构逐个探测）…` });
+        const wheels = await resolveTorchWheels(cu, (s) => ctx.nd({ type: 'log', message: s }));
+        if (!wheels.torch.candidates.length || !wheels.torchaudio.candidates.length) {
+          const missing = [];
+          if (!wheels.torch.candidates.length) missing.push('torch');
+          if (!wheels.torchaudio.candidates.length) missing.push('torchaudio');
+          throw new Error(`cosyvoice：无法在任何镜像（阿里云/清华/官方）找到 ${cu} 的 cp311 win_amd64 wheel（缺 ${missing.join('、')}）。查看上方日志或设 OPENSOUND_TORCH_INDEX 手动指定源。`);
+        }
+        mkdirSync(wheelDir, { recursive: true });
+        for (const pkg of ['torch', 'torchaudio']) {
+          const cand = wheels[pkg].candidates;
+          const local = path.join(wheelDir, cand[0].name.replace(/%2B/g, '+'));
+          const rel = `cache/torch-wheels/${cand[0].name.replace(/%2B/g, '+')}`;
+          if (existsSync(local) && statSync(local).size > 0) {
+            ctx.nd({ type: 'log', message: `复用已下载 wheel：${path.basename(local)}` });
+          } else {
+            ctx.nd({ type: 'log', message: `开始下载 ${pkg} wheel（${cand.map((c) => c.mirror).join(', ')}，约 ${fmtMB(cand[0].bytes)}）…` });
+            await downloadOneFile({ file: rel, mirrors: cand.map((c) => ({ name: c.mirror, url: c.url })), bytes: cand[0].bytes }, ctx, opts);
+            ctx.nd({ type: 'log', message: `✓ ${cand[0].name.replace(/%2B/g, '+')} 就位（${fmtMB(statSync(resolveData(rel)).size)}）` });
+          }
+          if (pkg === 'torch') torchWheel = local; else audioWheel = local;
+        }
+      }
+      const installTorchWheels = () => runCmdWithEnv(UV_EXE, ['pip', 'install', '--python', venvPy, torchWheel, audioWheel],
+        { UV_PYTHON_INSTALL_DIR: UV_PY_HOME })(ctx);
+      try {
+        await installTorchWheels();
+      } catch (e) {
+        const msg = String((e && e.message) || e);
+        // 坑 P 兜底：uv 仍报 .pyd 文件锁（拒绝访问）→ 宽杀数据目录下所有 venv python（App 子服务）后重试一次
+        if (/拒绝访问|os error 5|access denied/i.test(msg)) {
+          ctx.nd({ type: 'log', message: '升级安装遇文件锁（torch/_C.pyd 被占用）→ 宽杀全部引擎 venv 进程后重试一次…' });
+          try {
+            const ps = spawnSync('powershell', ['-NoProfile', '-Command',
+              `Get-CimInstance Win32_Process -Filter "name='python.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match 'opensound-download\\\\venvs' } | ForEach-Object { $_.ProcessId }`],
+              { encoding: 'utf8', timeout: 15000 });
+            for (const tok of String(ps.stdout || '').split(/\s+/)) {
+              const pid = Number(tok);
+              if (pid > 0) { try { execSync(`taskkill /PID ${pid} /T /F`, { stdio: ['ignore', 'pipe', 'ignore'] }); } catch {} }
+            }
+            await new Promise((r) => setTimeout(r, 1500));
+            await installTorchWheels();
+          } catch (e2) {
+            throw new Error('cosyvoice torch 升级安装仍失败（文件锁未释放）：' + msg + '。请先「重启服务」再点「升级 GPU 加速」（App 会自动停引擎）。');
+          }
+        } else {
+          throw e;
+        }
+      }
+      if (torchIsCpuOnly('.venv-cosyvoice')) {
+        throw new Error(`cosyvoice torch 升级后仍为 CPU 版（${torchBuildTag('.venv-cosyvoice') || '未知'}）。查看上方 uv 安装日志；wheel 与驱动 ${cu} 是否匹配。`);
+      }
+      ctx.nd({ type: 'log', message: `cosyvoice torch 已升级为 CUDA 版 ✓（${torchBuildTag('.venv-cosyvoice')}），重启服务后 GPU 加速生效` });
+    }
+
+    // ---- matcha import 校验（须在 CUDA 升级/依赖就绪之后：torch 可用才验）----
+    {
+      const checkPy = 'import matcha.models.components.flow_matching as a; import matcha.models.components.decoder as b; import matcha.models.components.transformer as c; print("matcha repair OK")';
+      try {
+        await runCmdWithEnv(venvPy, ['-c', checkPy],
+          { PYTHONPATH: path.join(vendorDir, 'third_party', 'Matcha-TTS') + path.delimiter + path.join(vendorDir) })(ctx);
+        ctx.nd({ type: 'log', message: 'matcha 模块校验通过 ✓' });
+      } catch (err) {
+        throw new Error('matcha 模块校验失败（torch 可能损坏/未就绪）：' + String((err && err.message) || err)
+          + '。N 卡机器请直接点「升级 GPU 加速」修复 torch；无 N 卡则再点一次「检测/修复」。');
+      }
+    }
+
+    ctx.nd({ type: 'done', message: '克隆依赖就绪。若「运行中」徽标未变绿：托盘 → 重启服务，等模型加载完成（首次约 1-2 分钟）。' });
+  },
+};
+
+// 同一时间只允许一个安装任务（避免并发下载互相干扰）
+const installLock = { active: false };
+
+// ---------- HTTP ----------
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url, 'http://localhost');
+
+  // ===== CORS：允许任何来源访问本地服务 =====
+  // 供 Tauri 桌面 App WebView / 浏览器插件 / 网站 / 其它 app 接入（开放端口后端）。
+  // 本服务默认绑定 127.0.0.1 仅本机，开放 CORS 不会带来外部网络风险。
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  // 识别(Azure STT)把 Key/Region/Language 放自定义请求头 x-os-azure-* 透传给 asr-server，
+  // 不在此放行会导致 WebView 预检(OPTIONS)被拒 → fetch 报 TypeError: Load failed（2026-09-07 修复）
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-os-azure-key, x-os-azure-region, x-os-azure-lang');
+  // 预检请求直接放行
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    return res.end();
+  }
+
+  const send = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); };
+
+  // ===== 安全加固：入站鉴权（S7）=====
+  // OPENSOUND_TOKEN 由 Tauri 宿主注入（config.json ui.token 自动生成，并经 get_ui_settings 同步给前端，
+  // 前端 api.ts jfetch 自动带 Authorization: Bearer）。为空（手动 npm start 调试）时不校验。
+  // /health 免检：宿主健康轮询不带凭据，且信息面仅版本/引擎状态。
+  if (OPENSOUND_TOKEN && req.method !== 'OPTIONS' && !(req.method === 'GET' && url.pathname === '/health')) {
+    const auth = req.headers['authorization'] || '';
+    const got = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+    if (got !== OPENSOUND_TOKEN) {
+      log('⚠️ 拒绝未授权请求: ' + req.method + ' ' + url.pathname + (auth ? '（token 不符）' : '（缺少 token）'));
+      return send(401, { error: 'unauthorized: 缺少或错误的 Bearer token' });
+    }
+  }
+
+  if (req.method === 'GET' && url.pathname === '/health') {
+    // TTS 状态：kokoro 就绪（含音色数）/ missing（模型未下载）/ not-installed（未装 sherpa-onnx-node）
+    let sherpaNodeInstalled = true;
+    try {
+      const { createRequire } = await import('node:module');
+      createRequire(import.meta.url)('sherpa-onnx-node');
+    } catch (e) { sherpaNodeInstalled = false; }
+    let kokoroStatus = sherpaNodeInstalled ? (kokoroReady() ? 'ready' : 'missing') : 'not-installed';
+    let kokoroSpeakers = null;
+    if (kokoroStatus === 'ready') {
+      try { kokoroSpeakers = (await getKokoroTts()).numSpeakers; }
+      catch (e) { kokoroStatus = 'missing'; }
+    }
+    const qwen3 = await checkQwen3();
+    const llmDefaultReady = llmReady(); // 默认 LLM 是否就绪
+    const ollamaStatus = await checkOllama();
+    return send(200, {
+      ok: true,
+      version: SERVER_VERSION,
+      engines: ['whisper', existsSync(SENSEVOICE_MODEL) ? 'sensevoice' : 'sensevoice(未下载)', 'sensevoice-original'],
+      tts: { kokoro: kokoroStatus, kokoroSpeakers, qwen3, cosyvoice: await checkCosyvoice() },
+      llm: { engine: 'llama-cpp', model: llmDefaultReady ? path.basename(LLM_MODEL) : 'missing', ollama: ollamaStatus },
+      models: await collectModels(), // 014 §5.2：已装模型清单（/models 同款）
+      port: PORT
+    });
+  }
+
+  // 本地 TTS：POST /speak?engine=kokoro|qwen3  body=JSON { text, sid, speed, voice, language }
+  // 013-P1：流式返回（Content-Type: application/octet-stream），帧协议 = 4 字节大端长度 + 一段 WAV；
+  //   经 TTS_ENGINES 注册表路由（014 §5.2）：kokoro → 逐句多帧；qwen3 → 透传 Python 服务 ?stream=1 帧流（013-P2①）
+  if (req.method === 'POST' && url.pathname === '/speak') {
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      body = JSON.parse(Buffer.concat(chunks).toString('utf-8') || '{}');
+    } catch (e) {
+      return send(400, { error: '请求体必须是 JSON' });
+    }
+    const text = String(body.text || '').trim();
+    if (!text) return send(400, { error: '缺少 text' });
+    const engine = (url.searchParams.get('engine') || 'kokoro').toLowerCase();
+    const eng = TTS_ENGINES[engine];
+    if (!eng) return send(400, { error: '未知引擎: ' + engine + '（支持 ' + Object.keys(TTS_ENGINES).join(' / ') + '）' });
+    const maxLen = engine === 'qwen3' ? 2000 : 30000;
+    if (text.length > maxLen) return send(400, { error: 'text 过长（≤' + maxLen + ' 字），请分段朗读' });
+    try {
+      await eng.stream(res, { text, sid: body.sid, speed: body.speed, voice: body.voice, language: body.language, cloud: body.cloud, azure: body.azure, cosyvoice: body.cosyvoice });
+    } catch (e) {
+      log('TTS 错误: ' + e.message);
+      if (!res.headersSent) return send(500, { error: e.message });
+      try { res.end(); } catch (e2) {}
+    }
+    return;
+  }
+
+  // 克隆音色：POST /clone  body=JSON { name, referenceText, wavBase64 } → 生成/更新一个克隆音色（转发 cosyvoice 服务）
+  if (req.method === 'POST' && url.pathname === '/clone') {
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      body = JSON.parse(Buffer.concat(chunks).toString('utf-8') || '{}');
+    } catch (e) {
+      return send(400, { error: '请求体必须是 JSON' });
+    }
+    try {
+      const up = await fetch(COSYVOICE_URL + '/clone', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: body.name, referenceText: body.referenceText, wavBase64: body.wavBase64
+        }),
+        signal: AbortSignal.timeout(180000),
+      });
+      const data = await up.json().catch(() => ({}));
+      return send(up.ok ? 200 : 500, data);
+    } catch (e) {
+      log('克隆失败: ' + e.message);
+      return send(500, { error: '克隆服务不可用：' + e.message + '（请确认 cosyvoice 服务已启动）' });
+    }
+  }
+
+  // 克隆音色：GET /voices → { voices: [...] }；POST /voice/rename、/voice/delete → 转发 cosyvoice 服务
+  if (req.method === 'GET' && url.pathname === '/voices') {
+    try {
+      const up = await fetch(COSYVOICE_URL + '/voices', { signal: AbortSignal.timeout(3000) });
+      const data = await up.json().catch(() => ({}));
+      return send(up.ok ? 200 : 500, data);
+    } catch (e) {
+      return send(500, { error: '克隆服务不可用：' + e.message });
+    }
+  }
+  // 克隆音色试听：GET /voice-preview?voiceId=xxx → 预生成的 WAV（避免每次现场合成等待）
+  if (req.method === 'GET' && url.pathname === '/voice-preview') {
+    const vid = url.searchParams.get('voiceId') || '';
+    try {
+      const up = await fetch(COSYVOICE_URL + '/voice-preview?voiceId=' + encodeURIComponent(vid), { signal: AbortSignal.timeout(5000) });
+      if (!up.ok) {
+        const data = await up.json().catch(() => ({}));
+        return send(404, { error: data.error || '该音色暂无预览音频' });
+      }
+      const buf = Buffer.from(await up.arrayBuffer());
+      res.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': buf.length });
+      return res.end(buf);
+    } catch (e) {
+      return send(500, { error: '克隆服务不可用：' + e.message });
+    }
+  }
+  if ((req.method === 'POST') && (url.pathname === '/voice/rename' || url.pathname === '/voice/delete')) {
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      body = JSON.parse(Buffer.concat(chunks).toString('utf-8') || '{}');
+    } catch (e) {
+      return send(400, { error: '请求体必须是 JSON' });
+    }
+    try {
+      const up = await fetch(COSYVOICE_URL + url.pathname, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(5000),
+      });
+      const data = await up.json().catch(() => ({}));
+      return send(up.ok ? 200 : 500, data);
+    } catch (e) {
+      return send(500, { error: '克隆服务不可用：' + e.message });
+    }
+  }
+
+  // 本地 LLM：POST /chat  body=JSON { messages, engine?, temperature?, top_p?, maxTokens?, model? } → { text, engine }
+  if (req.method === 'POST' && url.pathname === '/chat') {
+    let body = {};
+    try {
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      body = JSON.parse(Buffer.concat(chunks).toString('utf-8') || '{}');
+    } catch (e) {
+      return send(400, { error: '请求体必须是 JSON' });
+    }
+    const messages = Array.isArray(body.messages) ? body.messages.filter(m => m && typeof m.content === 'string') : [];
+    if (!messages.some(m => m.role === 'user' && String(m.content).trim())) {
+      return send(400, { error: '缺少 user 消息' });
+    }
+    try {
+      const text = await llmChat(body.engine, messages, {
+        temperature: body.temperature, top_p: body.top_p, maxTokens: body.maxTokens, model: body.model,
+        apiKey: body.apiKey
+      });
+      return send(200, { text, engine: (body.engine || 'llama-cpp').toLowerCase() });
+    } catch (e) {
+      log('LLM 错误: ' + e.message);
+      return send(500, { error: e.message });
+    }
+  }
+
+  // 全链路：POST /voice-chat  body=WAV 音频；参数走 query → 识别→LLM→朗读 → WAV 二进制
+  //   asrEngine=auto|sensevoice|whisper · llmEngine=llama-cpp|ollama · ttsEngine=kokoro|qwen3
+  //   prompt=追加指令 · system=系统提示 · voice/sid/language=TTS 参数
+  if (req.method === 'POST' && url.pathname === '/voice-chat') {
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    const audio = Buffer.concat(chunks);
+    if (audio.length < 100) return send(400, { error: '音频数据过短' });
+    const asrEngine = (url.searchParams.get('asrEngine') || 'auto').toLowerCase();
+    const llmEngine = (url.searchParams.get('llmEngine') || 'llama-cpp').toLowerCase();
+    const ttsEngine = (url.searchParams.get('ttsEngine') || 'kokoro').toLowerCase();
+    const prompt = url.searchParams.get('prompt') || '';
+    const system = url.searchParams.get('system') || '你是一个本地语音助手，用简洁的中文回答用户。';
+    try {
+      // ① 识别
+      const pcm16 = decodeToPcm16(audio);
+      const hasSense = existsSync(SENSEVOICE_MODEL);
+      let recognized;
+      if (asrEngine === 'sensevoice') recognized = await transcribeSenseVoice(pcm16);
+      else if (asrEngine === 'sensevoice-original') recognized = await transcribeSenseVoiceOriginal(pcm16);
+      else if (asrEngine === 'whisper') recognized = await whisperTranscribe(pcm16);
+      else recognized = hasSense ? await transcribeSenseVoice(pcm16) : await whisperTranscribe(pcm16);
+      const wantPunc = PUNCTUATION && url.searchParams.get('punct') !== '0' || url.searchParams.get('punct') === '1';
+      if (wantPunc) recognized = await punctuate(recognized);
+      // ② LLM
+      const messages = [
+        { role: 'system', content: system },
+        { role: 'user', content: (prompt ? prompt + '\n' : '') + recognized }
+      ];
+      const llmModelParam = url.searchParams.get('llmModel') || undefined;
+      // 2026-09-05 修复：LLM 首次返回空/空白 → 自动重试一次（冷启动/首次推理偶发，对话面板文字正常但语音链路偶发空）；
+      // 仍空则抛明确错误，不再把空文本喂给 TTS（否则 kokoro 报 "Failed to convert '' to token IDs"，误导成 TTS 故障）。
+      let answer = await llmChat(llmEngine, messages, {
+        model: llmModelParam,
+        apiKey: url.searchParams.get('llmApiKey') || undefined
+      });
+      if (!String(answer || '').trim()) {
+        log('voice-chat LLM 首次返回空（model=' + (llmModelParam || '默认') + '），自动重试一次…');
+        answer = await llmChat(llmEngine, messages, {
+          model: llmModelParam,
+          apiKey: url.searchParams.get('llmApiKey') || undefined
+        });
+      }
+      if (!String(answer || '').trim()) {
+        throw new Error('LLM 未返回内容（' + (llmModelParam || '默认模型') + ' 空回答，已重试一次）——请到对话面板换一个模型档位再试');
+      }
+      log('voice-chat 识别:「' + recognized + '」→ LLM:「' + answer + '」');
+      // ③ 朗读（qwen3 不可达时自动回退 kokoro，保证全链路始终可用）；经 TTS_ENGINES.wav() 统一（014 §5.2）
+      let wav;
+      let actualTts = ttsEngine;
+      const ttsEng = ttsEngine === 'qwen3' ? TTS_ENGINES.qwen3
+        : ttsEngine === 'clone' ? TTS_ENGINES.clone
+        : TTS_ENGINES.kokoro;
+      try {
+        wav = await ttsEng.wav({
+          text: answer,
+          sid: url.searchParams.get('sid'),
+          speed: 1,
+          voice: url.searchParams.get('voice') || undefined,
+          language: url.searchParams.get('language') || undefined,
+        });
+      } catch (e) {
+        if (ttsEng !== TTS_ENGINES.kokoro) {
+          log('voice-chat Qwen3 失败，回退 Kokoro: ' + e.message);
+          actualTts = 'kokoro';
+          wav = await synthesizeKokoro(answer, url.searchParams.get('sid'), 1);
+        } else throw e;
+      }
+      // ?fmt=json：一次返回 识别文本 + 回答 + base64 音频（供插件显示文本并播放）
+      if (url.searchParams.get('fmt') === 'json') {
+        return send(200, { recognized, answer, engine: actualTts, audioBase64: wav.toString('base64') });
+      }
+      res.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': wav.length });
+      return res.end(wav);
+    } catch (e) {
+      log('voice-chat 错误: ' + e.message);
+      return send(500, { error: e.message });
+    }
+  }
+
+  // 模型清单：GET /models → { models: [{ category, engine, label, size, installed }] }（014 §5.2）
+  if (req.method === 'GET' && url.pathname === '/models') {
+    return send(200, { models: await collectModels() });
+  }
+
+  // 取消当前下载（S3）：杀掉活动 curl，.part 保留供续传
+  if (req.method === 'POST' && url.pathname === '/install-cancel') {
+    if (ACTIVE_DOWNLOAD.proc) {
+      try { ACTIVE_DOWNLOAD.proc.kill('SIGTERM'); } catch {}
+      return send(200, { ok: true, message: '已发送取消信号' });
+    }
+    return send(200, { ok: false, message: '当前没有进行中的下载' });
+  }
+
+  // 磁盘剩余空间（S3：模型管理面板展示；031 跨平台：statfsSync 替代 df -k，Win/mac 通用）
+  if (req.method === 'GET' && url.pathname === '/disk') {
+    try {
+      const st = statfsSync(__dirname);
+      const availBytes = Number(st.bavail) * Number(st.bsize);
+      return send(200, { availBytes });
+    } catch { return send(200, { availBytes: null }); }
+  }
+
+  // 设备画像：GET /device-profile → 设备画像 + 模型匹配（000-device-vs-model.md §四，启动探测一次并缓存）
+  if (req.method === 'GET' && url.pathname === '/device-profile') {
+    if (!DEVICE_PROFILE) return send(503, { error: '设备探测失败（见服务端日志）' });
+    return send(200, DEVICE_PROFILE);
+  }
+
+  // 模型安装：POST /install-model?engine=<name>[&mirror=<name>] → NDJSON 流式进度（每行 { type:'log'|'done'|'error', message }）
+  if (req.method === 'POST' && url.pathname === '/install-model') {
+    const engine = (url.searchParams.get('engine') || '').toLowerCase();
+    const mirror = url.searchParams.get('mirror') || undefined;
+    // S5：confirm=1 表示用户已在 UI 二次确认大流量下载（目前仅 cosyvoice-clone 使用）
+    const confirmBigDownload = ['1', 'true', 'yes'].includes((url.searchParams.get('confirm') || '').toLowerCase());
+    // 2026-09-05：torch=auto|cuda|cpu（torch 系引擎的"安装即选择"；auto=N 卡→CUDA / 无→CPU）
+    const torchChoice = ['cuda', 'cpu'].includes(url.searchParams.get('torch') || '')
+      ? url.searchParams.get('torch') : 'auto';
+    const installer = INSTALLERS[engine];
+    if (!installer) return send(400, { error: '未知模型: ' + engine + '（支持 ' + Object.keys(INSTALLERS).join(' / ') + '）' });
+    if (installLock.active) return send(409, { error: '已有安装任务进行中，请稍后再试' });
+    installLock.active = true;
+    res.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8' });
+    res.flushHeaders();
+    const ctx = { nd: (obj) => { try { res.write(JSON.stringify(obj) + '\n'); } catch (e) {} } };
+    // 2026-09-05 修复：客户端断开（页面关闭/切走/超时中止 fetch）时自动取消安装并释放锁——
+    // 否则 installer 可能继续跑（下载器不因连接断开而停），installLock 一直占用 → 后续安装全部 409
+    // （实测：逐引擎安装时 whisper 首次点"补齐"直接 409，重启服务才恢复）。
+    log('开始安装 ' + engine + (mirror ? '（源：' + mirror + '）' : '（自动切换源）'));
+    const onClientGone = () => {
+      if (!res.writableEnded) {
+        log('⚠️ 安装客户端连接已断开（engine=' + engine + '），自动取消安装以释放锁…');
+        ACTIVE_DOWNLOAD.cancelled = true;
+        if (ACTIVE_DOWNLOAD.proc) { try { ACTIVE_DOWNLOAD.proc.kill(); } catch {} }
+      }
+    };
+    res.on('close', onClientGone);
+    try {
+      await installer(ctx, { mirror, confirmBigDownload, torch: torchChoice });
+      // LLM 模型下载完成后清空加载缓存，下次对话无需重启即可直接加载新模型
+      if (LLM_MODELS[engine]) llmInvalidate();
+    } catch (e) {
+      ctx.nd({ type: 'error', message: String((e && e.message) || e) });
+    } finally {
+      res.removeListener('close', onClientGone);
+      installLock.active = false;
+      try { res.end(); } catch (e2) {}
+    }
+    return;
+  }
+
+  // VAD：POST /vad  body=RAW PCM16(16k) → { speech: [[start_ms,end_ms],...] }（供前端"录音静音自动停"检测）
+  if (req.method === 'POST' && url.pathname === '/vad') {
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    const audio = Buffer.concat(chunks);
+    try {
+      const pcm16 = decodeToPcm16(audio);
+      const segs = await getVadSegments(pcm16);
+      return send(200, { speech: segs });
+    } catch (e) {
+      return send(500, { error: e.message });
+    }
+  }
+
+  if (req.method !== 'POST' || url.pathname !== '/transcribe') {
+    return send(404, { error: 'not found' });
+  }
+
+  // 引擎：sensevoice / sensevoice-original / whisper / auto（默认 auto = SenseVoice 优先，中文最优）
+  // 默认引擎可由环境变量 ASR_ENGINE 覆盖（如 ASR_ENGINE=whisper 强制 Whisper）
+  let engine = (url.searchParams.get('engine') || ASR_ENGINE).toLowerCase();
+  const hasSenseVoice = existsSync(SENSEVOICE_MODEL) && existsSync(SENSEVOICE_TOKENS);
+  if (engine === 'auto') engine = hasSenseVoice ? 'sensevoice' : 'whisper';
+  if (engine === 'sensevoice' && !hasSenseVoice) {
+    return send(400, { error: 'SenseVoice 模型未下载，请运行 npm run download-sensevoice（或改用 ?engine=whisper）' });
+  }
+  // 000-plan-11 A-1：Azure 云识别（Key/Region/Language 经请求头传入，仅本机回环不出进程）
+  if (engine === 'azure') {
+    const azureCfg = {
+      key: req.headers['x-os-azure-key'] || '',
+      region: req.headers['x-os-azure-region'] || '',
+      language: req.headers['x-os-azure-lang'] || 'zh-CN',
+    };
+    const chunks0 = [];
+    for await (const c of req) chunks0.push(c);
+    const wav0 = Buffer.concat(chunks0);
+    if (wav0.length < 100) return send(400, { error: '音频数据过短' });
+    const t0 = Date.now();
+    try {
+      const text = await azureSttCall(wav0, azureCfg);
+      send(200, { text, engine: 'azure', durationSec: Math.round((Date.now() - t0) / 100) / 10 });
+    } catch (e) {
+      log('Azure 识别错误: ' + e.message);
+      send(500, { error: e.message });
+    }
+    return;
+  }
+  if (!['sensevoice', 'sensevoice-original', 'whisper'].includes(engine)) {
+    return send(400, { error: '未知引擎: ' + engine + '（支持 sensevoice / sensevoice-original / whisper）' });
+  }
+  // S11：Whisper 指定语言：?lang= > ASR_WHISPER_LANG 环境变量 > ''（自动检测）；非法码已由白名单回退
+  const whisperLang = normalizeWhisperLang(url.searchParams.get('lang') || ASR_WHISPER_LANG);
+
+  const chunks = [];
+  for await (const c of req) chunks.push(c);
+  const body = Buffer.concat(chunks);
+  if (body.length < 100) return send(400, { error: '音频数据过短' });
+
+  try {
+    const pcm16 = decodeToPcm16(body);
+    if (pcm16.length < 1600) return send(400, { error: '音频太短' });
+    // 诊断：时长与音量（RMS），排查"静音/噪声导致幻觉"
+    const dur = pcm16.length / 16000;
+    let sum = 0;
+    for (let i = 0; i < pcm16.length; i++) sum += pcm16[i] * pcm16[i];
+    const rms = Math.sqrt(sum / pcm16.length);
+    if (rms < 0.01) log('⚠️ 音频几乎静音: 时长 ' + dur.toFixed(1) + 's, RMS=' + rms.toFixed(4));
+    else log('音频正常: 时长 ' + dur.toFixed(1) + 's, RMS=' + rms.toFixed(4));
+    // VAD 过滤静音（可选）：识别前只保留有效语音段
+    let infer = pcm16;
+    const wantVad = VAD && url.searchParams.get('vad') !== '0' || url.searchParams.get('vad') === '1';
+    if (wantVad) {
+      const segs = await getVadSegments(pcm16);
+      const t = trimPcmByVad(pcm16, segs);
+      if (t.length >= 1600) infer = t;
+    }
+    let text;
+    if (engine === 'sensevoice') text = await transcribeSenseVoice(infer);
+    else if (engine === 'sensevoice-original') text = await transcribeSenseVoiceOriginal(infer);
+    else text = await whisperTranscribe(infer, whisperLang);
+    const wantPunc = PUNCTUATION && url.searchParams.get('punct') !== '0' || url.searchParams.get('punct') === '1';
+    if (wantPunc) text = await punctuate(text);
+    send(200, { text, engine, durationSec: Math.round(dur * 10) / 10, rms: Math.round(rms * 10000) / 10000 });
+  } catch (e) {
+    log('识别错误: ' + e.message);
+    send(500, { error: e.message });
+  }
+});
+
+async function whisperTranscribe(pcm16, lang) {
+  const rec = await getWhisper(lang);
+  const stream = rec.createStream();
+  stream.acceptWaveform(16000, pcm16);
+  rec.decode(stream);
+  const res = rec.getResult(stream);
+  return String(res.text || '').trim();
+}
+
+server.listen(PORT, '127.0.0.1', () => log('OpenSound 本地语音服务已启动: http://127.0.0.1:' + PORT + '（仅本机回环；/transcribe 识别，/speak 朗读）'));

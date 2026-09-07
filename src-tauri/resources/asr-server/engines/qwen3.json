@@ -1,0 +1,21 @@
+{
+  "id": "qwen3",
+  "category": "tts",
+  "label": "Qwen3-TTS 0.6B（MPS · 流式）",
+  "sizeHint": "~2.3GB（python hub 缓存）",
+  "license": "Apache-2.0",
+  "profile": { "diskGB": 2.3, "memNeedGB": null, "accel": "any", "tierRequired": "standard", "slowNote": { "cpu": "CPU 上较慢，建议 GPU/MPS 加速（000 §3.2 文档口径）" } },
+  "checks": [
+    { "type": "dir", "path": "models/hf/hub/models--Qwen--Qwen3-TTS-12Hz-0.6B-CustomVoice", "minFiles": 10,
+      "minBytes": 1500000000,
+      "note": "python hub 缓存结构（blobs+snapshots），S1 起落位 models/hf/hub/；minBytes 防'仅配置小文件误判就绪'（2026-09-05 修复）" }
+  ],
+  "runtime": [
+    { "kind": "path", "path": ".venv-qwen3/bin/python3", "label": "受管 venv：数据目录 venvs/.venv-qwen3（034 阶段3 uv 自举创建）" }
+  ],
+  "install": {
+    "kind": "env",
+    "message": "Qwen3-TTS：① 安装引擎环境（.venv-qwen3，含 qwen-tts/torch，约 2.5GB）点「检测/修复」+ 二次确认；② 模型在二次确认后自动下载到 models/hf/（官方 huggingface.co 优先 → hf-mirror，失败自动切换）。",
+    "mirrors": ["huggingface", "hf-mirror"]
+  }
+}
