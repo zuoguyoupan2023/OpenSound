@@ -82,6 +82,9 @@ const MANAGED_ENV = {
   MODELSCOPE_CACHE: process.env.MODELSCOPE_CACHE || path.join(MODELS_DIR, 'modelscope'),
   NUMBA_CACHE_DIR: process.env.NUMBA_CACHE_DIR || path.join(DATA_DIR, 'cache', 'numba'),
   MPLCONFIGDIR: process.env.MPLCONFIGDIR || path.join(DATA_DIR, 'cache', 'mpl'),
+  // 062 P2：强制 python 服务 UTF-8 输出（Windows 默认 cp936/GBK → 与 node 写同一 asr-server.log 会混编乱码）
+  PYTHONUTF8: '1',
+  PYTHONIOENCODING: 'utf-8',
 };
 const ASR_URL = (process.env.ASR_SERVER_URL || 'http://127.0.0.1:9528').replace(/\/+$/, '');
 const QWEN3_URL = (process.env.QWEN3_TTS_URL || 'http://127.0.0.1:8001').replace(/\/+$/, '');
@@ -94,7 +97,7 @@ const SKIP_COSYVOICE = ['1', 'true', 'yes'].includes(String(process.env.OPENSOUN
 const SKIP_SENSE_ORIGINAL = ['1', 'true', 'yes'].includes(String(process.env.OPENSOUND_SKIP_SENSEVOICE_ORIGINAL || '').toLowerCase());
 // 期望的 asr-server 架构版本（须与 asr-server.js 的 SERVER_VERSION 一致）：
 // 若 9528 上的服务 version 与之不符 → 判定为旧进程残留 → 终止后重启。
-const EXPECTED_VERSION = '2.10.4';
+const EXPECTED_VERSION = '2.10.5';
 
 function run(cmd, args, name, env = {}) {
   const p = spawn(cmd, args, { stdio: 'inherit', cwd: __dirname, env: { ...process.env, ...MANAGED_ENV, ...env } });

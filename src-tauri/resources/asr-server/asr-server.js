@@ -29,7 +29,7 @@ const ASR_ENGINE = (process.env.ASR_ENGINE || 'auto').toLowerCase(); // auto | s
 const ASR_WHISPER_LANG = (process.env.ASR_WHISPER_LANG || '').toLowerCase().trim();
 // asr-server 架构版本：2.x = 含 sensevoice-original + VAD + 标点。
 // 供 start-all.js 探测时判断 9528 上是否旧进程（旧代码无此字段/不同版本 → 视为残留，终止后重启）。
-const SERVER_VERSION = '2.10.4'; // 2.4.0 = S4：cosyvoice-clone 全自举链；2.5.0 = S5：缺失权重自动下载；2.6.0 = S7：安全加固（仅本机回环 + 入站鉴权）；2.7.0 = S8：sensevoice-original 模型下载闭环（二段式安装器：venv + 模型三件套）；2.8.0 = S9：056 Whisper 补齐安装器 + glob 检查跨平台修复（坑 U）+ mac site-packages 路径修复（坑 W）；2.9.0 = S10：Whisper 引擎换 sherpa-onnx（fp32 全精度 + 语言自动检测；与 SenseVoice 共用一套原生运行时，根治 onnxruntime-node DLL 冲突）；2.10.0 = S11：Whisper 指定语言配置（?lang= / ASR_WHISPER_LANG / 按语言识别器 Map 缓存 LRU≤3，非法语言回退自动检测不崩）；2.10.1 = S12：引擎就绪判定与启动器同口径（受管 venv 优先、代码目录 .venv-* 回退），修复 034 前旧位置 venv 能跑却报「环境缺失」；2.10.2 = S6′ 版本刷新验证用：内置 .version 指纹轮换 → 驱动物化目录「整目录重建」机制实测（代码无行为变化）；2.10.3 = Win 阶段4 实测修复：engineReadiness 补 vendored Matcha-TTS matcha/models 就绪缺口（此前误报 ready、卡片无「检测/修复」按钮、8003 启动即崩 No module named 'matcha.models'）；2.10.4 = jsdelivr matcha/models 清单前导斜杠修复（flat 清单 name 带 '/'，此前补拉恒空中止）
+const SERVER_VERSION = '2.10.5'; // 2.4.0 = S4：cosyvoice-clone 全自举链；2.5.0 = S5：缺失权重自动下载；2.6.0 = S7：安全加固（仅本机回环 + 入站鉴权）；2.7.0 = S8：sensevoice-original 模型下载闭环（二段式安装器：venv + 模型三件套）；2.8.0 = S9：056 Whisper 补齐安装器 + glob 检查跨平台修复（坑 U）+ mac site-packages 路径修复（坑 W）；2.9.0 = S10：Whisper 引擎换 sherpa-onnx（fp32 全精度 + 语言自动检测；与 SenseVoice 共用一套原生运行时，根治 onnxruntime-node DLL 冲突）；2.10.0 = S11：Whisper 指定语言配置（?lang= / ASR_WHISPER_LANG / 按语言识别器 Map 缓存 LRU≤3，非法语言回退自动检测不崩）；2.10.1 = S12：引擎就绪判定与启动器同口径（受管 venv 优先、代码目录 .venv-* 回退），修复 034 前旧位置 venv 能跑却报「环境缺失」；2.10.2 = S6′ 版本刷新验证用：内置 .version 指纹轮换 → 驱动物化目录「整目录重建」机制实测（代码无行为变化）；2.10.3 = Win 阶段4 实测修复：engineReadiness 补 vendored Matcha-TTS matcha/models 就绪缺口（此前误报 ready、卡片无「检测/修复」按钮、8003 启动即崩 No module named 'matcha.models'）；2.10.4 = jsdelivr matcha/models 清单前导斜杠修复（flat 清单 name 带 '/'，此前补拉恒空中止）；2.10.5 = 062：安装锁自愈（活动时间戳+看门狗+断开 20s 兜底释放）+ 子进程 utf-8/gbk 解码 + 安装日志留底 logs/install-&lt;engine&gt;.log
 // 031 跨平台：Win venv 可执行在 Scripts/ 而非 bin/（engineReadiness 的 runtime 检查据此判定）
 const IS_WIN = process.platform === 'win32';
 // 034 阶段3：uv 自举的受管 venv 落数据目录 venvs/（032 L3），引擎清单的 runtime.path 按此双位置判定：
@@ -1240,22 +1240,37 @@ function runDownload(cmd, args) {
   });
 }
 
+// 子进程输出一行字节 → 字符串：UTF-8 优先；非法序列（Windows python 默认 GBK/cp936 输出）回退 GBK。
+const _decUtf8Strict = new TextDecoder('utf-8', { fatal: true });
+const _decGbk = new TextDecoder('gbk');
+function decodeChildLine(b) {
+  try { return _decUtf8Strict.decode(b).replace(/\r$/, '').trim(); }
+  catch { return _decGbk.decode(b).replace(/\r$/, '').trim(); }
+}
+
 // 通用子进程执行（带 env）→ NDJSON 行级进度；退出码 0 视为成功（034 阶段3：uv envenv 安装用）
+// 2026-09-09（062 P2）：env 强制 python 子进程 UTF-8 输出；读取改字节级缓冲 + 逐行 utf-8→gbk 回退，杜绝乱码。
 function runCmdWithEnv(cmd, args, envAdd = {}, cwdOverride = __dirname, opts = {}) {
   return (ctx) => new Promise((resolve, reject) => {
     ctx.nd({ type: 'log', message: `> ${cmd.split(/[\\/]/).pop()} ${args.join(' ')}` });
     const p = spawn(cmd, args, {
       cwd: cwdOverride,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, ...envAdd },
+      env: {
+        ...process.env,
+        ...envAdd,
+        PYTHONUTF8: envAdd.PYTHONUTF8 || '1',
+        PYTHONIOENCODING: envAdd.PYTHONIOENCODING || 'utf-8',
+      },
     });
-    let buf = '';
+    let acc = Buffer.alloc(0); // 字节级缓冲：避免多字节字符被 data chunk 从中间切开后乱码
     const onData = (chunk) => {
-      buf += chunk.toString();
-      let idx;
-      while ((idx = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, idx).replace(/\r$/, '').trim();
-        buf = buf.slice(idx + 1);
+      acc = Buffer.concat([acc, chunk]);
+      let nl;
+      while ((nl = acc.indexOf(0x0a)) !== -1) {
+        const lineBuf = acc.subarray(0, nl);
+        acc = acc.subarray(nl + 1);
+        const line = decodeChildLine(lineBuf);
         if (line) ctx.nd({ type: 'log', message: line });
       }
     };
@@ -1316,7 +1331,8 @@ function runCmdWithEnv(cmd, args, envAdd = {}, cwdOverride = __dirname, opts = {
     p.on('error', (e) => { if (progTimer) clearInterval(progTimer); reject(new Error('无法启动命令：' + e.message)); });
     p.on('exit', (code) => {
       if (progTimer) clearInterval(progTimer);
-      if (buf.trim()) ctx.nd({ type: 'log', message: buf.trim() });
+      const tail = decodeChildLine(acc); acc = Buffer.alloc(0);
+      if (tail) ctx.nd({ type: 'log', message: tail });
       if (code === 0) {
         ctx.nd({ type: 'log', message: '✓ 命令完成（exit 0）' });
         resolve();
@@ -2478,7 +2494,24 @@ const INSTALLERS = {
 };
 
 // 同一时间只允许一个安装任务（避免并发下载互相干扰）
-const installLock = { active: false };
+// 2026-09-09 自愈加固（062 P1）：锁带活动时间戳 + 全局看门狗 + 客户端断开兜底定时器，
+// 根治「安装锁滞留 → 后续安装 409 → 需手动重启服务」（2026-09-05 断连坑同源）。
+const INSTALL_LOCK_IDLE_MS = 15 * 60 * 1000; // 超过该时长无任何进度输出且仍占用 → 判定卡死
+const installLock = { active: false, startedAt: 0, lastActivity: 0 };
+
+// 全局看门狗：只处理"真卡死"（长时间零活动）。正常下载/uv 每行日志都刷新 lastActivity，不会误杀。
+function scheduleInstallLockWatchdog() {
+  setInterval(() => {
+    if (!installLock.active) return;
+    const idleMs = Date.now() - installLock.lastActivity;
+    if (idleMs < INSTALL_LOCK_IDLE_MS) return;
+    console.error(`[install] 安装锁疑似卡死（idle=${Math.round(idleMs / 1000)}s 无活动），自动取消并释放锁（保留 .part 可续传）`);
+    ACTIVE_DOWNLOAD.cancelled = true;
+    if (ACTIVE_DOWNLOAD.proc) { try { ACTIVE_DOWNLOAD.proc.kill(); } catch {} }
+    installLock.active = false;
+  }, 60_000).unref();
+}
+scheduleInstallLockWatchdog();
 
 // ---------- HTTP ----------
 const server = http.createServer(async (req, res) => {
@@ -2793,19 +2826,45 @@ const server = http.createServer(async (req, res) => {
     if (!installer) return send(400, { error: '未知模型: ' + engine + '（支持 ' + Object.keys(INSTALLERS).join(' / ') + '）' });
     if (installLock.active) return send(409, { error: '已有安装任务进行中，请稍后再试' });
     installLock.active = true;
+    installLock.startedAt = Date.now();
+    installLock.lastActivity = Date.now();
     res.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8' });
     res.flushHeaders();
-    const ctx = { nd: (obj) => { try { res.write(JSON.stringify(obj) + '\n'); } catch (e) {} } };
+    // 062 P3：安装留底到 <数据根>/logs/install-<engine>.log（跳过 800ms 高频 progress，避免刷爆文件）；
+    // ctx.nd 同时镜像 HTTP 流 + 刷新锁活动时间（062 P1 看门狗据此判卡死）。
+    let installLogStream = null;
+    try {
+      const installLogDir = path.join(DATA_DIR, 'logs');
+      mkdirSync(installLogDir, { recursive: true });
+      installLogStream = fs.createWriteStream(path.join(installLogDir, `install-${engine}.log`), { flags: 'a' });
+    } catch {}
+    const ctx = { nd: (obj) => {
+      installLock.lastActivity = Date.now();
+      const line = JSON.stringify(obj) + '\n';
+      try { res.write(line); } catch (e) {}
+      if (obj.type !== 'progress' && installLogStream) {
+        try { installLogStream.write(`[${new Date().toLocaleTimeString()}] ${obj.message !== undefined ? obj.message : obj.type}\n`); } catch (e) {}
+      }
+    } };
     // 2026-09-05 修复：客户端断开（页面关闭/切走/超时中止 fetch）时自动取消安装并释放锁——
     // 否则 installer 可能继续跑（下载器不因连接断开而停），installLock 一直占用 → 后续安装全部 409
     // （实测：逐引擎安装时 whisper 首次点"补齐"直接 409，重启服务才恢复）。
-    log('开始安装 ' + engine + (mirror ? '（源：' + mirror + '）' : '（自动切换源）'));
+    // 062 P1 加固：断开后另起 20s 兜底定时器——installer 若忽略取消迟迟不结束，强制杀进程并复位锁，杜绝死锁到重启。
+    log('开始安装 ' + engine + (mirror ? '（源：' + mirror + '）' : '（自动切换源）') + '，留底日志 logs/install-' + engine + '.log');
+    let forceReleaseTimer = null;
     const onClientGone = () => {
-      if (!res.writableEnded) {
-        log('⚠️ 安装客户端连接已断开（engine=' + engine + '），自动取消安装以释放锁…');
-        ACTIVE_DOWNLOAD.cancelled = true;
-        if (ACTIVE_DOWNLOAD.proc) { try { ACTIVE_DOWNLOAD.proc.kill(); } catch {} }
-      }
+      if (res.writableEnded) return;
+      log('⚠️ 安装客户端连接已断开（engine=' + engine + '），自动取消安装以释放锁…');
+      ACTIVE_DOWNLOAD.cancelled = true;
+      if (ACTIVE_DOWNLOAD.proc) { try { ACTIVE_DOWNLOAD.proc.kill(); } catch {} }
+      forceReleaseTimer = setTimeout(() => {
+        if (installLock.active) {
+          log('⚠️ 客户端断开后 installer 仍未结束（engine=' + engine + '），强制释放安装锁…');
+          ACTIVE_DOWNLOAD.cancelled = true;
+          if (ACTIVE_DOWNLOAD.proc) { try { ACTIVE_DOWNLOAD.proc.kill(); } catch {} }
+          installLock.active = false;
+        }
+      }, 20_000);
     };
     res.on('close', onClientGone);
     try {
@@ -2816,7 +2875,9 @@ const server = http.createServer(async (req, res) => {
       ctx.nd({ type: 'error', message: String((e && e.message) || e) });
     } finally {
       res.removeListener('close', onClientGone);
+      if (forceReleaseTimer) clearTimeout(forceReleaseTimer);
       installLock.active = false;
+      if (installLogStream) { try { installLogStream.end(); } catch (e2) {} }
       try { res.end(); } catch (e2) {}
     }
     return;
