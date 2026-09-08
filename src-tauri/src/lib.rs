@@ -821,7 +821,14 @@ fn npm_cli_js(node_exe: &str) -> std::path::PathBuf {
     // 仅 Windows 官方 zip 布局成立；macOS nvm/官方 tar/homebrew 的 npm 在 <prefix>/lib/node_modules/npm
     // （bin/npm 是指向它的符号链接）→ 点「安装 Node」在 npm 启动前就报"未找到 npm"。
     // 修复：1) 同级 node_modules 2) bin/npm 符号链接解析 3) 自可执行向上 3 级找 lib|libexec/lib/node_modules/npm。
-    let exe = fs::canonicalize(node_exe).unwrap_or_else(|_| PathBuf::from(node_exe));
+    // ⚠️ Win 追加（2026-09-08 阶段4 实测定位）：fs::canonicalize 在 Windows 返回 \\?\ 前缀的 verbatim 路径，
+    // 把它当 node 主模块参数会让 node 在 realpath 阶段 lstat 盘符直接崩（EISDIR "lstat 'D:'"，秒退）——
+    // 因此 Windows 一律用未 canonicalize 的原始路径；canonicalize 仅 Unix 需要（解 bin/npm 符号链接）。
+    let exe = if std::env::consts::OS == "windows" {
+        PathBuf::from(node_exe)
+    } else {
+        fs::canonicalize(node_exe).unwrap_or_else(|_| PathBuf::from(node_exe))
+    };
     let base = exe
         .parent()
         .map(|p| p.to_path_buf())
@@ -831,9 +838,11 @@ fn npm_cli_js(node_exe: &str) -> std::path::PathBuf {
         return c1;
     }
     // Unix 官方 tar / nvm / homebrew：同目录有 bin/npm 符号链接 → 解析出真实 npm-cli.js
-    if let Ok(p) = fs::canonicalize(base.join("npm")) {
-        if p.is_file() {
-            return p;
+    if std::env::consts::OS != "windows" {
+        if let Ok(p) = fs::canonicalize(base.join("npm")) {
+            if p.is_file() {
+                return p;
+            }
         }
     }
     // 逐级上找 <prefix>/lib 或 <prefix>/libexec/lib 下的 node_modules/npm（libexec 兼容 homebrew keg 布局）
@@ -962,6 +971,25 @@ fn wait_with_timeout(c: &mut Child, secs: u64) -> Result<bool, String> {
             return Ok(false);
         }
         std::thread::sleep(std::time::Duration::from_millis(400));
+    }
+}
+
+// 同 wait_with_timeout，但能区分「超时被强杀」与「快速非零退出」，并带回退出码。
+// 返回 (是否在时限内自然退出, 退出是否成功, 退出码；超时为 (false, false, None))。
+fn wait_child_exit(c: &mut Child, secs: u64) -> Result<(bool, bool, Option<i32>), String> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        match c.try_wait() {
+            Ok(Some(st)) => return Ok((true, st.success(), st.code())),
+            Ok(None) => {}
+            Err(e) => return Err(format!("等待子进程失败：{e}")),
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = c.kill();
+            let _ = c.wait();
+            return Ok((false, false, None));
+        }
+        std::thread::sleep(Duration::from_millis(400));
     }
 }
 
@@ -1142,36 +1170,66 @@ fn ensure_npm_deps(app: &tauri::AppHandle, server_dir: &std::path::Path, node_ex
         use std::io::{BufRead, BufReader};
         let out = child.stdout.take().unwrap(); // ChildStdout
         let err = child.stderr.take().unwrap(); // ChildStderr
-        // 行转发（stdout/stderr 各起一个读线程，避免管道占满死锁）
+        // 行转发（stdout/stderr 各起一个读线程，避免管道占满死锁），同时收最近若干行；
+        // 失败时把真实输出拼进错误信息（release GUI 无控制台，必须带回 UI 才能定位）。
+        let tail: Arc<Mutex<std::collections::VecDeque<String>>> = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+        let capture = {
+            let tail = Arc::clone(&tail);
+            move |line: String| {
+                let mut t = tail.lock().unwrap();
+                if t.len() >= 25 { t.pop_front(); }
+                t.push_back(line);
+            }
+        };
         {
             let app2 = app.clone();
-            let stream = out; // ChildStdout
+            let capture = capture.clone();
             std::thread::spawn(move || {
-                for line in BufReader::new(stream).lines() {
+                for line in BufReader::new(out).lines() {
                     let Ok(l) = line else { break };
                     let l = l.trim();
                     if l.is_empty() { continue; }
+                    capture(l.to_string());
                     emit_progress(&app2, "deps", &l, None);
                 }
             });
         }
         {
             let app2 = app.clone();
-            let stream = err; // ChildStderr
+            let capture = capture;
             std::thread::spawn(move || {
-                for line in BufReader::new(stream).lines() {
+                for line in BufReader::new(err).lines() {
                     let Ok(l) = line else { break };
                     let l = l.trim();
                     if l.is_empty() { continue; }
+                    capture(l.to_string());
                     eprintln!("[npm] {l}");
                     emit_progress(&app2, "deps", &l, None);
                 }
             });
         }
-        let mut c = child;
-        let ok = wait_with_timeout(&mut c, timeout_secs)?;
-        if !ok { return Err(format!("npm 命令超时或失败，已终止（{} 秒）", timeout_secs)); }
-        Ok(())
+        let started = std::time::Instant::now();
+        let (exited, ok, code) = wait_child_exit(&mut child, timeout_secs)?;
+        let used_secs = started.elapsed().as_secs();
+        if ok { return Ok(()); }
+        // 子进程已退出但读线程可能还没把管道末尾几行收完 → 稍等片刻再取 tail
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let detail = {
+            let t = tail.lock().unwrap();
+            let v: Vec<String> = t.iter().cloned().collect();
+            v.join("\n")
+        };
+        let label = args[0];
+        let head = if exited {
+            format!(
+                "npm {label} 失败（用时约 {used_secs} 秒，退出码 {}）",
+                code.map(|c| c.to_string()).unwrap_or_else(|| "?".to_string())
+            )
+        } else {
+            format!("npm {label} 超过 {timeout_secs} 秒无响应，已强制终止")
+        };
+        let body = if detail.is_empty() { "（无任何输出）".to_string() } else { detail };
+        Err(format!("{head}。\n{body}"))
     };
 
     emit_progress(app, "deps", "安装服务端依赖（npm ci，首次需数分钟）…", None);
