@@ -29,7 +29,7 @@ const ASR_ENGINE = (process.env.ASR_ENGINE || 'auto').toLowerCase(); // auto | s
 const ASR_WHISPER_LANG = (process.env.ASR_WHISPER_LANG || '').toLowerCase().trim();
 // asr-server 架构版本：2.x = 含 sensevoice-original + VAD + 标点。
 // 供 start-all.js 探测时判断 9528 上是否旧进程（旧代码无此字段/不同版本 → 视为残留，终止后重启）。
-const SERVER_VERSION = '2.10.6'; // 2.4.0 = S4：cosyvoice-clone 全自举链；2.5.0 = S5：缺失权重自动下载；2.6.0 = S7：安全加固（仅本机回环 + 入站鉴权）；2.7.0 = S8：sensevoice-original 模型下载闭环（二段式安装器：venv + 模型三件套）；2.8.0 = S9：056 Whisper 补齐安装器 + glob 检查跨平台修复（坑 U）+ mac site-packages 路径修复（坑 W）；2.9.0 = S10：Whisper 引擎换 sherpa-onnx（fp32 全精度 + 语言自动检测；与 SenseVoice 共用一套原生运行时，根治 onnxruntime-node DLL 冲突）；2.10.0 = S11：Whisper 指定语言配置（?lang= / ASR_WHISPER_LANG / 按语言识别器 Map 缓存 LRU≤3，非法语言回退自动检测不崩）；2.10.1 = S12：引擎就绪判定与启动器同口径（受管 venv 优先、代码目录 .venv-* 回退），修复 034 前旧位置 venv 能跑却报「环境缺失」；2.10.2 = S6′ 版本刷新验证用：内置 .version 指纹轮换 → 驱动物化目录「整目录重建」机制实测（代码无行为变化）；2.10.3 = Win 阶段4 实测修复：engineReadiness 补 vendored Matcha-TTS matcha/models 就绪缺口（此前误报 ready、卡片无「检测/修复」按钮、8003 启动即崩 No module named 'matcha.models'）；2.10.4 = jsdelivr matcha/models 清单前导斜杠修复（flat 清单 name 带 '/'，此前补拉恒空中止）；2.10.5 = 062：安装锁自愈（活动时间戳+看门狗+断开 20s 兜底释放）+ 子进程 utf-8/gbk 解码 + 安装日志留底 logs/install-&lt;engine&gt;.log；2.10.6 = 063：升级免重装（物化保留 node_modules + matcha/models 进模板 + 老 venv home 自愈）
+const SERVER_VERSION = '2.10.8'; // 2.4.0 = S4：cosyvoice-clone 全自举链；2.5.0 = S5：缺失权重自动下载；2.6.0 = S7：安全加固（仅本机回环 + 入站鉴权）；2.7.0 = S8：sensevoice-original 模型下载闭环（二段式安装器：venv + 模型三件套）；2.8.0 = S9：056 Whisper 补齐安装器 + glob 检查跨平台修复（坑 U）+ mac site-packages 路径修复（坑 W）；2.9.0 = S10：Whisper 引擎换 sherpa-onnx（fp32 全精度 + 语言自动检测；与 SenseVoice 共用一套原生运行时，根治 onnxruntime-node DLL 冲突）；2.10.0 = S11：Whisper 指定语言配置（?lang= / ASR_WHISPER_LANG / 按语言识别器 Map 缓存 LRU≤3，非法语言回退自动检测不崩）；2.10.1 = S12：引擎就绪判定与启动器同口径（受管 venv 优先、代码目录 .venv-* 回退），修复 034 前旧位置 venv 能跑却报「环境缺失」；2.10.2 = S6′ 版本刷新验证用：内置 .version 指纹轮换 → 驱动物化目录「整目录重建」机制实测（代码无行为变化）；2.10.3 = Win 阶段4 实测修复：engineReadiness 补 vendored Matcha-TTS matcha/models 就绪缺口（此前误报 ready、卡片无「检测/修复」按钮、8003 启动即崩 No module named 'matcha.models'）；2.10.4 = jsdelivr matcha/models 清单前导斜杠修复（flat 清单 name 带 '/'，此前补拉恒空中止）；2.10.5 = 062：安装锁自愈（活动时间戳+看门狗+断开 20s 兜底释放）+ 子进程 utf-8/gbk 解码 + 安装日志留底 logs/install-&lt;engine&gt;.log；2.10.6 = 063：升级免重装（物化保留 node_modules + matcha/models 进模板 + 老 venv home 自愈）；2.10.7 = engineReadiness 探测 venv python 可启动性：旧 uv 遗留 trampoline 无法自愈时如实报缺环境出「检测/修复」；2.10.8 = 安装器就绪判定同步要求 python 可启动：探测为坏时「检测/修复」真正重建 venv
 // 031 跨平台：Win venv 可执行在 Scripts/ 而非 bin/（engineReadiness 的 runtime 检查据此判定）
 const IS_WIN = process.platform === 'win32';
 // 034 阶段3：uv 自举的受管 venv 落数据目录 venvs/（032 L3），引擎清单的 runtime.path 按此双位置判定：
@@ -1206,6 +1206,18 @@ async function engineReadiness(mf) {
       missingRuntime.push({ kind: '缺失', label: 'Matcha-TTS matcha/models 源码缺口（点「检测/修复」自动补齐）' });
     }
   }
+  // 063 补充：关键包齐全但服务未在跑时，探测 venv python 是否真实可启动。
+  // 老版本 uv 的 venv trampoline 无法靠配置改写自愈，只能重建 → 如实报缺环境并给出「检测/修复」入口。
+  if (!missingRuntime.length && !missingFiles.length && !serviceUp) {
+    const venvEntry = (mf.runtime || []).find((r) => r.kind === 'path' && (r.path.split(/[\\/]/)[0] || '').startsWith('.venv'));
+    if (venvEntry) {
+      const vn = venvEntry.path.split(/[\\/]/)[0];
+      const keyPkg = VENV_KEY_PKG[mf.id];
+      if (keyPkg && venvKeyPkgOk(vn, keyPkg) && !(await venvPythonSpawns(vn))) {
+        missingRuntime.push({ kind: '缺失', label: `${vn} 的 Python 无法启动（旧版 uv 遗留启动器），点「检测/修复」重建环境` });
+      }
+    }
+  }
   const state = missingRuntime.length
     ? (missingFiles.length ? 'incomplete' : 'missing-runtime')
     : missingFiles.length ? 'partial-files'
@@ -1673,6 +1685,25 @@ function venvPkgPresent(name, pkg) {
     return readdirSync(sp).some((x) => x.startsWith(pkg + '-') && x.endsWith('.dist-info'));
   } catch { return false; }
 }
+// venv 的 python 是否真实可启动（spawn -c pass，5s 超时）。
+// 063 补充：老版本 uv 创建的 venv（Scripts/python.exe 为旧 trampoline）指向已清理的别名目录后
+// 无法靠改写 pyvenv.cfg 自愈，只能重建——engineReadiness 探测到后把卡片打成「缺环境」出「检测/修复」，
+// 避免停在"就绪·未运行"却无任何可操作按钮（2026-09-09 funasr 实测）。
+function venvPythonSpawns(name) {
+  const py = venvPyOf(name);
+  if (!existsSync(py)) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    let done = false;
+    let p = null;
+    const finish = (v) => { if (done) return; done = true; clearTimeout(timer); resolve(v); };
+    const timer = setTimeout(() => { try { p && p.kill(); } catch {} finish(false); }, 5000);
+    try {
+      p = spawn(py, ['-c', 'pass'], { stdio: 'ignore' });
+      p.on('error', () => finish(false));
+      p.on('exit', (code) => finish(code === 0));
+    } catch { clearTimeout(timer); finish(false); }
+  });
+}
 // ---------- 035 阶段：N 卡机器上 torch 是否 CPU 版（无 CUDA 加速）→ 引导升级 ----------
 // 本机是否有 NVIDIA GPU：nvidia-smi 可执行即视为有（模块加载时探测一次，缓存）
 const HAS_NVIDIA = (() => {
@@ -1786,7 +1817,8 @@ function torchIsCpuOnly(venvName) {
 //    已装口味与选择不符时 = 换装（CPU→CUDA 走 wheel 链；CUDA→CPU 走 PyPI 重装），模型文件不受影响。
 function uvVenvInstaller({ name, pkgs, lockRel, keyPkg, label, estGB }) {
   return async (ctx, opts = {}) => {
-    const ready = venvKeyPkgOk(name, keyPkg);
+    // 063 ⑤：就绪还须 python 真实可启动——旧 uv trampoline 关键包齐全但 spawn 失败 → 视为不完整，走重建
+    const ready = venvKeyPkgOk(name, keyPkg) && (await venvPythonSpawns(name));
     const tag = torchBuildTag(name);                     // '2.x.x+cpu' / '2.x.x+cu128' / null（未装/损坏）
     const isCuda = !!(tag && /[+]cu\d/.test(tag));
     const choice = String(opts.torch || 'auto').toLowerCase();
@@ -2273,7 +2305,8 @@ const INSTALLERS = {
     // 依赖明明装好（torch 已在）仍报"缺 torch"（2026-09-05 mac 实测）。代码目录旧 venv 属遗留，不再作为创建目标。
     const venvDir = venvDirOf('.venv-cosyvoice');
     const venvPy = venvPyOf('.venv-cosyvoice');
-    if (!venvKeyPkgOk('.venv-cosyvoice', 'torch')) {
+    // 063 ⑤：torch 包在但 python 起不来（旧 uv trampoline）同样要重建
+    if (!(venvKeyPkgOk('.venv-cosyvoice', 'torch') && (await venvPythonSpawns('.venv-cosyvoice')))) {
       // 034：优先 uv（受管 CPython）建引擎环境；uv 未装 → 明确提示先装全局 Python 基础
       ctx.nd({ type: 'log', message: '.venv-cosyvoice 缺失/不完整 → 用 uv 创建并安装锁定依赖（含 torch，较大，首次约几分钟）…' });
       if (!existsSync(UV_EXE)) {
