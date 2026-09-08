@@ -1093,18 +1093,86 @@ fn venv_python_py(venv_dir: &std::path::Path) -> std::path::PathBuf {
     else { venv_dir.join("bin").join("python3") }
 }
 
+// 目录内容递归复制（符号链接/文件统一按文件复制目标内容；python 运行时无空链接）
+fn copy_dir_contents(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    let entries = fs::read_dir(src).map_err(|e| format!("读取 {} 失败：{e}", src.display()))?;
+    for entry in entries.flatten() {
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        let ft = entry.file_type().map_err(|e| format!("stat {} 失败：{e}", from.display()))?;
+        if ft.is_dir() {
+            fs::create_dir_all(&to).map_err(|e| format!("创建目录 {} 失败：{e}", to.display()))?;
+            copy_dir_contents(&from, &to)?;
+        } else {
+            fs::copy(&from, &to).map_err(|e| format!("复制 {} → {} 失败：{e}", from.display(), to.display()))?;
+        }
+    }
+    Ok(())
+}
+
+// Windows 受管 CPython 的版本别名目录是否为 reparse 链接（符号链接/联接）。
+// 此类链接若在管理员上下文创建，普通权限的 App/uv 穿不过去 → uv.exe 报
+// "untrusted mount point (os error 44)"，引擎 venv 的 uv trampoline 同样起不来。
+#[cfg(windows)]
+fn is_reparse_dir(p: &std::path::Path) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    // FILE_ATTRIBUTE_REPARSE_POINT = 0x400；symlink_metadata 不跟随，能取到链接自身属性
+    if let Ok(md) = fs::symlink_metadata(p) {
+        return md.file_attributes() & 0x400 != 0;
+    }
+    false
+}
+#[cfg(not(windows))]
+fn is_reparse_dir(_p: &std::path::Path) -> bool {
+    false
+}
+
+// 归一化受管 CPython 的别名链接：删除链接本身（RemoveDirectory 只删 reparse 链接，
+// 不删目标），优先把真实目标目录复制到原位置；无法解析目标时留空，交由 uv python install 重建。
+// 幂等：无非 reparse 的 cpython-3.11* 目录时直接返回。
+fn normalize_python_base_symlinks(app: &tauri::AppHandle, py_home: &std::path::Path) -> Result<(), String> {
+    if !py_home.is_dir() { return Ok(()); }
+    let entries = match fs::read_dir(py_home) {
+        Ok(e) => e,
+        Err(_) => return Ok(()),
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) else { continue };
+        if !name.starts_with("cpython-3.11") || !is_reparse_dir(&p) { continue; }
+        let target = fs::canonicalize(&p).ok();
+        match &target {
+            Some(t) => emit_progress(app, "py", &format!("受管 CPython 别名目录是符号链接（{} → {}），归一化为真实目录…", p.display(), t.display()), None),
+            None => emit_progress(app, "py", &format!("受管 CPython 别名目录是符号链接且无法解析（{}），删除后由 uv 重建…", p.display()), None),
+        }
+        fs::remove_dir(&p).map_err(|e| format!("删除符号链接 {} 失败：{e}", p.display()))?;
+        if let Some(t) = target {
+            if t.is_dir() {
+                fs::create_dir_all(&p).map_err(|e| format!("创建 {} 失败：{e}", p.display()))?;
+                copy_dir_contents(&t, &p)?;
+                emit_progress(app, "py", &format!("已归一化为真实目录：{} ✓", p.display()), None);
+            }
+        }
+    }
+    Ok(())
+}
+
 // ---------- 034 阶段3：受管 python 基础环境自举（uv + CPython 3.11） ----------
 // 全局「安装 Python 环境」按钮只做这一层（~100MB，小流量）：
 //   下载 uv → uv python install 3.11（受管 CPython，UV_PYTHON_INSTALL_DIR=数据目录，不碰系统 python）
 // 引擎 venv（qwen3/funasr/cosyvoice 各自依赖，含 torch 大流量）在【模型管理页】对应卡片安装，
 // 不在这里 —— 与「py 环境是 py 环境、模型是模型环境」的分层一致。
 async fn ensure_python_base(app: &tauri::AppHandle, data_root: &std::path::Path) -> Result<(), String> {
+    let py_home = data_root.join("runtime").join("python");
+    // 2026-09-08 Win 实测：管理员上下文创建的 CPython 别名符号链接会让普通权限的 App/uv 报
+    // "untrusted mount point (os error 44)"（uv venv/引擎 venv trampoline 全部失败）。每次点
+    // 「安装 Python 基础」先做一次归一化（已就绪也执行，无链接则秒过）。
+    normalize_python_base_symlinks(app, &py_home)?;
     let (uv_ready, py311_ready) = python_base_status(data_root);
     if uv_ready && py311_ready {
         emit_progress(app, "py", "受管 Python 基础已就绪（uv + CPython 3.11）✓", Some(100));
         return Ok(());
     }
-    let py_home = data_root.join("runtime").join("python");
     fs::create_dir_all(&py_home).map_err(|e| format!("无法创建 python 目录：{e}"))?;
 
     // 1) uv 二进制
@@ -2344,6 +2412,15 @@ pub fn run() {
             migrate_legacy_library(&handle);
             // 加载 asr-server 路径配置到 state
             *state.server_path.lock().unwrap() = load_config(&handle).server_path;
+            // 034 受管 CPython 归一化（Win 2026-09-08 实测）：管理员上下文创建的版本别名符号链接
+            // 会让普通权限的 uv/引擎 venv trampoline 报 "untrusted mount point (os error 44)"。
+            // 启动时自动修复（幂等：无非 reparse 的 cpython-3.11* 目录则秒过），不依赖任何 UI 按钮。
+            {
+                let py_home = data_root(&handle).join("runtime").join("python");
+                if let Err(e) = normalize_python_base_symlinks(&handle, &py_home) {
+                    eprintln!("[opensound] 受管 CPython 符号链接归一化失败: {e}");
+                }
+            }
             // 032 运行时预检（P2 拍板：启动只检测、不自动安装）：
             // 环境就绪（node + 依赖）→ 直接启动服务；不完整 → 不装任何东西，
             // 等用户在 UI 引导条点「一键安装」才执行（install_runtime）。
