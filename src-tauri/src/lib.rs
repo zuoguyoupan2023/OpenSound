@@ -1093,23 +1093,6 @@ fn venv_python_py(venv_dir: &std::path::Path) -> std::path::PathBuf {
     else { venv_dir.join("bin").join("python3") }
 }
 
-// 目录内容递归复制（符号链接/文件统一按文件复制目标内容；python 运行时无空链接）
-fn copy_dir_contents(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
-    let entries = fs::read_dir(src).map_err(|e| format!("读取 {} 失败：{e}", src.display()))?;
-    for entry in entries.flatten() {
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        let ft = entry.file_type().map_err(|e| format!("stat {} 失败：{e}", from.display()))?;
-        if ft.is_dir() {
-            fs::create_dir_all(&to).map_err(|e| format!("创建目录 {} 失败：{e}", to.display()))?;
-            copy_dir_contents(&from, &to)?;
-        } else {
-            fs::copy(&from, &to).map_err(|e| format!("复制 {} → {} 失败：{e}", from.display(), to.display()))?;
-        }
-    }
-    Ok(())
-}
-
 // Windows 受管 CPython 的版本别名目录是否为 reparse 链接（符号链接/联接）。
 // 此类链接若在管理员上下文创建，普通权限的 App/uv 穿不过去 → uv.exe 报
 // "untrusted mount point (os error 44)"，引擎 venv 的 uv trampoline 同样起不来。
@@ -1127,9 +1110,71 @@ fn is_reparse_dir(_p: &std::path::Path) -> bool {
     false
 }
 
-// 归一化受管 CPython 的别名链接：删除链接本身（RemoveDirectory 只删 reparse 链接，
-// 不删目标），优先把真实目标目录复制到原位置；无法解析目标时留空，交由 uv python install 重建。
-// 幂等：无非 reparse 的 cpython-3.11* 目录时直接返回。
+// 在受管 CPython 目录里找「真实目录」（非 reparse、含 python 可执行）。
+// 063 ①：老 venv 的 pyvenv.cfg home 常指向非补丁别名（如 cpython-3.11-windows-x86_64-none），
+// 该别名可能是链接或已被清理 → 统一改指向这里返回的真实目录（uv 自己也为新 venv 写这个目录）。
+fn real_python_base(py_home: &std::path::Path) -> Option<std::path::PathBuf> {
+    if !py_home.is_dir() { return None; }
+    let mut best: Option<(std::path::PathBuf, usize)> = None; // (path, 版本字段中 '.' 数量，补丁号优先)
+    if let Ok(entries) = fs::read_dir(py_home) {
+        for e in entries.flatten() {
+            let p = e.path();
+            let Some(name) = e.file_name().to_str().map(|s| s.to_string()) else { continue };
+            if !name.starts_with("cpython-3.11") || is_reparse_dir(&p) { continue; }
+            let exe = if std::env::consts::OS == "windows" { p.join("python.exe") } else { p.join("bin").join("python3") };
+            if !exe.is_file() { continue; }
+            let ver = name.trim_start_matches("cpython-").split('-').next().unwrap_or("");
+            let dots = ver.matches('.').count();
+            if best.as_ref().map(|(_, d)| dots > *d).unwrap_or(true) { best = Some((p, dots)); }
+        }
+    }
+    best.map(|(p, _)| p)
+}
+
+// 归一化受管引擎 venv 的 pyvenv.cfg home：凡指向「不存在 / reparse 链接」路径的老 venv，
+// 改写为真实 CPython 目录（uv 发现口径同款）。幂等：home 已有效（真实目录）则不动。
+fn normalize_venv_homes(app: &tauri::AppHandle, data_root: &std::path::Path) -> Result<(), String> {
+    let Some(real) = real_python_base(&data_root.join("runtime").join("python")) else { return Ok(()); };
+    let venvs_dir = data_root.join("venvs");
+    if !venvs_dir.is_dir() { return Ok(()); }
+    let real_str = real.to_string_lossy().into_owned();
+    let entries = match fs::read_dir(&venvs_dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(()),
+    };
+    for entry in entries.flatten() {
+        let d = entry.path();
+        let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) else { continue };
+        if !name.starts_with(".venv-") || !d.is_dir() { continue; }
+        let cfg = d.join("pyvenv.cfg");
+        let Ok(text) = fs::read_to_string(&cfg) else { continue };
+        let mut changed = false;
+        let mut out = String::new();
+        for line in text.lines() {
+            let trimmed = line.trim_start();
+            if let Some(rest) = trimmed.strip_prefix("home =") {
+                let home = rest.trim();
+                let home_path = std::path::PathBuf::from(home);
+                if !home_path.is_dir() || is_reparse_dir(&home_path) {
+                    out.push_str(&format!("home = {}\n", real_str));
+                    changed = true;
+                    continue;
+                }
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
+        if changed {
+            emit_progress(app, "py", &format!("{}: pyvenv.cfg home 指向缺失/链接路径 → 改写为真实 CPython（{}）", name, real_str), None);
+            fs::write(&cfg, out).map_err(|e| format!("改写 {} 失败：{e}", cfg.display()))?;
+        }
+    }
+    Ok(())
+}
+
+// 归一化受管 CPython 的别名链接：删除链接本身（RemoveDirectory 只删 reparse 链接，不删目标）。
+// 063 ①：不再复制 base 到原位置——python 服务运行时复制会撞 DLL 占用而失败，且 uv/venv 直接发现
+// 真实目录即可（老 venv 的 home 由 normalize_venv_homes 统一改写）。幂等：无非 reparse 目录则秒过。
 fn normalize_python_base_symlinks(app: &tauri::AppHandle, py_home: &std::path::Path) -> Result<(), String> {
     if !py_home.is_dir() { return Ok(()); }
     let entries = match fs::read_dir(py_home) {
@@ -1140,19 +1185,8 @@ fn normalize_python_base_symlinks(app: &tauri::AppHandle, py_home: &std::path::P
         let p = entry.path();
         let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) else { continue };
         if !name.starts_with("cpython-3.11") || !is_reparse_dir(&p) { continue; }
-        let target = fs::canonicalize(&p).ok();
-        match &target {
-            Some(t) => emit_progress(app, "py", &format!("受管 CPython 别名目录是符号链接（{} → {}），归一化为真实目录…", p.display(), t.display()), None),
-            None => emit_progress(app, "py", &format!("受管 CPython 别名目录是符号链接且无法解析（{}），删除后由 uv 重建…", p.display()), None),
-        }
+        emit_progress(app, "py", &format!("受管 CPython 别名目录是链接/联接（{}），删除（真实目录保留，由 uv 直接使用）…", p.display()), None);
         fs::remove_dir(&p).map_err(|e| format!("删除符号链接 {} 失败：{e}", p.display()))?;
-        if let Some(t) = target {
-            if t.is_dir() {
-                fs::create_dir_all(&p).map_err(|e| format!("创建 {} 失败：{e}", p.display()))?;
-                copy_dir_contents(&t, &p)?;
-                emit_progress(app, "py", &format!("已归一化为真实目录：{} ✓", p.display()), None);
-            }
-        }
     }
     Ok(())
 }
@@ -1168,6 +1202,8 @@ async fn ensure_python_base(app: &tauri::AppHandle, data_root: &std::path::Path)
     // "untrusted mount point (os error 44)"（uv venv/引擎 venv trampoline 全部失败）。每次点
     // 「安装 Python 基础」先做一次归一化（已就绪也执行，无链接则秒过）。
     normalize_python_base_symlinks(app, &py_home)?;
+    // 063 ①：老 venv 的 pyvenv.cfg home 若指向已删除/链接别名 → 改指真实 CPython（治 8002 老 venv 起不来）
+    normalize_venv_homes(app, data_root)?;
     let (uv_ready, py311_ready) = python_base_status(data_root);
     if uv_ready && py311_ready {
         emit_progress(app, "py", "受管 Python 基础已就绪（uv + CPython 3.11）✓", Some(100));
@@ -1900,6 +1936,23 @@ fn materialized_server_ready(dest: &Path, version: &str) -> bool {
             .unwrap_or(false)
 }
 
+// 063 ②：整目录重建是否保留旧 node_modules —— 仅当 package-lock.json 与内置模板一致（依赖未变）。
+#[cfg(not(debug_assertions))]
+fn lockfile_bytes(path: &std::path::Path) -> Option<Vec<u8>> {
+    let raw = fs::read(path).ok()?;
+    let mut v = raw;
+    while v.last().map_or(false, |b| b.is_ascii_whitespace()) { v.pop(); }
+    while v.first().map_or(false, |b| b.is_ascii_whitespace()) { v.remove(0); }
+    Some(v)
+}
+#[cfg(not(debug_assertions))]
+fn lockfile_unchanged(template: &Path, dest: &Path) -> bool {
+    match (lockfile_bytes(&template.join("package-lock.json")), lockfile_bytes(&dest.join("package-lock.json"))) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
 /// 定位（必要时重建）物化后的服务目录
 #[cfg(not(debug_assertions))]
 fn materialized_server_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
@@ -1916,6 +1969,16 @@ fn materialized_server_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
         return Some(dest);
     }
     eprintln!("[opensound] S6′ 物化内置 asr-server 模板 → {}（内置 v{version}）", dest.display());
+    // 063 ②：依赖未变（package-lock 一致）且已有 node_modules → 先暂移，重建后放回，
+    // 免去「每次升级都重跑 npm ci」。依赖真变了（lock 不一致）才丢弃重装。
+    let nm_backup = if dest.join("node_modules").is_dir() && lockfile_unchanged(&template, &dest) {
+        let bak = dest.with_file_name("server.nm-preserve");
+        let _ = fs::remove_dir_all(&bak);
+        match fs::rename(dest.join("node_modules"), &bak) {
+            Ok(()) => Some(bak),
+            Err(e) => { eprintln!("[opensound] node_modules 暂移失败（将整目录重建后重装）：{e}"); None }
+        }
+    } else { None };
     if dest.exists() {
         if let Err(e) = fs::remove_dir_all(&dest) {
             eprintln!("[opensound] 物化前清理旧目录失败：{e}");
@@ -1925,6 +1988,12 @@ fn materialized_server_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
     if let Err(e) = copy_dir_recursive(&template, &dest) {
         eprintln!("[opensound] 物化复制失败：{e}");
         return None;
+    }
+    if let Some(bak) = nm_backup {
+        match fs::rename(&bak, dest.join("node_modules")) {
+            Ok(()) => eprintln!("[opensound] 依赖未变，已保留旧 node_modules（跳过 npm ci）"),
+            Err(e) => { eprintln!("[opensound] node_modules 放回失败（下次启动会走 npm ci 补齐）：{e}"); let _ = fs::remove_dir_all(&bak); }
+        }
     }
     let _ = fs::write(dest.join(".version"), format!("{version}\n"));
     Some(dest)
@@ -2415,10 +2484,15 @@ pub fn run() {
             // 034 受管 CPython 归一化（Win 2026-09-08 实测）：管理员上下文创建的版本别名符号链接
             // 会让普通权限的 uv/引擎 venv trampoline 报 "untrusted mount point (os error 44)"。
             // 启动时自动修复（幂等：无非 reparse 的 cpython-3.11* 目录则秒过），不依赖任何 UI 按钮。
+            // 063 ①：同时把老 venv pyvenv.cfg 指向已删/链接别名的 home 改写为真实 CPython。
             {
-                let py_home = data_root(&handle).join("runtime").join("python");
+                let data_root = data_root(&handle);
+                let py_home = data_root.join("runtime").join("python");
                 if let Err(e) = normalize_python_base_symlinks(&handle, &py_home) {
                     eprintln!("[opensound] 受管 CPython 符号链接归一化失败: {e}");
+                }
+                if let Err(e) = normalize_venv_homes(&handle, &data_root) {
+                    eprintln!("[opensound] 受管 venv home 归一化失败: {e}");
                 }
             }
             // 032 运行时预检（P2 拍板：启动只检测、不自动安装）：
