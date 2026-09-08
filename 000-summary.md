@@ -243,6 +243,33 @@ GUI 新建音色 ──▶ 参考音频(base64) + 参考文本 ──▶ asr-ser
 - **现象③④（同批 UI）**：顶部 node/py 安装引导条**白底近白字**几乎看不见（深色主题正文近白，引导条却是浅色渐变底，`.rb-title` 继承近白）；下载/清理**二次确认固定在页面最底部**（下载区在上方时必须滚动到最底才看到按钮）；一个模型下载时**其它卡片下载按钮全部转圈**（应置灰不可点）。
   - **修复**：引导条浅色底显式深字；三类确认（下载二次确认 / 单引擎卸载 / 全局清理）改为**固定居中浮层弹窗**（遮罩点击=取消，深色主题配色）；仅正在安装的卡片显示转圈/「取消」，其余卡片按钮置灰 + hover 提示"已有模型正在安装"。
 
+### 7.9 Win 阶段 4（S6′ 单产物在 Win 上实测）踩坑汇总（2026-09-08/09，详见 062 / 063 / 001 §6·补2）
+> 全部为 Win 实测定位 + 已修复；与 mac 行为差异点见 001。条目按“现象 → 根因 → 修复/现状”记，便于日后备查。
+
+- **(a) 点「安装 Node」秒失败 `EISDIR ... lstat 'D:'`（0 秒退出）**
+  - 根因：`npm_cli_js()` 用 `fs::canonicalize(node)` 定位 npm-cli.js；**Windows 的 canonicalize 返回 `\\?\` 开头 verbatim 路径**，node 24 把它当主模块参数解析时 lstat 盘符崩（`npm_cli_js` 2026-09-08 为 mac 布局加的 canonicalize 引入的 Win 回归；mac canonicalize 得正常路径故不触发）。
+  - 修复：Windows 分支不用 canonicalize（官方 zip 布局 node/npm 同目录，直接拼原路径）；Unix 保留用于解 `bin/npm` 符号链接。
+- **(b) uv 报 `untrusted mount point (os error 44)`；引擎 venv trampoline 报 `entity not found`**
+  - 根因：受管 CPython 的“版本别名目录”（`cpython-3.11-windows-x86_64-none`）是指向真实 `.16` 目录的 **junction**；在**管理员上下文**创建后，普通权限 App/uv 穿不过 → 全部 uv 操作/老 venv trampoline 失败（同机终端手动测正常 = 终端是管理员令牌，App 不是）。
+  - 修复：启动/「安装 Python 基础」自动做归一化——删除 reparse 别名（**不再复制 base**，运行中复制会撞 DLL 占用）+ 把 venv `pyvenv.cfg home` 指向“缺失/reparse”路径的改写成真实 CPython 目录。
+- **(c) sensevoice-original(8002) 老 venv 永远起不来**（卡片一度“就绪·未运行”无按钮）
+  - 根因：`.venv-funasr` 是**旧版 uv** 建的 venv，`Scripts/python.exe` 是 45568B 旧 trampoline（新版 uv 为 262144B），按旧“别名目录”机制找 base → 别名清理后**改写配置也唤不醒，只能重建**。新装用户无此问题。
+  - 修复：`engineReadiness` 增加 venv python 可启动性探测（spawn `-c pass` 5s）；安装器就绪判定**同步**要求“关键包齐全 且 python 可启动”，否则落重建分支（`uv venv --clear`）——避免“探测说坏、安装器说好”两套判定打架。
+- **(d) cosyvoice 每次重建后“缺环境”**（vendored matcha/models 缺口）
+  - 根因：`vendor/.../Matcha-TTS/matcha/models`（8 文件）从未进内置模板 → engineReadiness 报缺 → 需联网补。
+  - 修复：8 文件 vendoring 进模板（062 的 jsdelivr 补拉保留为兜底）；另记坑：jsdelivr flat 清单文件名带前导 `/`，filter 前须 `replace(/^\/+/,'')`，否则恒空中止。
+- **(e) 连续安装撞 409「已有安装任务进行中」需手动重启**
+  - 根因：9528 内存单例安装锁只在 installer Promise settle 后复位；客户端断开只置 cancelled，installer 不响应取消则锁滞留。
+  - 修复（062 P1）：锁带活动时间戳 + 60s 看门狗（idle>15min 自动释放）+ 客户端断开 20s 兜底强制释放；结束路径统一 finally。
+- **(f) 安装/服务日志中文乱码（UI 与 asr-server.log）**
+  - 根因：Windows python 子进程默认 **GBK(cp936)** 输出，Node 按 UTF-8 读/转发 → 乱码；`asr-server.log` node(UTF-8)+python(GBK) 混编，直接读必乱。
+  - 修复（062 P2）：spawn 注入 `PYTHONUTF8=1/PYTHONIOENCODING=utf-8`（安装子进程 + start-all MANAGED_ENV）；`runCmdWithEnv` 改字节级缓冲 + 逐行 utf-8→gbk 回退解码。日志位置：`%LOCALAPPDATA%\world.opensound.local\logs\asr-server.log`；安装过程留底 `<数据根>\logs\install-<engine>.log`（062 P3）。
+- **(g) 升级/卸载重装后“又要装 node、部分引擎环境又要修”**（用户感受“逻辑奇怪”）
+  - 根因：**服务代码目录（App 数据目录 `server/`）随版本指纹整目录重建**，而 node_modules 不打进包、vendored 缺口不随模板分发 → 每次重建后要 npm ci / 联网补。**数据根（models/venvs）是持久的**，模型本身不会重下。
+  - 修复（063）：整目录重建时若 `package-lock.json` 未变则**保留旧 node_modules**（暂移-放回）；matcha/models 进模板；版本只升代码逻辑即可，依赖不变不重装。
+- **(h) 卸载/重装与“数据在哪”的正确心智**：卸载 App 清的是 App 数据目录（含物化 server 代码）；自定义数据根（config `data_dir`，如 `E:\Downloads\opensound-download`）持久保留模型/venv/音色。给用户的话术 = “重装后只需重跑一次依赖（node npm ci / 个别引擎修复），模型都在”。
+
+
 ---
 
 ## 八、启动方式
